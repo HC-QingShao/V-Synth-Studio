@@ -14,6 +14,8 @@
 | [四、前端](#四前端) | 动 `app/web-next` |
 | [五、怎么验证](#五怎么验证) | 改完必须做 |
 | [五之二、踩过的坑（速查表）](#五之二踩过的坑速查表) | **出问题时先查这里** |
+| [五之三、液态玻璃用现成的库](#五之三液态玻璃用现成的库别自己写) | 动界面材质 / 玻璃观感 |
+| [五之四、把一个外部 AI 软件嵌进来](#五之四把一个外部-ai-软件嵌进来) | 要往工作站里嵌外部 AI 项目（如自动扒谱） |
 | [六、资源库数据](#六资源库数据) | 改 `resources.json` |
 | [七、已知问题与未完成](#七已知问题与未完成) | 想知道哪里还没做完 |
 | [八、平台移植](#八平台移植) | 碰 `platform.rs` / 谈 macOS / Android |
@@ -156,13 +158,9 @@ tests/
 docs/                  THIRD-PARTY-NOTICES / FEATURES / FRONTEND / GLASS-HANDOFF / LESSONS
 ```
 
-> **启动加载画面**：`index.html` 的 `#boot`（样式内联、12 秒兜底）+ `lib/boot.ts` 揭开，
-> 规范见 `GLASS-HANDOFF` §4。
-
-> ⚠️ **目录树里这两个文件已经不存在了**：`lib/useTheme.ts`、`lib/usePerfMode.ts`。
-> 主题与「降低透明度」现在都在 `App.tsx` 里，直接喂给库的 `GlassProvider`
-> （`theme` / `transparency` 两个 prop）。`perfMode` 这个 config 字段后端有，
-> **新前端还没接**。详见 `docs/GLASS-HANDOFF.md`。
+> ⚠️ **两个都不存在了**：`lib/useTheme.ts`、`lib/usePerfMode.ts` —— 主题与透明度现在在
+> `App.tsx` 里直接喂库的 `GlassProvider`；`perfMode` 的 config 字段后端有、**前端还没接**。
+> 启动加载画面：`index.html` 的 `#boot` + `lib/boot.ts`，规范见 `GLASS-HANDOFF.md` §4。
 
 ### 路径模型（这段很重要）
 
@@ -247,26 +245,21 @@ Remove-Item Env:\GITHUB_TOKEN
 
 > ⚠️ **补齐脚本的六条实测教训**（2026-10-02 干净房间验证抓出来的，别再踩）：
 > ① **判「齐不齐」必须核对解压后的具体文件**，不能只看目录在不在 —— 半途失败的解压
->    会留下看似完整的空壳，而那要到用户点「工程转换」才现形。
-> ② 下载用 `curl.exe` + **自己写的重试循环**。`Invoke-WebRequest` 读 GitHub release
->    的大文件实测会 `Received an unexpected EOF or 0 bytes`；Windows 自带的旧 curl
->    不认 `--retry-all-errors`（报 unknown option）。
-> ③ `-Bundle` 现在会**在编译前**核对 `tools\`、`vendor\jizura\`、`app\web\index.html`
->    在不在 —— `bundle.resources` 是「源目录缺文件就静默少打包」，缺了要到用户手里才现形。
-> ④ **搬目录前先把父目录建出来**（脚本里的 `Move-Into` 就是干这个的）。`Move-Item`
->    不建中间目录，往 `app\web\vendor\jizura` 搬而 `vendor\` 不存在时报
->    `Could not find a part of the path.`，而且**目标没到位**（源倒是没了）。
->    同理：**给函数返回值的函数里，报进度要用 `Write-Host` 不能用 `Write-Output`** ——
->    后者会混进返回值，调用方拿到「提示 + 路径」拼起来的垃圾字符串。
-> ⑤ **`tools\` 里同时住着入库的源码**（`zip-assets.ps1`、`fetch-jizura-fonts.ps1`）。
->    所以补齐只能**合并**进去，不能整目录替换 —— 而 `zip-assets.ps1` **不在存档里**
->    （它就是打存档的那个），替换必删它。规则是「同名目录才先删、其余交给
->    `Move-Item -Force` 原地覆盖」。
-> ⑥ ⚠️ **`Move-Item` 的目标已存在时是「嵌套」不是「覆盖」**，连目录对目录也一样：
->    把 `_verify-hold-X\tools` 搬回已经存在的 `tools\`，得到的是 `tools\tools\`
->    （`-Force` 也拦不住）。还原临时区要**逐项搬内容**，别搬整个目录。
->    ⑤⑥ 和 ④ 同源：**别再靠肉眼审脚本** —— 这个测试脚本一共 6 次运行，抓出 4 个必然
->    踩中的 bug，其中两个只有在「`tools\*.ps1` 留在原地」的前提下才测得出来。
+>    会留下看似完整的空壳，要到用户点「工程转换」才现形。
+> ② 下载用 curl.exe + **自己写的重试循环**：`Invoke-WebRequest` 读 GitHub release 的大
+>    文件实测会 `Received an unexpected EOF or 0 bytes`；旧 curl 不认 `--retry-all-errors`。
+> ③ `-Bundle` 会**在编译前**核对 `tools\`、`vendor\jizura\`、`app\web\index.html` 在不在 ——
+>    `bundle.resources` 是「源目录缺文件就静默少打包」，缺了要到用户手里才现形。
+> ④ **搬目录前先把父目录建出来**（脚本里的 `Move-Into`）。`Move-Item` 不建中间目录，
+>    往 `app\web\vendor\jizura` 搬而 `vendor\` 不存在时报 `Could not find a part of the path.`，
+>    而且**目标没到位**（源倒是没了）。同理**给函数返回值的函数里报进度要用 `Write-Host`**，
+>    用 `Write-Output` 会混进返回值，调用方拿到「提示 + 路径」拼的垃圾字符串。
+> ⑤ **`tools\` 里同时住着入库的源码**（`zip-assets.ps1`、`fetch-jizura-fonts.ps1`），所以补齐
+>    只能**合并**进去 —— 而 `zip-assets.ps1` **不在存档里**，整目录替换必删它。
+> ⑥ ⚠️ **`Move-Item` 的目标已存在时是「嵌套」不是「覆盖」**（目录对目录也一样，`-Force`
+>    拦不住）：把 `_verify-hold-X\tools` 搬回已存在的 `tools\` 会得到 `tools\tools\`。
+>    还原临时区要**逐项搬内容**。④⑤⑥ 同源：**别再靠肉眼审脚本** —— 那个测试脚本跑 6 次
+>    抓出 4 个必然踩中的 bug，其中两个只有在「`tools\*.ps1` 留在原地」的前提下才测得出来。
 
 ### Node 只在构建期出现（别和「去 Node」搞混）
 
@@ -485,7 +478,7 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 | 图标 | `components/Icon.tsx` 是一张手写 SVG path 表。**没有图标库**（要离线），加图标往表里加 |
 | **Rust 注释里别写 `/*`** | 块注释会**嵌套**：文档注释里写 `` `app/web/js/views/*.js` `` 会让整个注释永不闭合，吞掉后面几十行，rustc 报出**29 条假错**（`prefix 'wav' is unknown`、`unterminated double quote string`）。看到成片的这类错先找「注释没闭合」，别逐个去改字符串 |
 | **大文件不能进 git** | `tools/`（288 MB）与 `app/web/vendor/jizura/`（54 MB）都已从 git 移出（`git rm --cached`），靠 `fetch-tools.ps1` 补齐。**别因为「本地看得见」就以为它们在库里** |
-| **磁盘** | C 盘很紧，临时大文件放 `H:\工作站\tmp-*` 并即时删。⚠️ **解 4.6 GB 的 runtime 包要 7.5 GB 空间**，测试默认解到 `%TEMP%`（在 C 盘）—— 实测把 C 撑到 0 字节可用，报的是 `解压失败：磁盘空间不足 (os error 112)`，**看着像解析器坏了**。真包测试用 `VSS_REAL_RUNTIME_DEST` 指到 H 盘 |
+| **磁盘** | C 盘很紧，临时大文件放 `H:\工作站\tmp-*` 并即时删。⚠️ **解 4.6 GB 的 runtime 包要 7.5 GB 空间**，默认解到 `%TEMP%`（C 盘）—— 实测把 C 撑到 0 字节，报 `解压失败：磁盘空间不足 (os error 112)`，**看着像解析器坏了**。真包测试用 `VSS_REAL_RUNTIME_DEST` 指到 H 盘 |
 | **手写 zip 解析器**（`svsep.rs`） | 只认「压缩后大小」溢出是不够的：**本地头偏移超过 4 GiB 时 `lho` 也是哨兵 `0xFFFFFFFF`**，真值同在 Zip64 扩展块里（排在两个大小之后）。漏了它 → 拿 0xFFFFFFFF 当文件位置 seek → 报 `failed to fill whole buffer`（2.7 万条里查不出来）。现在 `zip64_resolve(extra, big_size, big_off)` 两个哨兵一起处理。⚠️ 报错**必须带条目名**，否则这种错没法定位 |
 | **「打包好了」≠「装机装得上」** | 判据是**代码真去找的那几个文件**，不是「包里有一大堆文件」。`runtime_ready()` 要 `runtime/python.exe` **和** `backend/app.py`，而打包脚本第一版用 `CreateFromDirectory` 只能装一个顶层目录 → 只装了 `runtime\`，用户下完 4.5 GB 仍然起不来。改成 `ZipFile.Open` + `CreateEntryFromFile` 手工加条目（`Dirs = @('runtime','backend','bin')`）。⚠️ 用 `ZipArchiveMode` 必须**同时** `Add-Type System.IO.Compression`（`.FileSystem` 里没有这个类型） |
 | **后台跑 cargo test 会被 linker 撞** | 两个 `cargo test` 并行会抢同一个输出文件，报 `linking with link.exe failed: exit code: 1104`（**不是代码问题**）。串行跑 |
@@ -530,6 +523,110 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 
 ---
 
+## 五之四、把一个外部 AI 软件嵌进来（音轨分离的完整经验）
+
+**这一节是给「要往工作站里再塞一个外部 AI 项目」的人写的** —— 比如自动扒谱。
+音轨分离（`svsep.rs` + `server/svsep.rs` + `tools/svsep-pack.ps1` + 分离页）
+踩过的坑与设计取舍全在这儿，照着走能省几天。**先读「零、硬规矩」。**
+
+### 动手之前（半天，不许跳过）
+
+1. **先把上游跑通再动 Rust。** 在 `%TEMP%` 里手动把包解开、手动起进程、手动发一次
+   请求，直到它真的返回一轨音频。**看不懂它的入参出参就不要开始写包装。**
+2. **问一句「能不能直接用」。** 用户明说过：优先直接调用现成的，别自己重写
+   （分离用的是现成的离线引擎 UVR / RoFormer，不是自己实现的分离算法）。
+3. **列「进程 + 端口 + 路径 + 环境变量」四张清单。** 它要几个进程、监听哪个端口、
+   从哪读模型、靠哪些环境变量找东西 —— 这四样决定了后面全部设计。
+4. **先用界面画清「要什么」再动手。** 每加一个外部引擎，界面都要多出三样：
+   装没装（自检）、怎么装（带进度的下载）、怎么卸（一键删除）。少一样都要返工。
+
+### 磁盘布局：两层，别混
+
+| 放哪 | 内容 | 谁写 |
+|---|---|---|
+| `<root>/app/data/svsep/`（**也可能不可写**） | `runtime/`（python.exe 与 site-packages）、`backend/*.py`、`bin/ffmpeg.exe` | **随包**，只读 |
+| 可写目录（绿色版 = `app/data/`，安装版 = `%APPDATA%`） | `models/`、运行期 `data/ logs/ outputs/ uploads/`、下载中的 `.part` | **按需下载**与运行产生 |
+
+依据是 `app/desktop/src/svsep.rs` 的 `Bundle`（`models` / `runtime` 两种）。
+⚠️ **子进程的「运行目录」（cwd）必须是那个 svsep 根**：`backend/config.py:12` 是
+`BASE_DIR = Path(__file__).resolve().parent.parent`，一切相对路径都挂在它身上。
+⚠️ 可写目录不是 `.exe` 所在目录 —— 见第二节「路径模型」。
+
+### 改上游要小到极致
+
+| 需求 | 做法 | 为什么不用另一条路 |
+|---|---|---|
+| 让引擎认磁盘 | **加一个环境变量覆盖**（`VSS_SVSEP_*`），别改它的硬编码常量 | 软链接 / junction 要提权，且目标不存在时建不出来。一个变量就解决 |
+| 出参改形状 | **别改后端**。工作站只做多部分表单转发，不拆包也不重打 | 前端已按上游的字段名拼好；自己拆开再拼要处理文件名转义与大文件缓冲 |
+| 加认证 | **不加**。只监听 127.0.0.1 + 固定端口 | 上游自己的 `port_bind.py` 够用；加 auth 既改上游又改前端 |
+
+### 打包：包里的东西必须等于「代码真会去找的东西」
+
+- 两个包：**runtime**（python 3.11 + CUDA 版 torch）与 **models**（模型 + 索引）。
+  分开发 —— 「只想换模型」和「重装运行时」是两件事，用户网慢时也能分开下。
+- ★ **判据不是「包里文件挺多」，是「`runtime/python.exe` 和 `backend/app.py` 在不在」。**
+  引擎还要 `bin/ffmpeg.exe`：`backend/config.py:54-66` 的 `_ensure_ffmpeg_on_path()`
+  把 `BASE_DIR/bin` 或 `BASE_DIR/runtime` 塞进 PATH。
+  第一版用 `CreateFromDirectory` 打**只能有一个顶层目录**，结果只装了 `runtime\` ——
+  用户下完 4.5 GB 还是起不来。改成 `ZipFile.Open` + `CreateEntryFromFile` 手工加
+  `Dirs = @('runtime','backend','bin')`（`tools/svsep-pack.ps1`）。
+- 包打出来后**立刻点名断言**那三个文件，每次改打包脚本都重跑一次解压测试。
+
+### 下载 / 解压：一条管子
+
+一条代码路径（`fetch_bundle`）里同时做完**下载 + 解压 + 进度 + 暂停 + 续传**：
+
+- **顺序是判据**：`fetch_bundle` 在拉数据**之前**先回调一次 `on_progress(already, total)`；
+  续传的第一次回调必须是 `(已有字节, 整包)`。没带 Range 时第一次是 `(0, 整包)` ——
+  这条断言能一眼看出「到底续上了没」。
+- 服务端回 **206 才追加、200 就归零**（有的静态服务器不认 `Range`，回 200 整包，
+  那时接着追加就会拼出坏 zip）。用 `tmp-rangesrv.mjs` 那种本地 Range 服务器验。
+- **暂停留 `.part`、停止删 `.part`**；zip 要存在 `.part` 而不是直接 `.zip`，
+  否则「下到一半点了分离」会被 `models_status()` 当成完整包。
+- ★ **续传点记在盘上（`.part` 旁边的 `.part.url`），别只记在内存。** 内存里的记号
+  一重启就没了 —— 磁盘上躺着 4 GB 的半个包，界面却说「没下过」，用户一点就从零开始。
+  第一版就是这么错的。
+- **为什么必须记链接**：换了下载服务器后，拿旧半个包接新链接的 `Range`，会拼出
+  「旧包前半段 + 新包后半段」的坏 zip，**要到解压才炸**，看着像解析器坏了。
+- 判「能不能续」分三种（`stored_resume`）：**没有 `.part` → 不能**；
+  **有 `.part` 没记号 → 能**（记号的用处是「证明这半个包属于哪个链接」，缺失不该让几个 GB 报废）；
+  **记号在且写着别的链接 → 不能**。
+- **超时要单独给**：大包按小时算，默认 30 秒超时会在几小时处断开、白下。
+- 进度回调**限流**（约每 32 MB / 每半秒一次），否则几万次回调能把渲染队列打满。
+- 解压要自己写 zip 解析器（只有 `flate2`，**没有 `zip` crate**）。⚠️ Zip64 的坑见
+  「五之二」：`csize` 与 **`lho`** 都可能是 `0xFFFFFFFF` 哨兵，且**报错必须带条目名**。
+- **删依赖逐文件 `remove_file`，绝不用 `remove_dir_all`**：几万个文件里总有被占用的，
+  一个失败就全放弃最糟。删不掉的收进 `locked[]`（最多 8 条）返回，界面告诉用户
+  「关掉占用的程序再删」。只删 `models/`、`runtime/`、`bin/` —— **别碰 `backend/` 的 .py**。
+
+### 子进程：它必须跟着主进程一起死
+
+- 正常退出靠 `impl Drop`，**强杀靠不住** —— 任务管理器结束进程时 `Drop` 不跑，
+  留下孤儿 `python.exe` 继续监听端口、占几 GB 内存，用户看到「关掉了风扇还转」。
+- 兜底是 Windows **作业对象**（`svsep.rs` 的 `job` 模块）：`CreateJobObjectW` +
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` + `AssignProcessToJobObject`，
+  **句柄故意不关**（存 `OnceLock`）—— 进程一死句柄被内核回收，作业里的子进程一起死。
+- 起进程、等它就绪（轮询健康接口）、转发请求、退出收尸 —— 四步都要有超时与明确报错，
+  别让界面永远转圈。
+
+### 验证清单
+
+1. `cargo test --bins`（含 `zip64_resolve` 的组合单测、删除依赖的文件数断言）。
+2. **真包解压测试**：跑完点名那三个文件，并抽查一个**偏移超 4 GiB** 的条目。
+3. **HTTP 层实测**（临时安装 + 测试端口）：暂停 → 看 `.part` 大小 → **重启进程** →
+   状态里 `resumable` 仍为 true → 继续下载 → 起始字节正是暂停点。
+4. **强杀进程**：任务管理器结束工作站，确认 `python.exe` 也死了。
+5. 前端 `next-smoke.mjs` 逐页冒烟 + `tests/contract/verify.mjs` 契约测试。
+
+### 别重走的死路
+
+**软链接省布局**（要提权、目标不存在时建不出来，用环境变量覆盖）；
+**多线程分块下载**（实测瓶颈在出口带宽 —— 四条并行连接总量不变，单条只有 0.11~0.18 MB/s）；
+**用「文件数」判装没装**（看代码真去找的那几个文件）；
+**把 `(os error 112)` 当解析器 bug**（那是磁盘满 —— 见「五之二」磁盘那条）。
+
+---
+
 ## 六、资源库数据（`app/data/resources.json`）
 
 前端资源库**唯一的数据源**，当前 4 个分组 / 27 条。字段含义看文件本身（自解释），
@@ -547,9 +644,7 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 3. **`desc` 必须写实际价值**（对翻调工作流的用处），不写「这是一个音乐网站」这类空话。
    宁缺毋滥：校验不过的条目直接删，宁可 15 条真的，不要 30 条假的；**不伪造状态**。
 
-商业产品**一个公司一条**（收了 CeVIO 就不再单列 KAFU），开源/免费项目**有一个收一个**。
-历史：2026-09 按「收录太多了」的反馈从 7 组 121 条精简到 4 组 27 条
-（来源清单见 `git log --all -- app/data/resources.json`）。
+商业产品**一个公司一条**（收了 CeVIO 就不再单列 KAFU），开源/免费项目**有一个收一个**。git log --all -- app/data/resources.json 里有 2026-09 从 7 组 121 条精简到 4 组 27 条的过程。
 
 ---
 
@@ -568,90 +663,36 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 
 ### 打包：CI 出 MSI，真机装过、验证通过
 
-**2026-10-02**：`build.ps1 -Release -Bundle` 与 CI 工作流都通了 ——
-`.github/workflows/build-msi.yml` 打版本 tag（`v[0-9]*`）就自动出 MSI 并传 Release。
-成品是 `V-Synth-Studio_1.2.0_x64_zh-CN.msi`（182.85 MB），在 Release `v1.2.0` 上，
-**可以直接发给别人装**：<https://github.com/QingMu39-Gao/V-Synth-Studio/releases/latest>
+**2026-10-02**：`build.ps1 -Release -Bundle` 与 CI 都通了 —— 打版本 tag（`v[0-9]*`）就由
+`.github/workflows/build-msi.yml` 自动出 MSI 并传 Release。成品
+`V-Synth-Studio_1.2.0_x64_zh-CN.msi`（182.85 MB）在 <https://github.com/QingMu39-Gao/V-Synth-Studio/releases/latest>
+上，**可以直接发给别人装**。
 
-程序靠 `main.rs::resolve_paths()` **往上找 `app/web/index.html`** 定位根目录，
-它假定的是「绿色版」布局：
+`tauri.conf.json` 的 4 条映射**写什么就落在哪（相对 INSTALLDIR）**：`../../app/web` →
+`app/web`、`../../app/data/{resources,pinyin}.json` → 同名、`../../tools` → `tools`。
 
-```
-<根目录>/
-  app/web/          ← 界面（Rust 内嵌服务从磁盘读，不是打包进 exe 的）
-  app/data/         ← 配置、资源库、拼音词典
-  tools/            ← ffmpeg 201 MB + LibreSVIP 70 MB + yt-dlp 17 MB
-```
-
-`tauri.conf.json` 现在有 4 条映射，**映射键写什么就落在哪（相对 INSTALLDIR）**：
-
-```jsonc
-"../../app/web"                 → "app/web"
-"../../app/data/resources.json" → "app/data/resources.json"
-"../../app/data/pinyin.json"    → "app/data/pinyin.json"
-"../../tools"                   → "tools"
-```
-
-> ✅ **2026-10-02 用 MSI 表核实过了：装出来的就是上面那个布局，`resolve_paths()` 天然适配。**
-> 把 Release `v1.2.0` 那个 MSI 的 `Directory` / `Component` / `File` 三张表读出来
-> （Windows Installer COM，**不用真安装**）：
+> ✅ **2026-10-02 读 Release `v1.2.0` 的 MSI 表核实过（不用真安装）：装出来就是上面那个布局。**
+> `C:\Program Files\V-Synth-Studio\` 下直属子目录只有 `app\` 与 `tools\`；resolve_paths 找的
+> 哨兵 `app\web\index.html`、`app\data\*.json`、`tools\{ffmpeg\bin\ffmpeg.exe,ffprobe.exe,
+> yt-dlp.exe,libresvip\...\libresvip-cli.exe}` 都在。
+> 两条关键事实：① **Tauri v2 不再加 `resources\` 前缀**（此前写「会平铺到
+> `<安装目录>/resources/` 下」是 **Tauri v1 的行为，错的**）；② **`resource_dir()` 在 Windows 上
+> 就是 exe 所在目录**，所以第 1 步 `has_web(resource_dir/app/web/index.html)` 直接命中，
+> `is_writable` 在 Program Files 下为假 → 正确判成**安装版**，可写目录落到 `%APPDATA%`。
+> ⚠️ 唯一取舍：**管理员装完又用管理员运行**时 `is_writable(安装目录\app\data)` 会真为 true →
+> 当成绿色版、配置写进安装目录。
 >
-> ```
-> C:\Program Files\V-Synth-Studio\        ← INSTALLDIR；直属子目录只有 app\ 和 tools\
->   v-synth-studio.exe                    （component `Path`，目录就是 INSTALLDIR）
->   app\web\index.html                    ← 界面入口，resolve_paths 找的就是它
->   app\data\resources.json   app\data\pinyin.json
->   tools\ffmpeg\bin\ffmpeg.exe  tools\ffmpeg\bin\ffprobe.exe  tools\yt-dlp.exe
->   tools\libresvip\libresvip-cli\libresvip-cli.exe
-> ```
->
-> 两条关键事实：
->
-> 1. **Tauri v2 不再加 `resources\` 前缀** —— 映射键写什么就落在哪。
->    （本节此前写「会**平铺**到 `<安装目录>/resources/` 下」是 **Tauri v1 的行为，错的**。）
-> 2. **`resource_dir()` 在 Windows 上就是 exe 所在目录**
->    （`tauri-2.12.0/src/path/desktop.rs` 的文档注释：「**Windows:** Resolves to the directory
->    that contains the main executable.」，实现是 `current_exe()?.parent()`）。
->    所以 `resolve_paths()` 第 1 步 `has_web(<resource_dir>/app/web/index.html)` 直接命中，
->    `is_writable` 在 Program Files 下为假 → 正确判成**安装版**，可写目录落到
->    `%APPDATA%\com.qingmu.vocalworkstation`。
->
-> ⚠️ 剩下唯一的设计取舍：**以管理员身份装完又用管理员运行**时，
-> `is_writable(安装目录\app\data)` 会真返回 true → 被当成绿色版，配置写进安装目录。
->
-> 读 MSI 表的姿势（踩过的坑都在这儿）：SQL 里列名要**反引号**；`LIKE '%x%'` 一律报
-> `OpenView,Sql`，要过滤就整表取回再用 PowerShell `-match`（三张表分别 476 / 3733 / 3729 行）；
-> `InvokeMember` 的返回值**每个都要 `$null =` 接住**，否则混进函数输出把 `@(...)`
-> 撑成假的 1-2 个元素（`Directory=1` 这种假数量就是这么来的）。
+> 读 MSI 表的姿势：SQL 列名要**反引号**；`LIKE '%x%'` 一律报 `OpenView,Sql`（要过滤就整表取回
+> 再用 `-match`）；`InvokeMember` 的返回值**每个都要 `$null =` 接住**，否则混进函数输出把
+> `@(...)` 撑成假的 1-2 个元素（`Directory=1` 这种假数量就是这么来的）。
 
-**实机安装验证结果（2026-10-02，已通过）** —— 用 Release `v1.2.0` 的 MSI 在真机上装了一遍，
-**用户反馈正常**。对照当初列的五条验收点：
+**实机安装验证（2026-10-02，用户反馈正常）**：界面能开 ✅；改设置 → 重启 → 还在 ✅（可写目录正确
+落在 `%APPDATA%`）；工程转换 ✅；文字 PV ✅；ffmpeg 没单独验 ⬜（它与转换走同一套
+`resolve_paths()`，转换能跑基本说明 `tools/` 定位没问题）。**安装版这条路是通的。**
+⚠️ 万一安装版一启动就挂，看 `%APPDATA%\com.qingmu.vocalworkstation\desktop-error.log`
+（`main.rs::error_log_hint()` 会把真实路径打在错误提示里）。
 
-| # | 要验的 | 结果 |
-|---|---|---|
-| 1 | 装完界面能打开（路径定位对不对） | ✅ 能开 |
-| 2 | 改一个设置 → 重启 → 设置还在（可写目录落在 `%APPDATA%`） | ✅ 还在 —— 当初判「最容易挂」的那条，没挂 |
-| 3 | 工程转换能跑（`tools/libresvip/` 找得到） | ✅ 能跑 |
-| 4 | ffmpeg 能用（`tools/ffmpeg/` 找得到） | ⬜ 没单独对着验（用户是「大致点了一圈」） |
-| 5 | 打开文字 PV（`app/web/vendor/jizura/` 找得到） | ✅ 能开 |
-
-**所以安装版这条路是通的。** 第 4 条只是没专门试，不是已知有问题 —— 它和工程转换走的是同一套
-`resolve_paths()`，转换能跑基本说明 `tools/` 定位没问题。
-
-> ⚠️ 万一哪天安装版一启动就挂，看 `%APPDATA%\com.qingmu.vocalworkstation\desktop-error.log`
-> （安装版的可写目录在那儿，不在 `<安装目录>\data\`；`main.rs::error_log_hint()` 会把
-> 真实路径打在错误提示里）。
-
-**剩下的问题只在别的形态上：**
-
-- Windows **安装版** → ✅ 已核实可用（`resource_dir()` = exe 目录，映射键落在 INSTALLDIR 下）
-- Windows **绿色版** → `resource_dir()` 同样返回 exe 目录，也命中；靠 `is_writable` 区分两者
-- **macOS `.app` bundle** → `Contents/Resources/` 布局，**这条仍然没修**
-- `--serve` 等传 `None` 的调用点 → 靠「往上找」，开发机与 CI 都成立
-
-**所以「换掉往上找」不再是 Windows 的待办**，它现在只为 macOS bundle 而做。
-`tools/` 约 288 MB（+ JIZURA 字体 54 MB），原则已定：**随包分发**（不让用户自己下），
-已按此接进 `bundle.resources`。
+其余形态：Windows 绿色版也命中（同样靠 `is_writable` 区分）；**`--serve` 等传 `None` 的调用点靠「往上找」，开发机与 CI 都成立 —— 所以「换掉往上找」不再是 Windows 的待办，它只为 macOS bundle 而做**。
 
 ---
 
@@ -685,12 +726,7 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 macOS 需要另写一个薄壳（`vite build` 那类跨平台步骤两边一样，但 vcvars 那步 Mac 上没有）。
 **不要为了「一个构建入口」去引 task runner** —— 两个平台两个壳，各十来行。
 
-**Android 是另一回事**：Tauri 的 Android 构建要 SDK + NDK + Gradle，入口是 `tauri android build`。
-更关键的是**后端现在依赖「起外部进程」**（`Command::new` 调 ffmpeg / yt-dlp / LibreSVIP），
-而 Android 应用数据目录是 noexec 挂载，装在里面的可执行文件跑不起来，原生库必须走 JNI 从 `.so` 加载。
-`tools/` 里现在发的还是 `.exe`。真要做 Android，第一步是**把媒体能力抽成抽象层**
-（桌面走 `Command`，移动走 JNI），否则就是复制一整个后端。
-历史上 Node 后端那 19,019 行就是这么来的。
+**Android 是另一回事**：入口是 `tauri android build`（要 SDK + NDK + Gradle），**十节的表已经把依赖出路查清了**。真正的坎是后端靠「起外部进程」（`Command::new` 调 ffmpeg / yt-dlp / LibreSVIP），而 Android 数据目录 noexec、装了也跑不起来 —— 第一步必须**把媒体能力抽成抽象层**（桌面 `Command`、移动 JNI），否则就是复制一整个后端（Node 后端那 19,019 行就是这么来的）。
 
 ---
 
@@ -755,65 +791,48 @@ git filter-branch --force --index-filter `
 | 改名 V-Synth-Studio | 界面可见处全改；exe 变 `v-synth-studio.exe`；存储键与配置目录**刻意不动** |
 | 图标全套 | 由 `图标.png` 生成（Win/macOS/Android/iOS），`cargo tauri icon --fit contain` |
 | 前端脚手架 | `app/web-next/`（React 19 + Vite 8 + TS 7 + Tailwind 4），产物落 `app/web/`，访问 `/` |
-| 主题 + 透明度 | ⚠️ **原表写的 `lib/useTheme.ts` / `lib/usePerfMode.ts` 已不存在**（换库时删了）。现在主题与「降低透明度」是 `App.tsx` 里喂给库 `GlassProvider` 的两个 prop；`perfMode` 字段后端有、前端**还没接** |
-| **玻璃材质修好**（2026-10-01） | 默认改成毛玻璃、侧栏改 `size="large"`、面板降到 `thin`、顶栏（后改为绝对定位）、侧栏高亮块改用库的透镜、补回 `corner-shape: squircle`。见 `docs/GLASS-HANDOFF.md` 第二节 |
-| **顶栏只留品牌**（2026-10-01） | 右上角那组控件（材质分段控件 / 重新检测 / 状态文字）按要求移除；左上角换成真图标。材质切换改在设置页（今为「玻璃等级」滑块）、重新检测在总览页。⚠️ 顶栏 `inset-inline` 必须写 `var(--lg-margin)` —— 绝对定位的包含块是**内边距盒**，写 0 会偏左 20px |
-| **顶栏改回吸顶 + 侧栏跟着吸顶**（2026-10-02） | 用户报「往下滚动时上面的品牌图标会跟着跑」。顶栏从 `absolute` 改 `sticky`，`inset-block-start: var(--lg-space-4)`（16px）；侧栏 `top` 同步改 `calc(var(--lg-space-4) * 2 + 26px)`（=58）并删掉原先手工让位的 `margin-block-start: 44px`。⚠️ **`top` 写多少吸顶后 `y` 就是多少** —— 这个粘性包含块的上沿就在 y=0，直觉「相对滚动容器上沿」在这里不成立（实测表写在 `index.css` 的注释里）。**有意副作用：顶栏现在真占位，其下内容整体下移 42px**（16→58）。回归探针 `tests/manual/topbar-probe.mjs` |
+| **玻璃材质修好**（2026-10-01） | 默认毛玻璃、侧栏 `size="large"`、面板 `thin`、高亮块用库的透镜、补回 `corner-shape: squircle`，细节在 `GLASS-HANDOFF.md` §2 |
+| **顶栏只留品牌 + 改回吸顶**（2026-10-01/02） | 右上角控件（材质分段 / 重新检测 / 状态文字）移除、换真图标、材质切换挪到设置页；用户报「往下滚动品牌会跟着跑」后顶栏 `absolute` → `sticky`。⚠️ **`inset-inline` 必须写 `var(--lg-margin)`**（绝对定位的包含块是内边距盒，写 0 偏左 20px）、**侧栏 `top` 写多少吸顶后 `y` 就是多少**（实测表在 `index.css` 注释）。有意副作用：顶栏真占位，下方内容整体下移 42px |
 | **`glass-probe.mjs`** | 玻璃专项探针：计算值 + 截图 + 高亮块逐帧/首帧采样 |
 | **`app/web-next` 入库** | 首次提交 `83320cd` —— 在此之前它一个 commit 都没有 |
-| **启动加载画面 + 交接**（2026-10-02） | `index.html` 的 `#boot` + `lib/boot.ts`；遮罩淡出与界面入场**交叉**（时长必须拉开，见 `GLASS-HANDOFF` §4.1） |
+| **启动加载画面**（2026-10-02） | `#boot` + `lib/boot.ts`；遮罩淡出与界面入场**交叉**（见 `GLASS-HANDOFF` §4.1） |
 | **玻璃等级 1~4 滑块** | 材质 / 透明度 / 面板要不要玻璃全由这一档派生（`lib/useGlass.ts`），键 `qingmu.glassLevel` |
-| **滑条动画 + `Panel` 只换材质不重建**（2026-10-02） | 用户报「玻璃等级那个滑条没有任何动画，一帧拉过去」。两个独立原因：① 库没给 `.lg-slider-lens` 的位置做 transition（`index.css` 补了，含为什么必须 `!important`）；② **主因** —— `Panel` 原本在两个组件**类型**间切换（`MaterialView` ↔ `GlassLayer`），React 到类型边界整棵重建，新 lens 一出生就带终态、没东西可插值。改成两档都渲染 `MaterialView`、只用类名切材质。⚠️ **子树形状也必须一样**：`{cond ? <div>{children}</div> : children}` 仍会重建孩子，两个分支都要包一层。根因/实测全在 **`docs/GLASS-HANDOFF.md` §2.5**，回归探针 `tests/manual/slider-probe.mjs` |
+| **滑条动画 + `Panel` 只换材质不重建**（2026-10-02） | ① 库没给 `.lg-slider-lens` 做 transition（`index.css` 补，含为什么必须 `!important`）；② **主因**：`Panel` 原在两个组件**类型**间切换（`MaterialView` ↔ `GlassLayer`），React 到类型边界整棵重建，新 lens 一出生就带终态 —— 改成两档都渲染 `MaterialView`、只用类名切材质，⚠️ **子树形状也要一样**。根因在 **`GLASS-HANDOFF.md` §2.5** |
 | **设置页小节导航复用主侧栏那套** | `lib/useNavLens.ts` + `.app-nav` / `.nav-row` / `.nav-lens`，两处外框参数逐项相同 |
-| **9 页全部搬到 React**（2026-10-02） | 旧 `views/*.js` → `pages/*.tsx`（约 7,200 行）；迁移中翻出并修掉旧前端 4 处接口契约错误（见 `docs/FRONTEND.md` 第 5 节） |
-| **`next-smoke.mjs`** | 逐页冒烟：控制台报错 / 占位页 / 玻璃面 / 该页文案，9/9 全绿（文件名里的 `next-` 是历史遗留） |
-| **音轨分离一页**（2026-10-02） | 在线 MVSEP + 离线内嵌引擎（Python 子进程）；引擎 / 模型不随包分发，按需下载、可暂停续传、可一键删除。实现与实测见 `docs/FEATURES.md` §3.11 |
+| **9 页全部搬到 React**（2026-10-02） | 旧 `views/*.js` → `pages/*.tsx`（约 7,200 行）；顺带修掉旧前端 4 处接口契约错误（`docs/FRONTEND.md` 第 5 节） |
+| **`next-smoke.mjs`** | 逐页冒烟：控制台报错 / 占位页 / 玻璃面 / 该页文案，9/9 全绿 |
+| **音轨分离一页**（2026-10-02） | 在线 MVSEP + 离线内嵌引擎（Python 子进程，`docs/FEATURES.md` §3.11）；引擎 / 模型不随包分发，按需下载、可暂停续传、可一键删除 |
+| **移植 playbook：五之四**（2026-10-02） | 音轨分离「怎么嵌外部 AI 项目」的完整经验写成 **五之四**（自包含，可直接交给下一个对话去做「AI 自动扒谱」） |
 
 ### ✅ 已完成：歌词页做成「网易云专栏」（2026-10-02 落地）
 
 用户原话：「我打算 把歌词页面做成网易云专区 让用户可以搜索歌曲后直链下载歌曲
 甚至是歌曲封面（记得把填写QQ音乐cookie的功能删掉）」
 
-四件事全部落地，实现细节与实测证据全在 **`docs/FEATURES.md` §3.4**（改这块先读它）：
+四件事全部落地 —— **实现细节与实测证据全在 `docs/FEATURES.md` §3.4，改这块先读它**：
+① `source` 概念整体删掉（前端分段与 `SOURCES`/`isQq`/`loginKey`/`sourceLabel` 全没，
+后端 `normalize_source()` 删除、`server/lyrics.rs::source_of()` 永远返回 `"netease"`，
+QQ 那整条链 `QQ_UA`/`qq_search`/`qq_fetch`/`html_unescape`/songmid 解析/相关单测全删、
+**应为 0 命中**；回包里的 `"source"` 字段**保留**，形状冻结）；
+② 歌曲直链下载 `POST /api/lyrics/song`（`{id,outDir?,name?}` → `{path,name,size,level,format}`，
+**拿不到直链回 400 不回 500**）；
+③ 封面修掉 7 MB 原图（`cover_url()` 统一拼 `?param=500y500`，3000×3000 / 7.1 MB → 249,916 B）；
+④ 删掉「填写 QQ 音乐 cookie」。
 
-1. **`source` 概念整体删掉** —— 前端「来源」分段、`SOURCES` / `isQq` / `loginKey` /
-   `sourceLabel` 全没了；后端 `normalize_source()` 删除，`server/lyrics.rs::source_of()`
-   现在**永远返回 `"netease"`、不再返回 Result、不收参数**。回包里的 `"source"` 字段
-   **保留**（形状冻结，前端契约不动）。QQ 那一整条链（`QQ_UA` / `qq_search` / `qq_fetch` /
-   `html_unescape` / songmid 链接解析 / 相关单测）全删；要核对就直接搜这七个名字
-   （含 `qqCookie` / `normalize_source`），源码与文档里**应为 0 命中**
-   —— `app/web/assets/` 里那个旧产物历史包除外，它无人引用。
-2. **歌曲直链下载：新增 `POST /api/lyrics/song`** —— 请求 `{id, outDir?, name?}`，回
-   `{path, name, size, level, format}`；**拿不到直链回 400 不回 500**（文案是给人看的）。
-   实现是 `lyrics.rs::download_song()`：`enhance/player/url/**v1**?ids=[<id>]&level=exhigh&encodeType=mp3`
-   → 取 `data[0].url` → 直链**不挂 Cookie** 边下边写盘（`save_stream()`）→ `file_looks_like_audio()`
-   嗅探魔数（ID3 / fLaC / OggS / 0xFFEx），不是音频就**删掉文件**再报错 → `level_label()` 把
-   `level`/`br` 渲染成人话。⚠️ **判据只有「接口有没有给到 url」，`fee` 只当标签** ——
-   搜索后会批量探测一次给每条结果插 `playable`，界面上标「能下载 / 不能下载」。
-3. **封面下载顺手修掉 7 MB 原图** —— 新增 `cover_url()` 统一拼 `?param=500y500`（原图 3000×3000 /
-   7.1 MB → 249,916 B），URL 里已有 `?` 就不重复拼（两个 `?` 会 404），空串直接回空。
-   ⚠️ 封面字节实际是 **PNG**（URL 却叫 `.jpg`），且 `picUrl` 是 **`http://`** 开头 ——
-   **别改成只认 https**，存文件时要么嗅探魔数、要么固定存 `.png`。
-4. **删掉「填写 QQ 音乐 cookie」** —— 前端 QQ Cookie 的 Field 与保存/清除按钮、`qqCookie` state、
-   `saveCookie()` 的两参签名（简化成单参）一并处理；Chip 收费标签新增 `feeLabel()`。
-   ⚠️ **`server/simple.rs` 的 `default_config()` 里 `qqCookie` 已删，这是安全的**（读过源码确认，
-   不是推断）：`load_config()` 是「默认值打底 + 已存 JSON **只认默认值里有的键**逐键覆盖」，
-   老用户残留不会报错，下次 `save_config` 整份回写时自然清掉。
+**三条容易再踩的**（详情在 §3.4）：
 
-#### ⚠️ 教训：为什么第一版「搜到的歌大多下不了」（2026-10-02）
+- **`level` 与 `encodeType` 一个都不能少**：老接口 `player/url?id=X&ids=[X]&br=320000` 七首里只
+  1 首给 url，换成 `enhance/player/url/**v1**?ids=[X]&level=exhigh&encodeType=mp3` 后 6 首全通。
+  **不存在第三个端点**。⚠️ **判据只有「接口有没有给到 url」，`fee` 只当标签。**
+- **音频下载超时要单独给**：`client()` 的 20 秒总超时太短（实测 9.8 MB / 320 kbps 要 96 秒，
+  掐断后报含糊的 `error decoding response body`）→ 音频走 `media_client()`（600 秒 + read_timeout 60）。
+- **封面字节是 PNG**（URL 却叫 `.jpg`）、`picUrl` 是 **`http://`** 开头 —— **别改成只认 https**，
+  存文件时嗅探魔数或固定存 `.png`。⚠️ `default_config()` 里删 `qqCookie` 是安全的：
+  `load_config()` 只认默认值里有的键，老用户残留会在下次 `save_config` 整份回写时清掉。
 
-用户实测三首都下不了才查出来的。**不是权益限制，是请求参数过时** —— 同一批 7 首里，
-老接口 `player/url?id=X&ids=[X]&br=320000` 只有 1 首给 url，换成
-`player/url/**v1**?ids=[X]&**level=exhigh**&**encodeType=mp3**` 后 6 首全通。
-**`level` 与 `encodeType` 一个都不能少**；官方网页播放器（`s3.music.126.net/web/s/core_*.js`）
-用的就是这个端点 + `DEFAULT_LEVEL="exhigh"` + `DEFAULT_ENCODETYPE="aac"`，**不存在第三个端点**。
-另有一条**独立 bug**：`client()` 的 20 秒总超时对音频太短 —— 实测 9.8 MB / 320 kbps 单流传输要
-**96 秒**，被掐断后报的是含糊的 `error decoding response body`；现在音频走 `media_client()`
-（总超时 600 秒 + `read_timeout` 60 秒）。
-
-**别再试的两条**（实测死路）：`eapi/*` 回 `Content-Length: 0`；`weapi/*` 不带 `encSecKey` 回空 body。
-**别接第三方解析站**（侵权灰产）。**匿名会话不触发网页取链** —— 浏览器里未登录打开歌曲页，
-`enhance/player/url` 这个请求根本不会发出，所以「抓包学网页」对未登录态没用。
+**别重走的死路**：`eapi/*` 回 `Content-Length: 0`；`weapi/*` 不带 `encSecKey` 回空 body；
+第三方解析站（侵权灰产）。**匿名会话不触发网页取链** —— 未登录打开歌曲页时
+`enhance/player/url` 这个请求根本不发出，「抓包学网页」对未登录态没用。
 
 ### 待办，按优先级
 
@@ -825,13 +844,11 @@ git filter-branch --force --index-filter `
    `GlassSegmentedControl`（胶囊、可拖、拖动中实时更新选择）。**换的时候注意**：
    库的分段控件是 `<label class="lg-segment"><input type=radio>`，`aria-label` 挂在内层
    `.lg-segmented-track` 上 —— 写自动化测试时别在外层 `.lg-segmented` 上取 `aria-label`。
-3. **给前端补点击穿透测试** —— `next-smoke.mjs` 只验「渲染 + 文案 + 控制台 + 后端状态反查」，
-   真实操作链路（选文件 → 预检 → 提交任务）还没有自动化，目前靠人工 + 探针截图。
+3. **给前端补点击穿透测试** —— 自动化现在只到「渲染 + 文案 + 控制台」，真实操作链路（选文件 → 预检 → 提交任务）靠人工 + 探针截图。
 4. **侧栏形态要不要换成库的 `TabBar`？** 它自带透镜、拖拽换页、窄屏自动变底部胶囊栏，
    但它的侧栏形态是 `position: fixed` 的整列贴窗口左边，而且**没有分组标题**
    （现在的「工作台 / 素材获取 / 系统」是手写的）。两条路都成立，**属于要用户拍板的结构选择**。
-5. **CI**：已经落地 —— `.github/workflows/build-msi.yml`（Windows 单平台出 MSI + 冒烟）。
-   以后再谈 matrix：macOS 那一格要等第八节说的构建壳，Linux 编不出 Windows / macOS 的 GUI 包。
+5. **CI**：已落地（`.github/workflows/build-msi.yml`，Windows 单平台出 MSI + 冒烟）。matrix 以后再谈：macOS 那格要等第八节的构建壳，Linux 编不出 Windows / macOS 的 GUI 包。
 
 ### 关于 Android（已核实，不用再查）
 
@@ -841,6 +858,4 @@ git filter-branch --force --index-filter `
 | yt-dlp | [yt-dlp-android](https://github.com/ffmpegkit-maintained/yt-dlp-android)（Chaquopy 内嵌 CPython 3.13，进程内跑纯 Python） | 可用；AAR 60–80 MB |
 | LibreSVIP | 未验证 | **不构成风险** —— 用户已明确「工程转换实现方式有很多」 |
 
-关键约束：Android 应用数据目录是 noexec，**跑不了外部二进制**，必须走 JNI 从 `.so` 加载。
-所以媒体层最终要桌面走 `Command`、移动走 JNI。**现在不用做** —— 调用链的 `tools_dir`
-形参已经一路穿好了，将来是机械替换而非重写。
+约束：Android 数据目录 noexec，必须走 JNI 从 `.so` 加载；调用链的 `tools_dir` 形参已一路穿好，将来是机械替换而非重写。
