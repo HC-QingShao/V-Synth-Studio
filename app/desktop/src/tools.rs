@@ -234,6 +234,21 @@ pub fn exe(base: &str) -> String {
     }
 }
 
+/// 动态库的文件名（`onnxruntime` → `onnxruntime.dll`）。
+///
+/// 和 `exe` 分开写而不是共用一个函数：动态库在 macOS 上是 `.dylib`、Linux 上是
+/// `.so`，命名规则和可执行文件不同（`lib` 前缀、后缀位置都不一样）。现在只有
+/// ONNX Runtime 用得上，等真要跨平台了那两个分支就是这么补。
+pub fn dll(base: &str) -> String {
+    if cfg!(windows) {
+        format!("{base}.dll")
+    } else if cfg!(target_os = "macos") {
+        format!("lib{base}.dylib")
+    } else {
+        format!("lib{base}.so")
+    }
+}
+
 fn run_capture(bin: &Path, args: &[&str]) -> Option<String> {
     let out = crate::server::quiet_command(&bin.to_string_lossy())
         .args(args)

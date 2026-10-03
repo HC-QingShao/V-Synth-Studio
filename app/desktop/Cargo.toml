@@ -30,6 +30,20 @@ flate2 = "1"
 # 从 LibreSVIP 插件的 .yapsy-plugin 里读格式元数据（其实是个 INI）
 # 不引 INI 库 —— 那个格式只有 key = value，自己解析十行就够
 
+# 人声转 MIDI（GAME）：三个 ONNX 图由 ONNX Runtime 跑，宿主侧算法（切片、
+# D3PM 采样环、边界解码、MIDI 写出）全是自己写的 Rust。
+#
+# 用 `load-dynamic` 而不是默认的 `download-binaries`：运行时动态库直接复用音轨
+# 分离那份 `runtime/Lib/site-packages/onnxruntime/capi/onnxruntime.dll`，
+# **不新下载、不额外占体积**，也就不会再往安装包里塞第二份 15 MB 的 ORT。
+# 代价是进程里第一件事必须 `ort::init_from(<那个 dll 的绝对路径>)`（见
+# `game/engine.rs::load_runtime`），否则建会话就 panic。
+#
+# ndarray 的版本必须和 `ort` 的 `ndarray` feature 转出来的那份完全一致，
+# 否则 `Tensor::from_array` 会因为「两份 crate」而拒绝我们的数组。
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["ndarray", "load-dynamic"] }
+ndarray = "0.17"
+
 # 只有 Unix 下需要：给进程组发信号，把子进程树一起收掉
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

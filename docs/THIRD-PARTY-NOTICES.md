@@ -26,6 +26,42 @@
 | WebView2 Runtime | 微软，Win11 与较新 Win10 预装 |
 | Tauri | Apache-2.0 / MIT 双许可，已静态链接进 exe |
 | Rust 标准库与各 crate | MIT / Apache-2.0，已静态链接进 exe |
+| ONNX Runtime（`ort` crate，MIT） | **运行时按需加载**，见下面「人声转 MIDI」一节 |
+
+---
+
+## 人声转 MIDI（GAME）—— ⚠️ 权重是**非商业**许可
+
+2026-10-03 加入的功能（`app/desktop/src/game/**`、`src/midi_transcribe.rs`、扒谱页）。
+
+**上游**：[openvpi/GAME](https://github.com/openvpi/GAME)。它有两套许可，**必须分开说**：
+
+| 部分 | 许可 | 本程序怎么用它 |
+|---|---|---|
+| **代码** | MIT | 推理算法（D3PM 采样、边界解码、切片、MIDI 写出）是**照它的算法在 Rust 里重写的**，没有链接或拷贝它的代码 |
+| **模型权重** | **CC BY-NC-SA 4.0（署名 — 非商业性使用 — 相同方式共享）** | **不随包分发** —— 由界面按需下载（`GAME-1.0.3-large-onnx.zip`）。界面上写明许可与出处 |
+
+⚠️ **「非商业」是硬约束**：带这个功能分发/使用时不能用于商业用途。界面「许可与出处」
+那一栏就是为这条规矩放的，**别删**。这也和资源库的收录原则（`AGENTS.md` 第六节）同源。
+
+⚠️ **权重包是「自己托管」，不是「自己产的」**：下载地址是用户 123 云盘 CDN 上的
+**同一份官方 ONNX 导出**（`tools\game-pack.ps1` 从 `app\data\game\models\` 打出来，
+白名单四个文件、逐个校验实测字节数；顶层目录名沿用上游的 `GAME-1.0.3-large-onnx/`，
+所以两个包可以互换）。换托管的**唯一**原因是 GitHub 的 release 资产在国内线路上下不动
+（实测 302 跳到 `objects.githubusercontent.com` 之后 TLS 握手直接失败）—— **不是**换了个模型。
+许可与出处仍然照上面那一行写：署名给 openvpi/GAME，许可 CC BY-NC-SA 4.0。
+⇒ **打这个包的人要把这条规矩当回事**：包里的东西一字未改，别往里塞自己训的或来路不明的权重。
+
+**ONNX Runtime**：本功能用 `ort` crate（MIT）以 `load-dynamic` 方式**在运行时加载**
+`onnxruntime.dll`，不静态链接、不随包分发这个 dll。两个来源：
+
+1. **优先借用**用户已经装好的音轨分离运行时里的那份
+   （`app/data/svsep/runtime/Lib/site-packages/onnxruntime/capi/onnxruntime.dll`，ORT 1.23.2，MIT）；
+2. 找不到时，用户可在扒谱页点「下载运行库」，从 Microsoft 官方 release 取
+   `onnxruntime-win-x64-1.23.2.zip`（MIT）。
+   ⚠️ 这一条**没有**改托管 —— 它只在「没装音轨分离、又想要这个功能」时才走到，
+   而实测 `github.com` 与 `api.github.com` 是通的，下不动的是 `/releases/download/` 那条重定向。
+   哪天要把它也挪到 CDN，记得同批更新 `midi_transcribe.rs` 的 `RUNTIME_URL` 与 `RUNTIME_ZIP_BYTES`。
 
 ---
 

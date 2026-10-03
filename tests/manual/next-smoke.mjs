@@ -69,6 +69,50 @@ const PAGES = [
       return ''
     })()`,
   },
+  {
+    id: 'midi',
+    name: '人声转 MIDI',
+    any: ['人声转 MIDI', '扒谱', '干声', '钢琴卷帘'],
+    /**
+     * 和音轨分离那条同一个道理：**按后端真回的东西反查界面**，别只断言文案。
+     * 这块最容易出的两类错都不会让文案断言变红：
+     *   ① 状态字段读错名字（`st.models.ok` 那类），界面就一直显示「缺依赖」；
+     *   ② `job.status` 用了前端不认的词（只有 `running|done|error|canceled`），
+     *      进度条会永远转下去。
+     */
+    probe: `(async () => {
+      const st = await (await fetch('/api/midi/status')).json()
+      const text = document.body.innerText || ''
+      const chip = [...document.querySelectorAll('.chip, [class*="chip"]')]
+        .map((e) => (e.textContent || '').trim())
+      // 后端说模型齐了 + 运行时也有 → 界面该给「可以开始」，不该还挂着「缺依赖」
+      const soon = st.models && st.models.ready && st.runtime && st.runtime.ready
+      if (soon) {
+        if (chip.includes('缺依赖')) return '后端说 models.ready && runtime.ready，界面却仍标「缺依赖」'
+        if (text.includes('第一次用要先下模型')) return '模型已就绪，界面却还显示「第一次用要先下模型」'
+        const btn = [...document.querySelectorAll('button')]
+          .find((b) => /^下载模型（/.test((b.textContent || '').trim()))
+        if (btn) return '模型已就绪，界面却还摆着「下载模型」按钮'
+      }
+      /* 模型分两层：可写下下来的 + 随包只读的。安装版两者是**两个目录**，
+         引擎可能用着随包那份 —— 那种情况下点「删掉下好的依赖」删不到它，
+         状态还是「就绪」、下载按钮不会回来。⚠️ 这条必须断言：不说出来用户
+         只会以为删除按钮坏了（真报过）。判据是后端的 \`models.origin\`。
+         ⛔ \`local\`（绿色版两层同一路径）**不能**说这句，那儿删掉就真没了。 */
+      const org = st.models && st.models.origin
+      if (org === 'bundled') {
+        if (!text.includes('随包')) return 'models.origin=bundled，界面却没写清「引擎用的是随包自带那层」'
+      }
+      if (org && org !== 'bundled' && text.includes('随包自带')) {
+        return 'models.origin=' + org + '，界面却写着「随包自带」'
+      }
+      // 借来的运行时要说清，否则用户会白下 78 MB
+      if (st.runtime && st.runtime.borrowed && text.includes('缺')) {
+        if (!text.includes('复用音轨分离')) return '运行时是借来的，界面却没写「复用音轨分离的运行时」'
+      }
+      return ''
+    })()`,
+  },
   { id: 'audio', name: '音频工具', any: ['音频', '采样率', '音高', '响度', '格式'] },
   { id: 'lyrics', name: '网易云专栏', any: ['歌词', '搜索', '网易云', '下载歌曲'] },
   { id: 'pv', name: '文字 PV', any: ['PV', 'JIZURA', '歌词'] },

@@ -18,6 +18,7 @@
 pub mod convert;
 pub mod lyrics;
 pub mod media;
+pub mod midi;
 pub mod simple;
 pub mod svsep;
 pub mod tools;
@@ -196,6 +197,18 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/svsep/backend/inference",
             get(svsep::inference_get).post(svsep::inference_set),
         )
+        // ── 人声转 MIDI（GAME 的原生移植；不启子进程、不占端口）──
+        .route("/api/midi/status", get(midi::status))
+        .route("/api/midi/models/download", post(midi::models_download))
+        .route("/api/midi/runtime/download", post(midi::runtime_download))
+        .route("/api/midi/download/pause", post(midi::download_pause))
+        .route("/api/midi/download/stop", post(midi::download_stop))
+        .route("/api/midi/deps/delete", post(midi::deps_delete))
+        .route("/api/midi/transcribe", post(midi::transcribe))
+        .route("/api/midi/task/{id}", get(midi::task))
+        .route("/api/midi/task/{id}/cancel", post(midi::cancel))
+        .route("/api/midi/task/{id}/file/{name}", get(midi::output))
+        .route("/api/midi/open-output", post(midi::open_output))
         // ── 前端静态文件 ──────────────────────────────────
         .fallback(simple::static_files)
         .with_state(state)

@@ -44,6 +44,19 @@ app/data/config.json
 #     所以必须点名忽略这个子目录，不能只靠上面那条 config.json。
 app/data/svsep/
 
+# ── 人声转 MIDI 的模型（376 MB，且许可不允许随包分发）───────
+# app/data/game/models/ 里是 GAME 的三个 ONNX 图（encoder / segmenter / estimator，
+# 合计 376 MB）。两个理由不入库：
+#   ① 体积（和 svsep 一样，属于「按需下载」的大件）；
+#   ② **许可是 CC BY-NC-SA 4.0（非商业）**，与源码的授权不是一回事 ——
+#      进仓库就等于随源码分发，见 docs/THIRD-PARTY-NOTICES.md。
+# 由扒谱页的「下载模型」按钮取（`midi_transcribe.rs` 的 MODEL_URL）——
+# 那是我们自己托管的一份（123 云盘 CDN），内容与官方 release 里那个 zip 一致，
+# 打包脚本见 `tools/game-pack.ps1`。境内直连 GitHub release 资产会握手失败。
+# 注意 app/data/ 本身不在忽略之列（pinyin.json / resources.json 要入库），
+# 所以要像 svsep 那样点名这个子目录。
+app/data/game/
+
 # ── 依赖与构建产物 ──────────────────────────────────────────
 node_modules/
 *.exe

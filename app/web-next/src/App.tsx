@@ -21,6 +21,7 @@ import { Convert } from '@/pages/Convert'
 import { Video } from '@/pages/Video'
 import { Audio } from '@/pages/Audio'
 import { Svsep } from '@/pages/Svsep'
+import { Midi } from '@/pages/Midi'
 import { Lyrics } from '@/pages/Lyrics'
 import { Pv } from '@/pages/Pv'
 
@@ -66,6 +67,7 @@ const PAGES = [
   { id: 'convert', title: '工程转换', sub: '离线把工程转到另一个编辑器', icon: 'swap', group: '工作台' },
   { id: 'video', title: '视频解析', sub: 'B 站 / YouTube 等平台的 MV 下载', icon: 'video', group: '素材获取' },
   { id: 'svsep', title: '音轨分离', sub: '在线 MVSEP / 离线内嵌引擎，拆人声与伴奏', icon: 'layers', group: '素材获取' },
+  { id: 'midi', title: '人声转 MIDI', sub: '干声扒谱：音符起止与音高，导出 .mid', icon: 'music', group: '素材获取' },
   { id: 'audio', title: '音频工具', sub: '格式转换 / 裁剪 / 变调变速', icon: 'wave', group: '素材获取' },
   { id: 'lyrics', title: '网易云专栏', sub: '网易云搜词，导出 LRC · SRT，下载封面 / 歌曲', icon: 'music', group: '素材获取' },
   { id: 'pv', title: '文字 PV', sub: '把歌词做成动态歌词视频（JIZURA）', icon: 'video', group: '素材获取' },
@@ -172,6 +174,7 @@ export default function App() {
     convert: <Convert {...pageProps} />,
     video: <Video {...pageProps} />,
     svsep: <Svsep {...pageProps} />,
+    midi: <Midi {...pageProps} />,
     audio: <Audio {...pageProps} />,
     lyrics: <Lyrics {...pageProps} />,
     pv: <Pv {...pageProps} />,

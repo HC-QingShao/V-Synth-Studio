@@ -190,6 +190,74 @@ export const api = {
   svsepSetInference: (mode: 'auto' | 'cpu' | 'gpu') =>
     post<Record<string, unknown>>('/api/svsep/backend/inference', { mode }),
 
+  /* ── 人声转 MIDI（原生 Rust，无子进程）──────────────────── */
+  /**
+   * 状态。页面每 2 秒轮询它 —— 动态库、模型、下载进度全在这一个回包里。
+   *
+   * 和音轨分离那套的区别只有一个：**没有「服务起没起」**。这边不拉子进程、
+   * 不占端口，`running` 装的是「正在跑的那次任务 id」（同时只允许一个）。
+   */
+  midiStatus: () => request<MidiStatus>('/api/midi/status', { timeout: 20000 }),
+  /**
+   * 下官方 ONNX 权重包（压缩包 364 MB，解压后 376 MB）。**立刻返回**，
+   * 进度靠 `midiStatus().download` 看。
+   *
+   * ⚠️ 这个包**不支持续传**（后端 `svsep::fetch_to_file` 的注释说明了原因）——
+   * 暂停就是重来一遍，所以界面上给的是「停止」而不是「暂停」。
+   */
+  midiDownloadModels: () => post<{ ok: true; started: boolean }>('/api/midi/models/download', {}),
+  /**
+   * 下 ONNX Runtime（官方那个 zip 78 MB，解出来后只要里面 15 MB 的 dll）。
+   * **装了音轨分离的话不用下** —— 后端会直接借它运行时里那一份，
+   * `midiStatus().runtime.borrowed` 就是这件事。
+   */
+  midiDownloadRuntime: () => post<{ ok: true; started: boolean }>('/api/midi/runtime/download', {}),
+  /** 停止下载并删掉半个包（不支持续传，所以没有「暂停」这个动作）。 */
+  midiStopDownload: () => post<{ ok: true; stopping: boolean }>('/api/midi/download/stop', {}),
+  /**
+   * 删掉下下来的模型与动态库。界面必须先让用户确认 —— 删完要重下 364 MB。
+   *
+   * ⚠️ `note` 是**后端算好的中文说明**，必须显示给用户。它要说的是**安装版**
+   * 才有的那种情况：可写目录在 `%APPDATA%`，而引擎可能正用着随包只读那份，
+   * 删完状态仍是「就绪」、下载按钮不会出现。绿色版两层是同一个路径
+   * （`models.origin === 'local'`），删掉就是真没了，这时 `note` 是空串。
+   * 不把这话说出来，用户看到的就是「点了删除没反应、按钮也没了」。
+   */
+  midiDeleteDeps: () =>
+    post<{ ok: true; files: number; bytes: number; note: string }>(
+      '/api/midi/deps/delete',
+      {},
+    ),
+  /**
+   * 提交一次扒谱。传的是**本机音频路径**，不是文件字节 ——
+   * 音频本来就在用户盘上，多传一遍只是把同一份数据从磁盘搬到磁盘。
+   *
+   * 立刻返回 `jobId`，进度走通用的 `/api/jobs/*`（`useJob` 已封装）。
+   */
+  midiTranscribe: (body: {
+    input: string
+    outDir?: string
+    /** 去噪步数，1~32。上游默认 8；**耗时几乎与它成正比**。 */
+    steps?: number
+    /** 语言 id：0 通用 / 1 en / 2 ja / 3 yue / 4 zh。 */
+    language?: number
+    /** ONNX 的 intra 线程数，1~32。本机实测 4 最快（见 `engine.rs` 注释）。 */
+    threads?: number
+  }) =>
+    post<{ ok: true; jobId: string }>('/api/midi/transcribe', body, 120000),
+  /** 取消任务。**不是立刻停** —— 去噪循环在下一个 step 边界才收手。 */
+  midiCancel: (id: string) => post<{ ok: true }>(`/api/midi/task/${encodeURIComponent(id)}/cancel`, {}),
+  /**
+   * 在资源管理器里选中输出目录。
+   *
+   * ⚠️ 结果落在用户任选的目录里（不是固定的 `<数据目录>/outputs/<id>`），
+   * 所以**必须把 `result.dir` 传回来**；`dir` 空串只会打开本功能的数据目录。
+   */
+  midiOpenOutput: (dir: string) =>
+    post<{ ok: true; path: string }>('/api/midi/open-output', { dir }),
+
+  /* 类型定义在文件末尾，见 `MidiStatus`。 */
+
   /* ── 外部工具 ─────────────────────────────────────────── */
   detect: (force = true) =>
     request<{ installedCount: number; tools: Record<string, ToolInfo> }>(
@@ -751,5 +819,116 @@ export const svsepFileUrl = (taskId: string, filename: string, inline = false) =
   `/api/svsep/task/${encodeURIComponent(taskId)}/file/${encodeURIComponent(filename)}${
     inline ? '?inline=1' : ''
   }`
+
+/* ── 人声转 MIDI（GAME 的原生 Rust 移植）─────────────────────
+ *
+ * 这一组和音轨分离**形态上像、底下完全不同**：那边转发给一个 Python 子进程，
+ * 这边直接在工作站进程里算（`crate::game::engine` + ONNX Runtime）。
+ * 所以这里没有端口、没有「服务起没起」、没有健康检查 —— 只有两样东西可能缺：
+ * 动态库和模型。都不随包发（模型是 CC BY-NC-SA 4.0，非商业）。
+ */
+
+/** 一个结果音符。`pitch` 是**半音浮点**（69 = A4），`midi` 是它四舍五入后的整数。 */
+export interface MidiNote {
+  /** 起点，秒（绝对时间，已经加过切片偏移） */
+  onset: number
+  /** 终点，秒 */
+  offset: number
+  /** 半音，A4 = 69。带小数的原因见 `algo.rs::decode_gaussian_blurred_probs` */
+  pitch: number
+  /** `round(pitch)`，写进 .mid 的那个值 */
+  midi: number
+}
+
+export interface MidiRuntime {
+  /** 找到可用的 `onnxruntime.dll` 了 */
+  ready: boolean
+  /** 用的哪一个（绝对路径） */
+  dll: string | null
+  /**
+   * 这一份是**借来的** —— 来自音轨分离的 Python 运行时，不是本功能自己下的。
+   * 界面上据此说「已复用音轨分离的运行时」而不是让用户白下 78 MB。
+   */
+  borrowed: boolean
+  /** 解出来那个 dll 的大小（实测 15.55 MB） */
+  dllBytes: number
+  /** 要下的那个官方 zip 的大小（实测 78 MB —— 官方只给整包） */
+  zipBytes: number
+  /** 已经下了一半的 `ort.part` 有多大（只用来提示，不支持续传） */
+  partBytes: number
+}
+
+export interface MidiModels {
+  ready: boolean
+  /** 还缺哪几个（`encoder.onnx` / `segmenter.onnx` / `estimator.onnx`） */
+  missing: string[]
+  dir: string
+  /**
+   * 引擎此刻用的模型**在哪个目录**：
+   * - `'downloaded'` —— `<可写>/game/models`（下载物就落这儿）
+   * - `'bundled'` —— `<root>/app/data/game/models`，且它**不是**下载落点
+   *   （只可能出现在安装版：可写目录在 `%APPDATA%`）。这时「删掉下好的依赖」
+   *   删不到引擎正在用的那份，状态还是「就绪」、下载按钮不会回来 ——
+   *   界面**必须**写清原因（见 `Midi.tsx`），否则用户只会以为按钮坏了。
+   * - `'local'` —— 绿色版：两层是**同一个绝对路径**，没有第二层可回落，
+   *   界面那边不必说话（也**不该**说，说了就是错话）。
+   *
+   * ⚠️ 它报的是「在哪个目录」，**不是**「这份是谁放的」—— 绿色版下这两件事
+   * 在物理上不可分（一个目录同时是下载落点和随包层）。
+   * ⛔ 别改在前端按 `dir` 的尾巴猜：三种情况的路径都以 `\game\models` 结尾。
+   */
+  origin: 'downloaded' | 'bundled' | 'local'
+  /** 要下多少（347 MB） */
+  zipBytes: number
+  /** 解开之后四个文件一共多大（376 MB） */
+  extractBytes: number
+  /** 已经下了一半的 `game-models.part` 有多大（只用来提示，不支持续传） */
+  partBytes: number
+}
+
+export interface MidiDownload {
+  active: boolean
+  /** `'models'` | `'runtime'` | null */
+  kind: string | null
+  /** `'download'`（在下字节）| `'extract'`（下完了在解包） */
+  stage: string
+  done: number
+  total: number
+  error: string | null
+  /** 恒为 false —— 这个包不支持续传（停下就是重来），前端据此不画「继续」 */
+  resumable: boolean
+}
+
+export interface MidiStatus {
+  runtime: MidiRuntime
+  models: MidiModels
+  /** 权重许可：`模型权重 CC BY-NC-SA 4.0（非商业）` */
+  license: string
+  source: string
+  download: MidiDownload
+  /** 正在跑的那次任务 id；null = 空闲（同时只允许一个） */
+  running: string | null
+}
+
+/**
+ * 结果文件地址。
+ *
+ * ⚠️ 与 `svsepFileUrl` 不同，这里是**按任务查输出目录**再取文件的
+ * （输出目录用户可以任选，不在固定位置），所以两个参数都必需。
+ */
+export const midiFileUrl = (taskId: string, filename: string) =>
+  `/api/midi/task/${encodeURIComponent(taskId)}/file/${encodeURIComponent(filename)}`
+
+/**
+ * 语言 id。**照官方 `config.json` 的 `languages` 映射**，不是自己编的
+ * （实测 `{'en':1,'ja':2,'yue':3,'zh':4}`，0 = 通用）。
+ */
+export const MIDI_LANGUAGES = [
+  { id: 0, label: '通用（不告诉它语言）' },
+  { id: 4, label: '中文' },
+  { id: 1, label: '英语' },
+  { id: 2, label: '日语' },
+  { id: 3, label: '粤语' },
+] as const
 
 export default api

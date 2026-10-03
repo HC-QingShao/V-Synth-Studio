@@ -1340,6 +1340,85 @@ pub async fn download_runtime(
     })
 }
 
+/// 把一条链接下成一个**指定路径**的文件，回来时文件是完整的。
+///
+/// 给「不需要续传的小包」用 —— 人声转 MIDI 的模型包（364 MB）和 ONNX Runtime
+/// （那个 zip 78 MB，解出来只要里面 15 MB 的 dll）都走这里。和
+/// `download_models` / `download_runtime` 的区别：
+///
+///   * **不要 `Bundle`**：那两个的落点、剥层、`.part` 位置都写死在一张表里，
+///     这两个包不在这张表内，硬塞进去只会让那张表长出两个特例分支。
+///   * **不做续传**：重试是**从 0 开始**（`got` 每轮归零）。364 MB 断一次重下
+///     能接受，而续传要维护 `.part.url` 记号、`stored_resume` 比对、以及
+///     「半个包其实是一整包」那条短路 —— 为一个包付这些复杂度不划算。
+///     ⚠️ 想要续传就得把上面那三样一起搬过来，只搬一半会拼出坏 zip。
+///   * **失败会把半截文件删掉**：留下它没有任何东西会去认领（没有记号、没有
+///     断点查询），只会占着几百 MB 让人以为下过了。
+pub async fn fetch_to_file(
+    url: &str,
+    out: &Path,
+    expect: Option<u64>,
+    ctl: &DownloadCtl,
+    on_progress: impl Fn(u64, Option<u64>, Stage) + Send + Sync,
+) -> Result<u64, String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(format!("下载地址必须是 http(s) 链接：{url}"));
+    }
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("建目录失败：{e}"))?;
+    }
+
+    // 五轮和 `fetch_bundle` 一致：网络抖动通常一两轮就过去了，
+    // 真接不上（DNS 挂了、被墙）第五轮也还是接不上。
+    let mut last = String::from("未知原因");
+    for round in 1..=5u32 {
+        if ctl.cancelled() {
+            return Err("已停止".into());
+        }
+        let mut got: u64 = 0;
+        let mut total: Option<u64> = None;
+        match fetch_once(url, out, "文件", &mut got, &mut total, ctl, &on_progress).await {
+            Ok(Step::Done) => {
+                // 大小对不上就是下坏了：GitHub release 偶尔会在中途回一个
+                // 截断的响应，而 `fetch_once` 只看「读到 0 字节」判完成。
+                if let Some(want) = expect {
+                    let have = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+                    if have != want {
+                        last = format!("下到的文件是 {have} 字节，官方是 {want} 字节");
+                        let _ = std::fs::remove_file(out);
+                        if round == 5 {
+                            break;
+                        }
+                        if !wait_before_retry(ctl).await {
+                            return Err("已停止".into());
+                        }
+                        continue;
+                    }
+                }
+                return Ok(std::fs::metadata(out).map(|m| m.len()).unwrap_or(0));
+            }
+            Ok(Step::Paused) => {
+                // 暂停 —— 这个路径没有续传，所以和停止一样：删掉重来。
+                // 返回一句能看懂的话而不是假装成功（调用方会把它当失败报给界面）。
+                let _ = std::fs::remove_file(out);
+                return Err("下载已暂停。再点一次会从头下（这个包不支持续传）。".into());
+            }
+            Ok(Step::Cancelled) => {
+                let _ = std::fs::remove_file(out);
+                return Err("已停止".into());
+            }
+            Err(e) => {
+                last = e;
+                let _ = std::fs::remove_file(out);
+            }
+        }
+        if round < 5 && !wait_before_retry(ctl).await {
+            return Err("已停止".into());
+        }
+    }
+    Err(format!("下载失败（试了 5 轮）：{last}"))
+}
+
 /// 删掉一个目录里所有 `*.part`（没下完的半个 zip）与它旁边的 `*.part.url`，
 /// 返回删掉的文件数与字节数。
 ///
@@ -1477,9 +1556,9 @@ pub fn delete_dependencies(
 }
 
 #[derive(Debug)]
-struct ExtractReport {
-    files: u64,
-    bytes: u64,
+pub struct ExtractReport {
+    pub files: u64,
+    pub bytes: u64,
 }
 
 /// 解一个 zip 到 `dest`，返回解出来多少。
@@ -1493,7 +1572,10 @@ struct ExtractReport {
 ///
 /// 只支持「存 + deflate」两种方式 —— 这也是 zip 的实际全部（bzip2/lzma 在
 /// Windows 自带的压缩里根本不会产生）。用 flate2（依赖树里本来就有，见 Cargo.toml）。
-fn extract_zip(
+///
+/// `pub` 是给人声转 MIDI 用的：GAME 的模型包也是官方 zip（见 `midi_transcribe.rs`），
+/// 没必要为它再写一遍解包与防目录穿越。
+pub fn extract_zip(
     zip_path: &Path,
     dest: &Path,
     strip: &str,

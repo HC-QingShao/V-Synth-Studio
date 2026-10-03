@@ -73,10 +73,11 @@ WebView2 窗口（Tauri 2）
 
 ---
 
-## 2. 路由总表（56 条，逐条）
+## 2. 路由总表（67 条路径 / 68 个 `.route()` 目标，逐条）
 
-路由表在 `app/desktop/src/server/mod.rs::router`（53 个 `.route(...)`；`/api/config` 与 `/api/svsep/backend/inference` 各挂 GET+POST 两个方法，末尾还有一个 `fallback` 静态文件处理器，不计入 53）。
+路由表在 `app/desktop/src/server/mod.rs::router`（68 个 `.route(...)`；其中 1 个挂了 GET+POST 两个方法，末尾还有一个 `fallback` 静态文件处理器不计入）。
 
+> 2026-10-03：加了「人声转 MIDI」一页（57~67 共 11 条 `/api/midi/*`），路由从 56 涨到 67 条路径。
 > 2026-10-02：加了「音轨分离」一页（41~56），路由从 40 涨到 56（其中 46~48 是暂停 / 停止 / 一键删除依赖）。前 40 条见下，顺序与 `router()` 一致。
 
 「用的页面」列指**新前端** `app/web-next/src/pages/*.tsx`（另有 `components/` 与 `lib/`）。
@@ -139,6 +140,17 @@ WebView2 窗口（Tauri 2）
 | 54 | GET | `/api/svsep/backend/status` | `svsep.rs::backend_status` | 分离后端原始 `/api/status`（设备 / 队列 / 输出目录） | Svsep |
 | 55 | GET | `/api/svsep/backend/system-stats` | `svsep.rs::system_stats` | 分离后端的 CPU / 内存 | Svsep |
 | 56 | GET+POST | `/api/svsep/backend/inference` | `svsep.rs::inference_get` / `inference_set` | 推理模式 auto / cpu / gpu | Svsep |
+| 57 | GET | `/api/midi/status` | `server/midi.rs::status` | 运行时 / 模型 / 下载进度（前端每 2 秒轮询） | Midi |
+| 58 | POST | `/api/midi/models/download` | `midi_transcribe.rs::download_models` | **下 ONNX 权重 zip（364 MB，解压后 376 MB）并解压**，立刻返回 | Midi |
+| 59 | POST | `/api/midi/runtime/download` | `midi_transcribe.rs::download_runtime` | 下 ONNX Runtime zip（78 MB）——**装了音轨分离的用户不会走到这条** | Midi |
+| 60 | POST | `/api/midi/download/pause` | `server/midi.rs::download_pause` | ⚠️ **等价于「停止」** —— 这个包不支持续传，`resumable` 恒为 false，界面上**没有**这个按钮 | **无人调用** |
+| 61 | POST | `/api/midi/download/stop` | `server/midi.rs::download_stop` | 停下载（`.part` 一起删） | Midi |
+| 62 | POST | `/api/midi/deps/delete` | `server/midi.rs::deps_delete` | 一键删除依赖（模型 + 动态库），回 `{files, bytes, note}` | Midi |
+| 63 | POST | `/api/midi/transcribe` | `server/midi.rs::transcribe` | 提交一次扒谱，回 `{jobId}`（同时只允许一个） | Midi |
+| 64 | GET | `/api/midi/task/{id}` | `server/midi.rs::task` | 查任务（`lib/useJob.ts` 同时走 `/api/jobs/get`） | Midi |
+| 65 | POST | `/api/midi/task/{id}/cancel` | `server/midi.rs::cancel` | 取消任务（⚠️ **不清 `RUNNING` 槽**，那是收工时的活） | Midi |
+| 66 | GET | `/api/midi/task/{id}/file/{name}` | `server/midi.rs::output` | 取产物（`.mid` / `.csv` / `.json`） | Midi |
+| 67 | POST | `/api/midi/open-output` | `server/midi.rs::open_output` | 打开输出目录（**要传 `task.result.dir`**，落点是用户选的） | Midi |
 
 ---
 
@@ -620,6 +632,117 @@ resources.json
 - 强杀验证：作业对象加上之前，`Stop-Process -Force` 后 python **活着**并占着 17879；加上之后同样操作 **跟着死了**、无残留。
 
 **涉及文件**：`app/desktop/src/svsep.rs`（含 `job` 模块与真包/下载测试）、`server/svsep.rs`、`server/mod.rs`、`main.rs`（退出时收子进程；⚠️ `RunEvent::Exit` 里**没有**真正的收尾逻辑，原因见那里的注释）、`app/desktop/Cargo.toml`（`windows-sys` 的 JobObjects feature）、`tools/svsep-pack.ps1`、`app/web-next/src/pages/Svsep.tsx` / `Svsep.css`、`lib/api.ts`、`App.tsx`、`pages/Audio.tsx`（拆掉 SeparationCard，改成一个「去音轨分离」的入口卡）、`pages/Dashboard.tsx`、`.gitignore`。
+
+---
+
+### 3.12 人声转 MIDI（GAME，进程内 ONNX）
+
+2026-10-03 落地。**工作流位置：音轨分离之后**（干声 → MIDI）。
+算法与踩坑的完整经验在 **`docs/INTEGRATIONS.md` §五之五**，这里只写「怎么接进工作站」。
+
+**和音轨分离的根本区别**：**没有子进程、没有端口**。ONNX 推理在同进程里跑，
+`ort` crate 以 `load-dynamic` 加载 `onnxruntime.dll`（**优先借用音轨分离运行时里那份**，
+所以装了音轨分离的用户不需要再下运行库）。
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| 纯算法 | `src/game/algo.rs` | 切片器、D3PM 采样环、边界解码、区间↔时值、重采样（照上游逐行复刻，**字节级没改**） |
+| MIDI | `src/game/midi.rs` | 最小 SMF 写出器 + 单音化去重叠 |
+| 读夹具 | `src/game/fixture.rs` | 读 golden 向量；推理路径只用它的 `read_wav_mono_f32` |
+| 推理 | `src/game/engine.rs` | 三个 ONNX 会话 + 跑完一条音频（进度回调） |
+| 文件与下载 | `src/midi_transcribe.rs` | 路径 / 状态 / 下载解包 / ffmpeg 转码 / 落盘 / 任务注册 |
+| 路由 | `src/server/midi.rs` | 11 条 `/api/midi/*` |
+| 页面 | `app/web-next/src/pages/Midi.tsx` + `Midi.css` | 选择、参数、进度、钢琴卷帘、许可声明 |
+
+**路由（11 条 `/api/midi/*`）**：`status` / `models/download` / `runtime/download` /
+`download/pause`（⚠️ 等价于停止，界面不用它）/ `download/stop` / `deps/delete` /
+`transcribe` / `task/{id}` / `task/{id}/cancel` / `task/{id}/file/{name}` / `open-output`
+（逐条编号见第 2 节路由总表 57~67）。
+⚠️ 进度订阅**复用既有的 `/api/jobs/get` 与 `/api/jobs/{id}/stream`**，没有另造一套。
+
+**磁盘布局**（和 `svsep` 同一套两层模型）：
+
+| 放哪 | 内容 |
+|---|---|
+| 可写目录的 `game/models/`（绿色版 = `app/data/game/models/`） | `encoder.onnx` / `segmenter.onnx` / `estimator.onnx` / `config.json` |
+| 同一目录的 `ort.part` / `game-models.part` | 下载中的临时文件（**不支持续传**，只用于提示） |
+
+⚠️ **落点写死 `writable.join("game")`，不要用 `models_dir(writable)`** ——
+它解析成 `<可写>/midi/`，会「下载成功、解包成功、但引擎找不到」，用户点「开始扒谱」才报错。
+
+**「删掉下好的依赖」删哪两层（2026-10-03 修）**：`delete_deps(root, writable)` 删**两处** ——
+① `<可写>/midi/` 里的下载物（`ort.part` / `ort-unpack\` / 下下来的 dll），
+② **`<可写>/game/models/`**。加上 ② 之前有个真报过的 bug：模型落在 ②、而函数只清 ①，
+于是 347 MB 一个字节没少、`status` 照样回 `models.ready = true`、**下载按钮再也不出现**。
+❌ 随包只读那一层（`<root>/app/data/game/models`）**一律不删** —— 那是安装内容，
+何况安装版下它根本不可写。
+
+⚠️ **绿色版这两层是同一个绝对路径**（`writable == <root>/app/data`），所以「引擎用的
+到底是哪一层」**只能靠 `status` 里的 `models.origin` 说清** —— 三态：
+
+| 值 | 含义 | 界面该怎么说 |
+|---|---|---|
+| `"downloaded"` | 引擎用的是 `<可写>/game/models`（下载物就落这儿） | 什么都不用说 |
+| `"bundled"` | 引擎用的是随包只读那层，**且它不是下载落点**（只可能出现在安装版：可写目录在 `%APPDATA%`） | 「引擎用的是随包自带那层，删除按钮不动它，所以删完还是『就绪』」 |
+| `"local"` | 两层同一个绝对路径（绿色版） | **什么都别说** —— 删了就是真没了，没有第二层可回落 |
+
+判据是 `resolve_model_dir` 指向哪层（它会跳过不齐的候选，所以它指向哪层就是引擎真在用哪层）+ 两层是不是同一个路径：
+`active != bundled` → `downloaded`；否则 `bundled == dirs[0]` → `local`；否则 `bundled`。
+⛔ 「引擎会接着用随包那份」这句**只在第三态（`bundled`）成立**，绿色版说它就是错话 ——
+用户一删完就会看到它（真报过）。界面的判据要连 `models.ready` 一起看。
+⛔ 别在前端按 `dir` 的**尾巴**猜：三种情况的路径都以 `\game\models` 结尾，判不出来。
+`delete_deps` 回 `{files, bytes, note}`，那个 `note` 是后端算好的中文说明，**必须显示**。
+
+`game/engine.rs::resolve_model_dir` 保持「跳过不齐的候选」的语义（`missing_models(d).is_empty()`），
+**别改成 `d.is_dir()`** —— 空目录必须当成没有，否则用户删完下载物之后，随包那层明明齐全，
+却会因为空目录排在候选表第一位而显示成「缺 3 个」并冒出下载按钮。
+
+**模型包自己托管（2026-10-03 补）**：`midi_transcribe.rs::MODEL_URL` 指向
+**`https://1856610041.cdn.123clouddisk.com/1856610041/V-Synth-Studio/GAME-1.0.3-large-onnx.zip#`**
+（与音轨分离那两个包同一个 CDN，末尾 `#` 同样是链接的一部分，别删）。
+自建包 = **364,093,888 B**，由 `tools\game-pack.ps1` 从 `app\data\game\models\` 打出来，
+白名单四个文件、**每个都校验实测字节数**（注入版 `segmenter` 只差 37 字节，光看名字看不出来），
+打完打印新的 `MODEL_ZIP_BYTES` / `MODEL_BYTES` 该填什么。
+
+为什么不直接下上游 release：**实测这台机器下不动 GitHub 的 release 资产** —— `github.com`
+与 `api.github.com` 直连都通（`curl -I` 200），但资产会 302 跳到 `objects.githubusercontent.com`，
+跟过去 TLS 握手直接失败（`curl: (35) schannel: failed to receive handshake`），带 `-L` 则是
+`Failed to connect to github.com port 443: Timed out`。机器上没有代理、没有 `*_PROXY`、`hosts`
+文件都不存在 —— 不是配置问题，是线路问题。
+
+**两个包可以互换**：自建包沿用上游那个顶层目录名 `GAME-1.0.3-large-onnx/`，
+所以 `download_models()` 里 `strip = "GAME-1.0.3-large-onnx/"` 两边都命得中。
+⚠️ **打成平铺（四个文件直接放 zip 根）看着更干净，但那样 strip 命不中，文件会解到
+`game\models\GAME-1.0.3-large-onnx\` 下面，而 `engine::missing_models` 找的是
+`game\models\encoder.onnx` —— 不会报任何错，只在用户点「开始扒谱」时说「模型还没装全」。**
+
+debug 构建可以用 `VSS_MIDI_MODEL_URL` / `VSS_MIDI_RUNTIME_URL` 顶掉这两个常量
+（照 `svsep.rs::url_override` 那套），**发布版不认这两个变量**。
+
+**任务**：`POST transcribe` 立刻返回 `{jobId}`，实际推理在 `tokio::spawn_blocking` 里跑
+（ONNX 是同步阻塞的，不能占着 async 线程）。同时只允许一个任务（`RUNNING` 静态槽）。
+⚠️ **取消时不能清空 `RUNNING` 槽** —— 那是 `run_job` 收工时的活，而且要**认 id**
+（`if slot.as_ref().map(|(id, _)| id.as_str()) == Some(job_id)`），否则任务还在跑、
+界面已经放开「再提交一个」。
+
+**输入路径**：先 `ffmpeg` 转成 44.1 kHz 单声道 f32 WAV，再用 `fixture::read_wav_mono_f32` 读。
+参数（去噪步数 4~16）在页面上可选，但**只有 8 是官方验证过的**。
+
+**实测（2026-10-03，最终 exe + 真模型）**：
+- 10.68 秒干声 → **100.9 秒**跑完（encoder 5.2 s / segmenter 75.9 s / estimator 10.1 s），
+  **42 个音符**，写出 `.mid`（412 B，42 个 `note_on`，`division=480` = 960 ticks/秒）、`.csv`、`.json`。
+- **与 PyTorch 参考实现逐位一致**：音高 `max |Δpitch| = 0.000000000`（这是 41 音符那次的
+  对照结果；42 音符这次用的是**真随机**，所以边界数本来就会不同 —— 见 `INTEGRATIONS.md`）。
+- ⚠️ **纯 CPU，约 10 秒墙钟换 1 秒音频**（本机 AMD RX 580 没有可用的 GPU 后端）。
+  页面上把这句话放在按钮**上方**。3 分钟干声 ≈ 半小时，这是硬约束不是 bug。
+
+**许可**：代码 MIT（算法是重写的），**权重 CC BY-NC-SA 4.0（非商业）**、不随包分发。
+页面「许可与出处」那一栏是为此放的，**别删**。详见 `docs/THIRD-PARTY-NOTICES.md`。
+
+**护栏**：`tests/manual/next-smoke.mjs` 里 `#/midi` 那页的 `probe` 按**后端真回的字段**
+反查界面（`models.ready && runtime.ready` 时不该出现「缺依赖」/「第一次用要先下模型」/
+「下载模型」按钮；借来的运行时必须写「复用音轨分离的运行时」）。和音轨分离那条同一个道理 ——
+字段写错时**文案断言全绿、状态却恒为「缺失」**。
 
 ---
 

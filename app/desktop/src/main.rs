@@ -23,8 +23,10 @@
 mod audio;
 mod bili;
 mod data;
+mod game;
 mod libresvip;
 mod lyrics;
+mod midi_transcribe;
 mod net;
 mod platform;
 mod server;
