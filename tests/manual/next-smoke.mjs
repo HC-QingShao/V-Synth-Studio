@@ -110,6 +110,25 @@ const PAGES = [
       if (st.runtime && st.runtime.borrowed && text.includes('缺')) {
         if (!text.includes('复用音轨分离')) return '运行时是借来的，界面却没写「复用音轨分离的运行时」'
       }
+      /* 推理方式那一格（2026-10-04 加）。⚠️ 这是**最容易静默错**的一处：
+         字段名读错（写成 st.cuda / st.device.cudaOk 之类）时页面照样渲染，
+         只是 GPU 那一格**永远锁着** —— 文案断言全绿，N 卡用户却解锁不了。
+         所以这里按后端真回的 \`device.cuda.ok\` 反查界面上那个分段控件。 */
+      const cuda = st.device && st.device.cuda
+      if (st.device && cuda) {
+        if (!text.includes('推理方式')) return '界面没有「推理方式」这一项'
+        const gpuSeg = [...document.querySelectorAll('.lg-segment')]
+          .find((e) => (e.textContent || '').trim() === 'GPU')
+        if (!gpuSeg) return '界面上找不到 GPU 那一格（分段控件没渲染出来？）'
+        const locked = gpuSeg.getAttribute('data-disabled') === 'true'
+        if (cuda.ok && locked) return '后端说 cuda.ok=true（GPU 能用），界面却把 GPU 那一格锁着'
+        if (!cuda.ok && !locked) return '后端说 cuda.ok=false（GPU 不能用），界面却没锁 GPU 那一格'
+        /* 选了 GPU 但用不了时，后端会给一句补救话术（\`device.note\`），界面必须显示
+           —— 否则用户看到的就是「选了 GPU、没有任何反应」。 */
+        if (st.device.mode === 'gpu' && !cuda.ok && st.device.note && !text.includes('用不了 GPU')) {
+          return '选了 GPU 但这台用不了，界面没显示后端给的补救说明'
+        }
+      }
       return ''
     })()`,
   },

@@ -41,7 +41,13 @@ flate2 = "1"
 #
 # ndarray 的版本必须和 `ort` 的 `ndarray` feature 转出来的那份完全一致，
 # 否则 `Tensor::from_array` 会因为「两份 crate」而拒绝我们的数组。
-ort = { version = "2.0.0-rc.13", default-features = false, features = ["ndarray", "load-dynamic"] }
+#
+# `cuda`（2026-10-04 加）：只为了拿到 `ort::ep::CUDA` 这个类型（它在 ort 里被
+# `#[cfg(feature = "cuda")]` 整个门住）。**它不会把 CUDA 变成构建依赖** ——
+# ort 的 cuda feature 只是打开 API，真正去 LoadLibrary 的是运行时，而且
+# `ort-sys` 因为 `load-dynamic` 已经带上了 `disable-linking`，链接期不碰任何
+# CUDA 库。所以 AMD 机器、没装 CUDA 的机器照样能用这个 exe，只是那一格锁着。
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["ndarray", "load-dynamic", "cuda"] }
 ndarray = "0.17"
 
 # 只有 Unix 下需要：给进程组发信号，把子进程树一起收掉

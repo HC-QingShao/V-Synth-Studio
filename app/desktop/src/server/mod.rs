@@ -204,6 +204,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/midi/download/pause", post(midi::download_pause))
         .route("/api/midi/download/stop", post(midi::download_stop))
         .route("/api/midi/deps/delete", post(midi::deps_delete))
+        .route(
+            "/api/midi/device",
+            get(midi::device_get).post(midi::device_set),
+        )
         .route("/api/midi/transcribe", post(midi::transcribe))
         .route("/api/midi/task/{id}", get(midi::task))
         .route("/api/midi/task/{id}/cancel", post(midi::cancel))

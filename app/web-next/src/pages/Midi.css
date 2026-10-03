@@ -60,6 +60,28 @@
   font-weight: 600;
 }
 
+/* ── 推理方式那个三选一 ───────────────────────────────────
+   控件本身用的是玻璃库的 `<GlassSegmentedControl>`（和音轨分离页同一个），
+   这里只负责让它别撑满整行。
+   ⛔ **别给容器加 `pointer-events: none` 来表达「禁用」** —— 被禁的那一格要靠
+   容器的 `onClickCapture`（在 `Midi.tsx` 里）弹提示，一屏蔽就变成点了毫无反应，
+   而「点了没反应」正是用户会来报的那个问题。 */
+.midi-infer {
+  display: inline-flex;
+  width: fit-content;
+}
+
+/* 选了 GPU 但这台机器用不了时后端给的话术（不是这里编的） */
+.midi-note-warn {
+  margin: var(--lg-space-3) 0 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--lg-warn, #d99) 12%, transparent);
+  color: var(--lg-label);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 /* ── 状态那三格 ─────────────────────────────────────────── */
 .midi-stats {
   display: flex;

@@ -130,6 +130,444 @@ fn runtime_url() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// 推理方式（自动 / GPU / CPU）
+// ---------------------------------------------------------------------------
+
+/// 推理方式。界面上的三选一，落到盘上就是这三个字符串。
+///
+/// `auto` 与 `cpu` 在**今天**完全等价（`engine::ort_session` 只在 `gpu` 时挂
+/// CUDA，其余一律纯 CPU）—— 留着 `auto` 是为了将来接 CoreML / DirectML 时能
+/// 把「让引擎自己挑」与「我就要 CPU」分开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Device {
+    #[default]
+    Auto,
+    Cpu,
+    Gpu,
+}
+
+impl Device {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "gpu" => Self::Gpu,
+            "cpu" => Self::Cpu,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+        }
+    }
+}
+
+/// 设置文件：`<可写>/midi/midi_settings.json`。
+///
+/// ⛔ 和音轨分离那个 `<可写>/svsep/data/inference_settings.json` **是两个文件，
+/// 别想着共用**：那个文件是 Python 的 `inference_settings.py::_SETTINGS_PATH`
+/// 在管，键名与合法值都由它定义；我们写进去的东西它不认识，反过来也一样。
+pub fn settings_file(writable: &Path) -> PathBuf {
+    data_dir(writable).join("midi_settings.json")
+}
+
+/// 读盘上的推理方式。没有文件、文件坏了、值认不出，一律回 `auto`。
+pub fn read_device(writable: &Path) -> Device {
+    std::fs::read_to_string(settings_file(writable))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("device").and_then(Value::as_str).map(Device::parse))
+        .unwrap_or_default()
+}
+
+/// 写盘上的推理方式。
+pub fn write_device(writable: &Path, dev: Device) -> Result<(), String> {
+    let path = settings_file(writable);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败：{e}"))?;
+    }
+    let body = serde_json::to_string_pretty(&json!({ "device": dev.as_str() }))
+        .map_err(|e| format!("序列化推理方式失败：{e}"))?;
+    std::fs::write(&path, body).map_err(|e| format!("写推理方式失败：{e}"))
+}
+
+/// CUDA 那边探到的东西。探成功之后**常驻**（见 `cuda_info` 的注释）。
+#[derive(Debug, Clone)]
+pub struct CudaInfo {
+    /// 现在到底能不能用 CUDA。
+    pub available: bool,
+    /// 给界面直接显示的中文。
+    ///
+    /// ⛔ 信息**全塞在这一句里**，别再单开一个「组件目录」字段：单开的那个字段
+    /// 没有读者（会吃 `field is never read` 警告），而这段中文是**原样显示给
+    /// 用户**的，路径写在这儿才真的有人看。
+    pub detail: String,
+}
+
+/// 当前推理方式 + CUDA 能不能用，给 `/api/midi/status` 一并发出去。
+pub struct DeviceStatus {
+    pub device: Device,
+    pub cuda_ok: bool,
+    pub cuda_detail: String,
+    /// 用户选了 GPU 但这台机器用不了时的补救话术（空串 = 没什么好说的）。
+    pub note: String,
+}
+
+pub fn device_status(writable: &Path, dll: Option<&Path>) -> DeviceStatus {
+    let device = read_device(writable);
+    let info = cuda_info(dll);
+    let note = if device == Device::Gpu && !info.available {
+        format!("现在这一台用不了 GPU：{}。先按 CPU 跑。", info.detail)
+    } else {
+        String::new()
+    };
+    DeviceStatus { device, cuda_ok: info.available, cuda_detail: info.detail, note }
+}
+
+/// 探测结果的缓存：成功的一直留，失败的**最多留 [`FAILED_TTL`]**。
+static CUDA_PROBE: std::sync::Mutex<Option<(std::time::Instant, CudaInfo)>> =
+    std::sync::Mutex::new(None);
+
+/// 失败结果能留多久。见 [`cuda_info`] 里那段「为什么要缓存、为什么两档不一样」。
+const FAILED_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 这台机器现在能不能用 CUDA 跑 ONNX Runtime。
+///
+/// ⚠️ **两档缓存，别改成一样**：`/api/midi/status` 是前端每 2 秒轮询的接口，
+/// 而探一次 CUDA 会话在**没有 N 卡**的机器上要 1 秒多（真会去初始化 CUDA，
+/// 拿回 `CUDA failure 35: CUDA driver version is insufficient`）。每 2 秒来一遍
+/// 就是白白烧掉一半核。
+///
+/// - **成功** ⇒ 永久缓存：那几百 MB 的 `cublasLt64_12.dll` 已经进了进程，
+///   不会退回去，也没有再探的意义。
+/// - **失败** ⇒ 只留 [`FAILED_TTL`]：用户可能正开着这个界面去装音轨分离，
+///   装完不重启就该能解锁；30 秒够短，也够挡住轮询。
+pub fn cuda_info(dll: Option<&Path>) -> CudaInfo {
+    if let Ok(cache) = CUDA_PROBE.lock() {
+        if let Some((at, info)) = cache.as_ref() {
+            let fresh = info.available || at.elapsed() < FAILED_TTL;
+            if fresh {
+                return info.clone();
+            }
+        }
+    }
+    let info = probe_cuda(dll);
+    if let Ok(mut cache) = CUDA_PROBE.lock() {
+        *cache = Some((std::time::Instant::now(), info.clone()));
+    }
+    info
+}
+
+fn probe_cuda(dll: Option<&Path>) -> CudaInfo {
+    let dll = match dll {
+        Some(p) => p,
+        None => {
+            return CudaInfo {
+                available: false,
+                detail: "还没找到 ONNX Runtime 动态库，先下运行库".into(),
+            }
+        }
+    };
+    /* ⛔⛔ **必须先把 ONNX Runtime 本体加载进来，否则下面那句 `is_available()`
+       会让整个进程 panic**。这是真机上抓到的：
+       `thread 'tokio-rt-worker' panicked at ort-2.0.0-rc.13/src/lib.rs:234:
+        Failed to load ONNX Runtime dylib: MissingApi { path: "onnxruntime.dll" }`
+
+       原因在 ort 内部：任何 ORT 调用（含 `ExecutionProvider::is_available`）都会
+       走 `ort::api()`，而它第一次被调用时是**惰性初始化** —— 如果此前没人调过
+       `ort::init_from(...).commit()`，它就退回去找**裸文件名** `onnxruntime.dll`，
+       PATH 里当然没有。`transcribe` 里那句 `load_runtime(dll)` 来得太晚：
+       `/api/midi/status` 是首页一进就轮询的接口，**它会先到这儿**。
+
+       症状极具误导性：**整个 HTTP 连接被直接掐断**（curl 报
+       `Empty reply from server`、`HTTP 000`），没有 500、没有 JSON、没有日志，
+       `Get-Process` 里进程还活得好好的（那是 tokio 的 worker 线程 panic 了，
+       不是进程崩了）—— 看起来像「路由没注册」或「网络出问题」。
+       ⇒ 遇到「某个接口连回复都没有」，**去抓 `--serve` 进程的 stderr**，
+       别盯着路由表看。
+
+       加载一次就够（`ort::init_from` 内部是 `OnceLock`，重复调用无害），所以
+       这里用 `RUNTIME_LOADED` 只做一次；`/api/midi/status` 是 2 秒轮询的。 */
+    static RUNTIME_LOADED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if RUNTIME_LOADED.get().is_none() {
+        if let Err(e) = crate::game::engine::load_runtime(dll) {
+            return CudaInfo { available: false, detail: e };
+        }
+        let _ = RUNTIME_LOADED.set(());
+    }
+
+    /* ⚠️ **那 12 个 CUDA 组件 dll 分在四个目录里**，不是一个：
+         cudart64_12.dll   → nvidia/cuda_runtime/bin/
+         cublas{,Lt}64_12.dll → nvidia/cublas/bin/
+         cufft64_11.dll    → nvidia/cufft/bin/
+         8 个 cudnn*_9.dll → nvidia/cudnn/bin/
+
+       ⇒ **不能指望 `ort::ep::cuda::preload_dylibs`**：它只吃**一个** CUDA 根目录
+       和**一个** cuDNN 根目录，然后把 `CUDA_DYLIBS`（4 个）/ `CUDNN_DYLIBS`（8 个）
+       里的每个名字都 `root.join(name)` 去加载 —— 而真机上这 4 个 CUDA dll
+       **根本不在同一个目录**。实测（2026-10-03）只喂第一个目录时它会这样报：
+       `Failed to preload `cublasLt64_12.dll`: LoadLibraryExW failed
+        （…\nvidia\cuda_runtime\bin）` —— 它拿 `cuda_runtime\bin` 去找 `cublasLt`，
+       当然找不到。
+
+       ✅ **和 Python 侧一模一样的做法：把这四个目录加进进程的 `PATH`。**
+       `onnxruntime_providers_cuda.dll` 内部是 `LoadLibraryExW` 找依赖，而
+       `LoadLibraryExW`（不带 `LOAD_LIBRARY_SEARCH_*` 标志时）**会搜 `PATH`**，
+       所以 CUDA EP 真去加载自己那些依赖时就能找到。
+       （`svsep` 那边的 Python 用的是 `os.add_dll_directory`，同一个道理。） */
+    static NVIDA_BIN_DIRS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    let dirs = NVIDA_BIN_DIRS.get_or_init(|| {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for name in [
+            "cudart64_12.dll",
+            "cublas64_12.dll",
+            "cufft64_11.dll",
+            "cudnn64_9.dll",
+        ] {
+            if let Some(d) = find_dylibs_dir(dll, &crate::tools::dll(name.trim_end_matches(".dll")))
+            {
+                if !out.contains(&d) {
+                    out.push(d);
+                }
+            }
+        }
+        out
+    });
+
+    /* 只在第一次探的时候动 PATH（`/api/midi/status` 是 2 秒轮询的）。
+       加入的是**四条**路径，不是一条 —— 别图省事只取 `find_dylibs_dir` 的第一个结果。
+
+       ⚠️ 手拼 `;`，别用 `std::env::join_paths`：后者见到路径里含 `;` 会直接报
+       `InvalidInput`，而这里四条路径全是进程外的东西，不值当为它写一条错误分支。 */
+    static PATH_PATCHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if !dirs.is_empty() && PATH_PATCHED.get().is_none() {
+        let mut patched = std::env::var("PATH").unwrap_or_default();
+        for d in dirs {
+            let d = d.to_string_lossy();
+            if !patched.to_lowercase().contains(&d.to_lowercase()) {
+                patched = format!("{d};{patched}");
+            }
+        }
+        std::env::set_var("PATH", patched);
+        let _ = PATH_PATCHED.set(());
+    }
+    let found = dirs.iter().map(|d| crate::platform::clean_path(d)).collect::<Vec<_>>();
+
+    /* ⛔⛔ **`is_available()` 本身不足以当判据** —— 它只回答「这份 ORT 构建里
+       编进了 CUDA provider 没有」，**与这台机器有没有 N 卡无关**。实测（2026-10-03，
+       本机是 **AMD RX 580**）：把四个目录加进 `PATH` 之后它回 **`Ok(true)`** ——
+       于是「默认锁死」这条需求当场失效，A 卡用户也会看到 GPU 那格是亮的。
+
+       ✅ 真判据只有一条：**真拿 CUDA 建一个会话看看**。
+       `SessionBuilder::with_execution_providers([CUDA.error_on_failure()])` 会
+       让 ORT 当场去初始化 CUDA EP：没有 N 卡 / 驱动太老 / 组件缺失都会在这一步
+       返回 Err，而这正是我们要的那句话（它的原文还会原样显示在界面上）。
+       `error_on_failure()` 在这里是必须的 —— 默认的 `fail_silently` 会把
+       「CUDA 没装上」吞掉、悄悄给一个 CPU 会话。
+
+       图用**内存里拼的最小 ONNX**（一个 `Identity`，见 `mini_onnx`）：不依赖
+       `app/data/game/models` 里那 376 MB 模型在不在 —— **GPU 那一格该不该亮，
+       跟用户下没下模型是两回事**（状态接口在没模型时也要答得出来）。 */
+    use ort::ep::ExecutionProvider as _;
+    match ort::ep::CUDA::default().is_available() {
+        Ok(true) => {}
+        Ok(false) => {
+            return CudaInfo {
+                available: false,
+                detail: "这份 ONNX Runtime 里没有 CUDA provider（官方 CPU 包）".into(),
+            }
+        }
+        Err(e) => {
+            return CudaInfo {
+                available: false,
+                detail: format!("问 ONNX Runtime「有没有 CUDA」时出错：{e}"),
+            }
+        }
+    }
+    /* ⚠️ 这里**不能用 `?` 或 `and_then` 串**：`with_execution_providers` 失败时
+       回的是 `ort::Error<SessionBuilder>`（它能把 builder 还给你），与后面那句的
+       `ort::Error<()>` 不是一个类型。手工两步、各自 `map_err` 成字符串最省事。 */
+    let probe = ort::session::Session::builder().map_err(|e| e.to_string()).and_then(|b| {
+        b.with_execution_providers([
+            ort::ep::CUDA::default().build().error_on_failure(),
+            ort::ep::CPU::default().build(),
+        ])
+        .map_err(|e| e.to_string())
+        .and_then(|mut b| b.commit_from_memory(&mini_onnx()).map_err(|e| e.to_string()))
+    });
+    match probe {
+        Ok(_) => CudaInfo {
+            available: true,
+            /* 这一条会**原样显示在界面上**（`device.cuda.detail`），所以把找到的
+               目录带上：解锁之后万一建会话还是失败，用户手里得有能对得上的线索。 */
+            detail: if found.is_empty() {
+                "这台机器的 ONNX Runtime 能用 CUDA（组件走的是系统里那一套）".into()
+            } else {
+                format!("这台机器能用 CUDA 跑 ONNX Runtime，组件来自 {}", found.join("、"))
+            },
+        },
+        Err(e) => CudaInfo {
+            available: false,
+            detail: format!("这台机器上 CUDA 建不出会话（多半是没有 N 卡或驱动太老）：{e}"),
+        },
+    }
+}
+
+/// 一张**内存里拼的最小 ONNX 图**：`1×1 float` → `Identity` → `1×1 float`。
+///
+/// 只用来试「CUDA 能不能建出会话来」（见 `probe_cuda`）—— 所以刻意不碰磁盘上
+/// 那 376 MB 的模型，也不做任何计算。
+///
+/// 手写这十几个字节是因为**没有 `onnx` crate 可依赖**（为这一件事引一个依赖不划算），
+/// 而 protobuf 的线格式对这么小的图是能手写的：每个字段都是
+/// `(field_number << 3) | wire_type`。
+/// 结构：`ModelProto{ ir_version=7(1,varint), opset_import(8){version=13(2,varint)},
+/// graph(7){ name(2,LEN), node(1){ op_type="Identity"(4), input=["x"](1),
+/// output=["y"](2) }, input(5){ name="x", type(1){ tensor_type(1){ elem_type=1(1,varint),
+/// shape(2){ dim(1){ dim_value=1(1,varint) } } } } },
+/// output(2){ name="y", type(1){ tensor_type(1){ elem_type=1, shape(2){ dim(1){…=1} } } } } } }`
+fn mini_onnx() -> Vec<u8> {
+    /// protobuf 的 varint。
+    fn vi(mut v: u64, out: &mut Vec<u8>) {
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                return;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    /// 一个 LEN 字段（tag + 长度 + 内容）。
+    fn ld(field: u64, body: &[u8], out: &mut Vec<u8>) {
+        vi((field << 3) | 2, out);
+        vi(body.len() as u64, out);
+        out.extend_from_slice(body);
+    }
+    /// 一个 varint 字段。
+    fn vf(field: u64, v: u64, out: &mut Vec<u8>) {
+        vi(field << 3, out);
+        vi(v, out);
+    }
+    /// 一串 UTF-8 的 LEN 字段。
+    fn ss(field: u64, s: &str, out: &mut Vec<u8>) {
+        ld(field, s.as_bytes(), out);
+    }
+    /// `TypeProto` 的字节：`tensor_type(1){ elem_type=FLOAT(1), shape(2){ dim(1){ dim_value=1 } } }`。
+    ///
+    /// ⛔ 这个 `[1]` 形状是**必须的**，而且**极易写错**（两种写法都会产出「能解析、但 ORT 拒收」的
+    /// 字节，症状一模一样）：
+    /// - 少了 `shape` → ORT 报 `Tensor does not have type information.`；
+    /// - 形状里的 `dim_value` 丢了 → 变成动态维度，图在法律上仍然成立。
+    ///
+    /// 更坑的是**返回值**：调用方必须把它包成 `ValueInfoProto.type`，而那是**字段 2**
+    /// （`ValueInfoProto{ name = 1, type = 2 }`）。写成一（`ld(1, …)`）会拼出
+    /// 「两个 `name`、没有 `type`」的 ValueInfoProto —— 手写的线格式自检测试**照样全绿**
+    /// （它拆出来的就是两个字段 1），只有真拿 ONNX Runtime 建一次会话才现形。
+    fn tensor_type() -> Vec<u8> {
+        let mut shape_dim = Vec::new();
+        vf(1, 1, &mut shape_dim); // dim_value = 1
+        let mut shape = Vec::new();
+        ld(1, &shape_dim, &mut shape); // shape.dim[0] = {dim_value: 1}
+        let mut tensor = Vec::new();
+        vf(1, 1, &mut tensor); // elem_type = FLOAT
+        ld(2, &shape, &mut tensor); // shape
+        let mut out = Vec::new();
+        ld(1, &tensor, &mut out); // TypeProto.tensor_type
+        out
+    }
+
+    let mut node = Vec::new();
+    ss(1, "x", &mut node); // input
+    ss(2, "y", &mut node); // output
+    ss(4, "Identity", &mut node); // op_type
+
+    let mut input_vi = Vec::new();
+    ss(1, "x", &mut input_vi);
+    ld(2, &tensor_type(), &mut input_vi); // ValueInfoProto.type —— **字段 2**，不是 1
+    let mut output_vi = Vec::new();
+    ss(1, "y", &mut output_vi);
+    ld(2, &tensor_type(), &mut output_vi);
+
+    let mut graph = Vec::new();
+    ss(2, "cuda-probe", &mut graph); // graph.name
+    ld(1, &node, &mut graph); // node
+    ld(11, &input_vi, &mut graph); // input
+    ld(12, &output_vi, &mut graph); // output
+
+    let mut model = Vec::new();
+    vf(1, 7, &mut model); // ir_version = 7
+    ld(7, &graph, &mut model); // graph
+    let mut opset = Vec::new();
+    vf(2, 13, &mut opset); // opset_import.version = 13
+    ld(8, &opset, &mut model);
+    model
+}
+
+/// 从 `dll` 往上逐层看，找那一层**下面的** `nvidia/`，再在它里面定位某个组件 dll，
+/// 返回**装那个 dll 的目录**（`nvidia/<组件>/bin`，加进 `PATH` 用的就是它）。
+///
+/// **真实布局**（`pip install nvidia-*` 之后就是这样，一层不多一层不少）：
+/// ```text
+/// <可写>/midi/onnxruntime.dll                        ← 自己下的 ORT：本体在 `midi/` 根上
+/// <音轨分离运行时>/runtime/Lib/site-packages/        ← 往上一层
+///     nvidia/cublas/bin/cublas64_12.dll              ← 组件在 `nvidia/<组件>/bin/`
+///     nvidia/cufft/bin/cufft64_11.dll
+///     nvidia/cuda_runtime/bin/cudart64_12.dll
+///     nvidia/cudnn/bin/cudnn64_9.dll …
+///     onnxruntime/capi/onnxruntime.dll               ← 借用的就是这一个
+/// ```
+/// ⛔ **是「哪一层的下面有 `nvidia/`」，不是「哪一层叫 `nvidia`」** ——
+/// 两个条件写成一样都不报错，只是永远找不到（这里就这么错过一次：
+/// 从 ORT 本体往上走是 `capi → onnxruntime → site-packages → …`，
+/// `site-packages` 自己叫 `site-packages`，而 `nvidia` 是它**下面**的一层，
+/// 于是条件恒假 ⇒ 四个目录一个都找不到 ⇒ GPU 永远解不了锁）。
+///
+/// 返回**目录**而不是文件，是因为调用方要把它加进 `PATH`（四个组件分在四个
+/// `bin/` 里，见 `probe_cuda`）。找不到就回 `None`（调用方据此判「没装音轨分离
+/// 运行时」，再往下问 ORT 自己）。
+fn find_dylibs_dir(dll: &Path, probe_name: &str) -> Option<PathBuf> {
+    let mut dir = dll.parent();
+    while let Some(d) = dir {
+        /* 只认 `site-packages/nvidia` 这一种形状。
+           ⛔ 别放宽成「任何含 probe_name 的目录」：`<可写>/midi/` 里如果用户自己
+           放了 CUDA 版 ORT，它的依赖躺在系统目录、不在旁边，那样找出来的「路径」
+           是假的，反而会把一个没有 dll 的目录塞进 PATH。 */
+        if let Some(hit) = find_file(&d.join("nvidia"), probe_name, 3) {
+            return hit.parent().map(Path::to_path_buf);
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// 在 `dir` 底下（含 `dir` 自己）最多往下 `depth` 层找名为 `name` 的文件。
+/// 找到第一个就回 —— Win32 的文件名不区分大小写，这里也按不区分处理。
+fn find_file(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    let mut subdirs = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            subdirs.push(p);
+        } else if e
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(name)
+        {
+            return Some(p);
+        }
+    }
+    if depth == 0 {
+        return None;
+    }
+    subdirs.into_iter().find_map(|d| find_file(&d, name, depth - 1))
+}
+
+// ---------------------------------------------------------------------------
 // 路径
 // ---------------------------------------------------------------------------
 
@@ -223,6 +661,10 @@ pub fn status(root: &Path, writable: &Path) -> Value {
             .map(|m| m.len())
             .unwrap_or(0)
     };
+    /* 推理方式与 CUDA 可用性。`device` 是**盘上的设置**（用户选的那个），
+       `cuda.ok` 是**这台机器现在能不能用**，两者可以互相矛盾（选了 GPU 但没装
+       音轨分离）—— 界面必须照 `cuda.ok` 决定锁不锁那一格，别照 `device`。 */
+    let ds = device_status(writable, dll.as_deref());
     json!({
         "runtime": {
             "ready": dll.is_some(),
@@ -252,6 +694,11 @@ pub fn status(root: &Path, writable: &Path) -> Value {
         },
         "license": "模型权重 CC BY-NC-SA 4.0（非商业）",
         "source": "https://github.com/openvpi/GAME",
+        "device": {
+            "mode": ds.device.as_str(),
+            "cuda": { "ok": ds.cuda_ok, "detail": ds.cuda_detail },
+            "note": ds.note,
+        },
     })
 }
 
@@ -630,6 +1077,10 @@ pub fn write_outputs(out_dir: &Path, base: &str, report: &engine::Report) -> Res
         "source": "GAME (V-Synth-Studio 原生移植)",
         "samplerate": algo::SAMPLE_RATE,
         "timestep": algo::TIMESTEP,
+        /* 实际用的是哪条推理路径。⚠️ 用户选了 GPU 也可能走到这儿是 "CPU"
+           （CUDA 建会话失败会整条退回，原因写在任务日志里），所以**必须记下来** ——
+           否则「我明明开了 GPU」和「怎么还是这么慢」之间没有任何可查的东西。 */
+        "backend": report.backend,
         "nSamples": report.n_samples,
         "slices": report.slices.iter().map(|(o, n)| json!({"offset": o, "samples": n})).collect::<Vec<_>>(),
         "steps": report.per_step,
@@ -718,6 +1169,121 @@ mod tests {
         assert!(c.stopped());
     }
 
+    /// `mini_onnx()` 的字节要是拼错了，`probe_cuda` 会给出**错误的结论** ——
+    /// 一台真有 N 卡的机器会被报成「CUDA 建不出会话」，而用户只看到 GPU 那格锁着。
+    /// 所以这里不依赖 onnxruntime，直接按 protobuf 线格式把它拆一遍。
+    #[test]
+    fn mini_onnx_is_a_well_formed_model() {
+        /// 解析一个 varint，返回 `(值, 吃掉几个字节)`。
+        fn take_varint(b: &[u8], i: usize) -> (u64, usize) {
+            let (mut v, mut n) = (0u64, 0usize);
+            loop {
+                let byte = *b.get(i + n).expect("varint 越界");
+                v |= ((byte & 0x7f) as u64) << (7 * n);
+                n += 1;
+                if byte & 0x80 == 0 {
+                    return (v, n);
+                }
+            }
+        }
+        /// 把一个 message 的字段拆成 `(field_number, 内容)`，只处理 LEN 与 varint。
+        fn fields(b: &[u8]) -> Vec<(u64, Vec<u8>)> {
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < b.len() {
+                let (tag, n) = take_varint(b, i);
+                i += n;
+                let (num, wire) = (tag >> 3, tag & 7);
+                assert!(
+                    wire == 0 || wire == 2,
+                    "字段 {num} 的 wire type 是 {wire}（整块是 {}）",
+                    b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
+                );
+                if wire == 0 {
+                    let (v, n) = take_varint(b, i);
+                    i += n;
+                    out.push((num, v.to_le_bytes().to_vec()));
+                } else {
+                    let (len, n) = take_varint(b, i);
+                    i += n;
+                    let end = i + len as usize;
+                    assert!(end <= b.len(), "字段 {num} 声称的长度越界");
+                    out.push((num, b[i..end].to_vec()));
+                    i = end;
+                }
+            }
+            out
+        }
+        fn str_of(f: &[u8]) -> &str {
+            std::str::from_utf8(f).expect("不是 UTF-8")
+        }
+        /// `ValueInfoProto` → 名字。⚠️ **必须按字段号找，不能按下标猜** ——
+        /// 这里真踩过：`type` 写成了字段 1，于是 `ValueInfoProto` 成了「两个 `name`、
+        /// 没有 `type`」，而最早那版测试按 `fs[1]` 取值，**照样全绿**。
+        fn value_info(f: &[u8], who: &str) -> String {
+            let fs = fields(f);
+            let name_field = fs.iter().find(|(n, _)| *n == 1).expect("没有 name 字段");
+            assert_eq!(name_field.0, 1);
+            let type_field = fs
+                .iter()
+                .find(|(n, _)| *n == 2)
+                .unwrap_or_else(|| panic!("{who}: ValueInfoProto 没有 type 字段（只有 {:?}）", fs.iter().map(|(n, _)| *n).collect::<Vec<_>>()));
+            let type_proto = fields(&type_field.1);
+            assert_eq!(type_proto[0].0, 1, "{who}: TypeProto.tensor_type 必须是字段 1");
+            let tensor = fields(&type_proto[0].1);
+            assert_eq!(tensor[0].0, 1, "{who}: elem_type 必须是字段 1");
+            assert_eq!(tensor[0].1, [1, 0, 0, 0, 0, 0, 0, 0], "{who}: elem_type 必须是 FLOAT(1)");
+            assert_eq!(tensor[1].0, 2, "{who}: shape 必须是字段 2");
+            let shape = fields(&tensor[1].1);
+            assert_eq!(shape[0].0, 1, "{who}: shape.dim[0] 必须是字段 1");
+            let dim = fields(&shape[0].1);
+            assert_eq!(dim[0].0, 1, "{who}: dim_value 必须是字段 1");
+            assert_eq!(dim[0].1, [1, 0, 0, 0, 0, 0, 0, 0], "{who}: dim_value 必须是 1（静态维度）");
+            str_of(&name_field.1).to_owned()
+        }
+
+        let m = fields(&mini_onnx());
+        assert_eq!(m[0].0, 1, "第一个字段必须是 ir_version");
+        assert_eq!(m[0].1, [7, 0, 0, 0, 0, 0, 0, 0], "ir_version 必须是 7");
+        assert_eq!(m[1].0, 7, "第二个字段必须是 graph");
+        assert_eq!(m[2].0, 8, "第三个字段必须是 opset_import");
+
+        let graph = fields(&m[1].1);
+        assert_eq!(str_of(&graph[0].1), "cuda-probe");
+        let node = fields(&graph[1].1);
+        assert_eq!(node[0].0, 1, "node.input");
+        assert_eq!(str_of(&node[0].1), "x");
+        assert_eq!(node[1].0, 2, "node.output");
+        assert_eq!(str_of(&node[1].1), "y");
+        assert_eq!(node[2].0, 4, "node.op_type");
+        assert_eq!(str_of(&node[2].1), "Identity");
+        assert_eq!(value_info(&graph[2].1, "input"), "x", "graph.input");
+        assert_eq!(value_info(&graph[3].1, "output"), "y", "graph.output");
+
+        let opset = fields(&m[2].1);
+        assert_eq!(opset[0].1, [13, 0, 0, 0, 0, 0, 0, 0], "opset 必须是 13");
+    }
+
+    /// 同一个进程里重复 `ort::init_from` 是安全的（它内部是 `OnceLock`），
+    /// 而且我们只在这一个测试里加载。找不到就跳过（干净的 CI 上没有运行时）。
+    #[test]
+    fn a_real_onnxruntime_accepts_the_probe_graph() {
+        let dll = Path::new(
+            r"H:\工作站\app\data\svsep\runtime\Lib\site-packages\onnxruntime\capi\onnxruntime.dll",
+        );
+        if !dll.is_file() {
+            eprintln!("跳过：这台机器上没有借用的 onnxruntime.dll（{}）", dll.display());
+            return;
+        }
+        crate::game::engine::load_runtime(dll).expect("加载 ONNX Runtime");
+        let s = ort::session::Session::builder()
+            .expect("建 builder")
+            .with_execution_providers([ort::ep::CPU::default().build()])
+            .expect("注册 CPU")
+            .commit_from_memory(&mini_onnx());
+        assert!(s.is_ok(), "ONNX Runtime 不认这张探针图：{:?}", s.err());
+    }
+
     #[test]
     fn status_reports_every_candidate_missing() {
         let dir = std::env::temp_dir().join("vss-midi-status-test");
@@ -776,7 +1342,191 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// 删除依赖：**必须连 `<可写>/game/models` 一起删**。
+    /// 推理方式的读写与容错。
+    ///
+    /// ⚠️ 这组断言的用处是**挡住「顺手改个名字」**：设置文件写的是
+    /// `<可写>/midi/midi_settings.json`，音轨分离那边是
+    /// `<可写>/svsep/data/inference_settings.json`（Python 在管）。两边都叫
+    /// 「推理方式」但**不是同一个文件、键名也不同**（我们 `device`、它 `mode`），
+    /// 谁把这两个合并都会在这里红。
+    #[test]
+    fn device_settings_round_trip_and_fall_back_to_auto() {
+        let base = std::env::temp_dir().join("vss-midi-device-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let writable = base.join("appdata");
+
+        // 没有文件 ⇒ 自动
+        assert_eq!(read_device(&writable), Device::Auto);
+
+        for dev in [Device::Gpu, Device::Cpu, Device::Auto] {
+            write_device(&writable, dev).unwrap();
+            assert_eq!(read_device(&writable), dev, "写进去再读出来必须一致");
+        }
+
+        // 键名是 `device`，跟音轨分离那边的 `mode` 不一样
+        let raw = std::fs::read_to_string(settings_file(&writable)).unwrap();
+        assert!(raw.contains("\"device\""), "实际写出来的是：{raw}");
+        assert!(
+            !raw.contains("inference_settings"),
+            "别把设置写进音轨分离那个文件，实际：{raw}"
+        );
+
+        // 认不出的值 / 坏文件 ⇒ 自动（界面永远拿得到一个合法值）
+        std::fs::write(settings_file(&writable), r#"{"device":"tpu"}"#).unwrap();
+        assert_eq!(read_device(&writable), Device::Auto, "认不出的值当自动");
+        std::fs::write(settings_file(&writable), "{ 这不是 JSON").unwrap();
+        assert_eq!(read_device(&writable), Device::Auto, "文件坏了也当自动");
+
+        // 解析函数本身：大小写与空格都吃掉，其余一律自动
+        assert_eq!(Device::parse(" GPU "), Device::Gpu);
+        assert_eq!(Device::parse("Cpu"), Device::Cpu);
+        assert_eq!(Device::parse("cuda"), Device::Auto);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 没有 CUDA 的那台机器上，`device_status` 该说什么是**用户唯一看得到的东西**：
+    /// 页面只负责把后端给的 `note` 原样显示，所以这段话术的触发条件必须钉住。
+    ///
+    /// ⚠️ `dll = None` 是**唯一能在这台 AMD 机器上稳定复现的分支**：真给一个 dll
+    /// 路径会走 `preload_dylibs`（把 638 MB 的 cublasLt 真加载进测试进程）。
+    /// 「能解锁」那一半这机器验不了，由 N 卡用户端反馈兜底。
+    #[test]
+    fn device_status_talks_to_the_user_when_cuda_is_missing() {
+        let base = std::env::temp_dir().join("vss-midi-devstatus-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let writable = base.join("appdata");
+
+        // 没选 GPU ⇒ 不该有那句补救话术（页面此时也不该出现警示条）
+        write_device(&writable, Device::Cpu).unwrap();
+        let st = device_status(&writable, None);
+        assert_eq!(st.device, Device::Cpu);
+        assert!(!st.cuda_ok);
+        assert!(st.note.is_empty(), "选了 CPU 还说「用不了 GPU」是错话：{}", st.note);
+        assert!(st.cuda_detail.contains("先下运行库"), "实到：{}", st.cuda_detail);
+
+        // 选了 GPU 但用不了 ⇒ 必须给话术，且带上后端探出来的原因
+        write_device(&writable, Device::Gpu).unwrap();
+        let st = device_status(&writable, None);
+        assert_eq!(st.device, Device::Gpu);
+        assert!(!st.cuda_ok);
+        assert!(st.note.contains("用不了 GPU"), "实到：{}", st.note);
+        assert!(st.note.contains(&st.cuda_detail), "话术里必须带上原因，实到：{}", st.note);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 「往上找 nvidia 目录」那个路标查找器 —— **找不到时必须回 `None`**。
+    ///
+    /// ⛔ 回 `None` 与回一个不存在的目录，后果完全不同：`probe_cuda` 拿到 `None`
+    /// 会继续去问 ONNX Runtime（机器上可能有系统级 CUDA），而拿到一个空目录会
+    /// 让 `preload_dylibs` 直接报错、把整条 GPU 路判死。
+    ///
+    /// 另有一条更隐蔽的：**那 12 个组件分在四个 `bin/` 里**（cudart / cublas /
+    /// cufft / cudnn），所以每个组件都得能各自定位到自己的目录 —— 夹具把这四层
+    /// 都搭出来，下面逐个数一遍。
+    #[test]
+    fn find_dylibs_dir_needs_a_real_hit() {
+        let base = std::env::temp_dir().join("vss-midi-dylib-test");
+        let _ = std::fs::remove_dir_all(&base);
+        /* 仿造真实布局。⚠️ **层级必须与真的一比一**：
+             `…/Lib/site-packages/nvidia/cublas/bin/cublas64_12.dll`   ← 组件（在 nvidia 下面）
+             `…/Lib/site-packages/onnxruntime/onnxruntime.dll`         ← ORT 本体（与 nvidia 同级）
+           夹具多一层或少一层都会让人去改没坏的生产代码（这里真发生过：夹具曾多搭了一层
+           `onnxruntime/capi/`）。 */
+        let bin = base
+            .join("Lib")
+            .join("site-packages")
+            .join("nvidia")
+            .join("cublas")
+            .join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let dll = bin.join("cublas64_12.dll");
+        std::fs::write(&dll, b"x").unwrap();
+        let cuda = base
+            .join("Lib")
+            .join("site-packages")
+            .join("onnxruntime")
+            .join("onnxruntime.dll");
+        std::fs::create_dir_all(cuda.parent().unwrap()).unwrap();
+        std::fs::write(&cuda, b"x").unwrap();
+
+        // 从 ORT 本体那个 dll 往上找，应当摸到 cublas\bin，再返回它（我们的 preload 根）
+        let hit = find_dylibs_dir(&cuda, "cublas64_12.dll").expect("应当能找到");
+        assert_eq!(hit, bin, "返回的必须是**装 dll 的那个目录**，不是 nvidia 根");
+
+        /* ⭐ 四个组件四个目录，各进各的 `bin/`。真实布局就是这样：
+             cudart64_12.dll → nvidia/cuda_runtime/bin/
+             cublas64_12.dll → nvidia/cublas/bin/
+             cufft64_11.dll  → nvidia/cufft/bin/
+             cudnn64_9.dll   → nvidia/cudnn/bin/
+           只传 `nvidia/` 给 `preload_dylibs` 一个都加载不上，所以这里逐个钉子：
+           谁把 `find_dylibs_dir` 改成只认某一个组件目录，这几条立刻红。 */
+        for comp in ["cuda_runtime", "cublas", "cufft", "cudnn"] {
+            std::fs::create_dir_all(bin.parent().unwrap().parent().unwrap().join(comp).join("bin"))
+                .unwrap();
+        }
+        std::fs::write(
+            bin.parent().unwrap().parent().unwrap().join("cuda_runtime").join("bin").join("cudart64_12.dll"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(
+            bin.parent().unwrap().parent().unwrap().join("cufft").join("bin").join("cufft64_11.dll"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(
+            bin.parent().unwrap().parent().unwrap().join("cudnn").join("bin").join("cudnn64_9.dll"),
+            b"x",
+        )
+        .unwrap();
+        let root = bin.parent().unwrap().parent().unwrap();
+        assert_eq!(
+            find_dylibs_dir(&cuda, "cudart64_12.dll"),
+            Some(root.join("cuda_runtime").join("bin")),
+            "cudart 在 cuda_runtime/bin，不能回 cublas 那个目录"
+        );
+        assert_eq!(
+            find_dylibs_dir(&cuda, "cufft64_11.dll"),
+            Some(root.join("cufft").join("bin")),
+            "cufft 在 cufft/bin"
+        );
+        assert_eq!(
+            find_dylibs_dir(&cuda, "cudnn64_9.dll"),
+            Some(root.join("cudnn").join("bin")),
+            "cudnn 在 cudnn/bin"
+        );
+
+        /* ⛔ 下面这条挡的是「把判据写成『哪一层叫 nvidia』」：从 ORT 本体往上走时
+           候选是 `onnxruntime → site-packages → …`，而 `nvidia` 是 `site-packages`
+           **下面**的一层，那样写条件恒假、永远找不到（这里真这么错过一次）。
+           用一个 nvidia 树里不存在的名字，且它**只**在 ORT 自己那一层有 —— 若有人
+           把查找范围放宽到「整个 site-packages」，这条会红。 */
+        std::fs::write(cuda.parent().unwrap().join("onnxruntime_providers_shared.dll"), b"x").unwrap();
+        assert_eq!(
+            find_dylibs_dir(&cuda, "onnxruntime_providers_shared.dll"),
+            None,
+            "组件查找只在 nvidia/ 里做，别把 ORT 自己那一层也算进去"
+        );
+
+        // 找一个不存在的 dll ⇒ None（别返回一个看似合理的空目录）
+        assert!(
+            find_dylibs_dir(&cuda, "cublasLt64_12.dll").is_none(),
+            "夹具里没有这个组件 ⇒ 必须是 None（别返回一个看似合理的空目录）"
+        );
+
+        // dll 在一个跟 nvidia 毫无关系的目录里 ⇒ None
+        let lone = base.join("elsewhere").join("onnxruntime.dll");
+        std::fs::create_dir_all(lone.parent().unwrap()).unwrap();
+        std::fs::write(&lone, b"x").unwrap();
+        assert!(find_dylibs_dir(&lone, "cublas64_12.dll").is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 点「删除依赖」必须**同时**清掉下下来的模型 —— 只清 `<可写>/midi/` 的话，
+    /// 用户会看到「删了 0 个文件、模型还在、下载按钮再也不出现」。
     ///
     /// ⚠️ 第一版只清 `<可写>/midi/`（那儿只有 `.part` 与 `ort-unpack`），
     /// 于是用户点「删除依赖」后模型一个字节没少、下载按钮再也不出现 —— 真报过。

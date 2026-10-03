@@ -57,6 +57,15 @@ app/data/svsep/
 # 所以要像 svsep 那样点名这个子目录。
 app/data/game/
 
+# ── 人声转 MIDI 的可写数据（设置 + 下载物 + 任务中间文件）──────
+# app/data/midi/ 就是 `midi_transcribe::data_dir()`：
+#   * midi_settings.json —— 用户选的推理方式（`{"device":"auto|cpu|gpu"}`），
+#     每台机器不一样，和 config.json 同理属于「本机状态」；
+#   * 下下来的那份 onnxruntime.dll（官方 ORT 包 78 MB 里解出来的那个）；
+#   * work/ —— 每个任务的临时目录。
+# 与 app/data/svsep/ 同类：纯运行时产物，一个都不该进仓库。
+app/data/midi/
+
 # ── 依赖与构建产物 ──────────────────────────────────────────
 node_modules/
 *.exe

@@ -333,3 +333,221 @@ cargo 工程（`[工作站临时工程]\verify\`），喂真实 10.68 秒干声 
 `Measure-Object` 对 hashtable 数组会失败。
 
 ---
+
+## 五之五·补、把 GPU 接回来：ONNX Runtime 的 CUDA provider 怎么才算真的可用
+
+2026-10-03 补。这一节的四条都是**踩过才知道**的，重做一遍照样会踩。
+
+### ① 门槛不是「装 CUDA Toolkit」，是「那些 dll 在不在搜索路径里」
+
+N 卡用户装了驱动之后，`System32` 里只有 `nvcuda.dll`（**驱动层**那一个接口），
+没有 `cudart64_12.dll` 这些**运行时**组件 —— 那些平时要靠装 CUDA Toolkit（约 5 GB）
+或跑 `pip install nvidia-*` 才有。
+
+**但我们这个包里已经有了。** 音轨分离运行时里
+`runtime\Lib\site-packages\nvidia\` 底下，`ort` 点名要的 **4 个 CUDA + 8 个 cuDNN
+一个不缺**：
+
+| 组件目录 | 文件 |
+|---|---|
+| `cublas\bin\` | `cublasLt64_12.dll` 637.7 MB、`cublas64_12.dll` 97.8 MB |
+| `cufft\bin\` | `cufft64_11.dll` 273.8 MB |
+| `cuda_runtime\bin\` | `cudart64_12.dll` 0.6 MB |
+| `cudnn\bin\` | `cudnn_engines_precompiled64_9.dll` 526.4、`cudnn_adv64_9.dll` 258.4、`cudnn_ops64_9.dll` 100.8、`cudnn_graph64_9.dll` 95.3、`cudnn_heuristic64_9.dll` 69.8、`cudnn_engines_runtime_compiled64_9.dll` 37.4、`cudnn_cnn64_9.dll` 2.9、`cudnn64_9.dll` 0.3 |
+
+合计 2,452.4 MB（cudnn 1,092.0 / cublas 736.4 / cufft 274.0 / cuda_nvrtc 178.3 /
+nvjitlink 83.4 / curand 77.6 / cuda_runtime 10.7）。
+⇒ **「装了音轨分离那个 4.7 GB 运行时 → 转 MIDI 的 GPU 那格解锁」，用户不用再装任何东西。**
+（Python 侧靠 `separator_engine.py::_ensure_win_cuda12_bin_path` 的 `os.add_dll_directory`；
+Rust 侧靠**把这四个目录加进进程的 `PATH`**。**缺的从来不是 dll，是搜索路径。**）
+
+### ② ⚠️⚠️ 那 12 个 dll 分在**四个**目录里，`preload_dylibs` 表达不了 —— 改成加 `PATH`
+
+⛔ **别用 `ort::ep::cuda::preload_dylibs(cuda_root, cudnn_root)`。** 它只吃**一个** CUDA
+根目录和**一个** cuDNN 根目录，然后把 `CUDA_DYLIBS`（4 个）/ `CUDNN_DYLIBS`（8 个）里的
+**每个名字**都 `root.join(name)` 去加载（`ort-2.0.0-rc.13\src\ep\cuda.rs:441-454`）——
+而真机上这 4 个 CUDA dll **根本不在同一个目录**（见上表）。
+只喂第一个目录时它必然报（2026-10-03 实测原文）：
+
+```
+CUDA 组件加载失败：Failed to preload `cublasLt64_12.dll`: LoadLibraryExW failed
+（H:\工作站\app\data\svsep\runtime\Lib\site-packages\nvidia\cuda_runtime\bin）
+```
+
+—— 它拿 `cuda_runtime\bin` 去找 `cublasLt`，当然找不到。
+「每个组件目录各调一次」也**不管用**：第二次调用照样会把 4 个 CUDA 名字全拼到
+`cublas\bin` 上，第一个 `cudart64_12.dll` 就撞死。
+
+✅ **正确的做法和 Python 侧一模一样：把这四个 `bin\` 目录加进进程的 `PATH`。**
+`onnxruntime_providers_cuda.dll` 内部是 `LoadLibraryExW` 找它的依赖，而
+`LoadLibraryExW`（不带 `LOAD_LIBRARY_SEARCH_*` 标志时）**会搜 `PATH`**，
+所以 CUDA EP 真去加载自己那些依赖时就能找到。
+
+```rust
+// ✅ 四个目录都进 PATH（只在第一次探的时候动，见 ④）
+let mut patched = std::env::var("PATH").unwrap_or_default();
+for d in &dirs {                                   // dirs = 四个 nvidia/<组件>/bin
+    let d = d.to_string_lossy();
+    if !patched.to_lowercase().contains(&d.to_lowercase()) {
+        patched = format!("{d};{patched}");
+    }
+}
+std::env::set_var("PATH", patched);
+
+// ❌ 两个都不行：
+//    preload_dylibs(Some(cuda_runtime\bin), Some(cudnn\bin))   ← 4 个 CUDA 名字只有一个目录对
+//    每个组件目录各调一次 preload_dylibs(Some(&d), Some(&d))   ← 第二次起就撞死
+```
+
+⚠️ 用 `Path::join(";")` 手拼，**别用 `std::env::join_paths`**：后者见到路径里含 `;`
+会直接报 `InvalidInput`，不值当为它写一条错误分支。
+⚠️ 也别把根目录往上提一层（传 `nvidia/` 或 `site-packages/` 都不行）——
+要的就是那四个**装着 dll 的** `bin\`。
+
+### ③ ⛔ 判据是「**哪一层的下面有 `nvidia/`**」，不是「哪一层叫 `nvidia`」
+
+从 ORT 本体往上走，候选链是 `onnxruntime → site-packages → Lib → …`，而 `nvidia` 是
+`site-packages` **下面**的一层、`site-packages` 自己并不叫 `nvidia`：
+
+```rust
+// ❌ 恒假：永远找不到（这里真这么错过一次，排查花了好几轮）
+if d.file_name().is_some_and(|n| n.eq_ignore_ascii_case("nvidia")) { … }
+// ✅ 正解
+if let Some(hit) = find_file(&d.join("nvidia"), probe_name, 3) { … }
+```
+
+两个条件写出来长得几乎一样，**都不会报错，只是永远解锁不了**。
+下次再遇到「往上找目录」这类函数，**先把候选链和每层的 `file_name()` 打出来再改**，
+别推演 —— 我在这上面还先错了一次夹具（多搭了一层 `onnxruntime/capi/`，
+真实路径是 `onnxruntime/onnxruntime.dll`，`capi` 那层是 `onnxruntime_pybind11_state.pyd`
+待的地方），一度以为生产代码是好的。
+
+### ④ 探测结果缓存：成功永久留，失败留 30 秒
+
+`/api/midi/status` 是前端每 2 秒轮询的接口，所以探测**绝不能被它反复触发**。
+但两档不能写成一样：
+
+| 结果 | 留多久 | 为什么 |
+|---|---|---|
+| 成功 | **永久**（进程内） | 那几百 MB 的 `cublasLt64_12.dll` 已经 `LoadLibrary` 进进程，不会退回去；也没有再探的意义 |
+| 失败 | **30 秒** | 用户可能正开着这个界面去装音轨分离，装完**不重启就该能解锁** |
+
+```rust
+static CUDA_PROBE: Mutex<Option<(Instant, CudaInfo)>> = Mutex::new(None);
+const FAILED_TTL: Duration = Duration::from_secs(30);
+```
+
+⚠️ 一开始我写的是「只缓存成功的」（`OnceLock`），理由是「失败那条路又快又便宜」——
+**实测不成立**：没有 N 卡的机器上失败要走完整的 CUDA 初始化，实测 **1.1 秒**
+（`GET /api/midi/device` `time_total=1.14`），2 秒轮询等于烧掉一半核。
+
+### ⑤ `cuda` feature 只影响可用 API，不影响构建
+
+`ep::CUDA` 整个被 `#[cfg(feature = "cuda")]` 门着，所以 `Cargo.toml` 必须加这个 feature；
+而 ort-sys 因为 `load-dynamic` 早已带 `disable-linking` ⇒ **构建时不需要 CUDA**，
+AMD 机器（本机 RX 580）照样能编能跑。
+⛔ 建会话时**别去掉 `.error_on_failure()`**：`ort` 默认是 `fail_silently()`，
+那样失败会**悄悄退回 CPU**，「一直在 CPU 上跑」没有任何迹象。
+
+### ⑤·补 ⛔⛔ `is_available()` **不能**当「这台机器能用 CUDA」的判据
+
+这是这一轮最硬的一条。加完 `PATH` 之后，**在 AMD RX 580 这台机器上
+`ort::ep::CUDA::default().is_available()` 回的是 `Ok(true)`** ——
+它只回答「这份 ORT 构建里**编进了** CUDA provider 没有」，与有没有 N 卡毫无关系
+（`ort-2.0.0-rc.13/src/ep/mod.rs:46-56` 的原话：*Returns `Ok(true)` if ONNX Runtime was
+compiled with support for this execution provider*）。
+
+⇒ 后果很具体：**「GPU 默认锁死、装完 CUDA 才解锁」这个需求当场失效**，
+A 卡用户也会看到 GPU 那格亮着，点下去再报一堆 CUDA 错误。
+
+✅ 唯一真判据：**真拿 CUDA 建一个会话**，失败就是不能用的那台。
+
+```rust
+let probe = Session::builder().map_err(|e| e.to_string()).and_then(|b| {
+    b.with_execution_providers([CUDA::default().build().error_on_failure(), CPU::default().build()])
+        .map_err(|e| e.to_string())
+        .and_then(|mut b| b.commit_from_memory(&mini_onnx()).map_err(|e| e.to_string()))
+});
+```
+
+⚠️ **这两步不能用 `?` / `and_then` 直接串**：`with_execution_providers` 失败回的是
+`ort::Error<SessionBuilder>`（它能把 builder 还给你），与后面那句的 `ort::Error<()>`
+**不是一个类型**，编译报 `expected Result<_, Error<()>>, found Result<SessionBuilder, Error<SessionBuilder>>`。
+各步 `map_err(|e| e.to_string())` 最省事。
+
+实测（本机 AMD RX 580）拿回的错误原文，**原样透给用户**：
+
+```
+CUDA failure 35: CUDA driver version is insufficient for CUDA runtime version ;
+GPU=-1 ; file=…\cuda_execution_provider.cc ; line=282 ; expr=cudaSetDevice(info_.device_id);
+```
+
+### ⑤·补二 ⛔ 探针图的 protobuf 有两个**看起来都能解析**的错法
+
+`mini_onnx()` 是手写字节拼的（为这一件事不值得引 `onnx` crate）。它的结构里有两处
+**写错了也不影响解析、只有 ORT 会拒收**的地方 —— 两处我都真写错过：
+
+```text
+ValueInfoProto{ name = 1, type = 2 }          ← ⛔ type 是**字段 2**，写成一就成「两个 name、没有 type」
+  type: TypeProto{ tensor_type = 1 }          ← 这一层是必须的
+    tensor_type: TypeProto.Tensor{ elem_type = 1, shape = 2 }   ← shape 是必须的
+      shape: TensorShapeProto{ dim = 1 }
+        dim: TensorShapeProto.Dimension{ dim_value = 1 }        ← 静态维度，不能丢
+```
+
+报错只有一句、长得还像别的毛病：
+
+```
+This is an invalid model. Tensor does not have type information.
+```
+
+⛔⛔ **最坑的是：手写的「线格式自检测试」抓不到这类错。** 我写了一个逐字段拆 protobuf
+的测试来守这个函数，它**全绿** —— 因为它按「`ValueInfoProto` 的第二个字段就是 `type`」
+去取值，而我错的是**字段号**，两边信的是同一个错误假设。
+⇒ 结论：**守 protobuf 拼装，唯一有效的测试是真拿 ONNX Runtime `commit_from_memory` 一次**
+（本机有借来的 `onnxruntime.dll`，所以这条测试能真跑；CI 上没有就跳过）。
+自检测试留着有用，但**必须按字段号找字段**（`fs.iter().find(|(n, _)| *n == 2)`），
+不能按下标猜。
+
+### ⑥ ⛔⛔ 任何 ORT 调用之前**必须**先 `ort::init_from(...).commit()`，否则 panic 且症状极具误导性
+
+真机上抓到的（2026-10-03）：
+
+```
+thread 'tokio-rt-worker' (17008) panicked at
+H:\DevTools\cargo\registry\...\ort-2.0.0-rc.13\src\lib.rs:234:39:
+Failed to load ONNX Runtime dylib: MissingApi { path: "onnxruntime.dll" }
+```
+
+**机制**：ort 的 `setup_api()` 是**惰性**的 —— 任何 ORT 调用（包括
+`ExecutionProvider::is_available()`）第一次发生时，如果此前没人调过
+`ort::init_from(path).commit()`，它就去加载**裸文件名** `onnxruntime.dll`
+（`src\lib.rs:224-234`：`ORT_DYLIB_PATH` 环境变量 → 否则 Windows 上硬编码
+裸名字），PATH 里当然没有 ⇒ `expect` ⇒ panic。
+
+**为什么以前没被发现**：唯一的 ORT 调用点是 `engine::transcribe`，而它第一件事就是
+`load_runtime(dll)`。新的 `/api/midi/status` 里 `device.cuda.ok` 会在**首页一进就轮询**
+的接口上先碰 `is_available()` —— 比 transcribe 早得多。
+
+**症状（值得背下来）**：整个 HTTP 连接被**直接掐断** —— curl 报
+`Empty reply from server` / `curl: (52)`、`HTTP 000`、`size 0`，**没有 500、没有
+JSON、没有日志**；而 `Get-Process` 里进程还活得好好的（tokio 的 worker 线程 panic，
+不是主进程崩），同一个进程里别的路由（`/api/health`、`/api/state`）**照常 200**。
+⇒ 看起来像「路由没注册」或「网络出问题」，实际是线程 panic。
+**遇到「某个接口连回复都没有」，去抓 `--serve` 进程的 stderr**：
+
+```powershell
+$p = Start-Process -FilePath 'H:\工作站\v-synth-studio.exe' `
+     -ArgumentList '--serve','--port=8891' -PassThru -WindowStyle Hidden `
+     -RedirectStandardOutput "$env:TEMP\vss-out.log" -RedirectStandardError "$env:TEMP\vss-err.log"
+```
+
+**修法**：在 `probe_cuda` 里、`is_available()` 之前调一次
+`crate::game::engine::load_runtime(dll)`，并用一个 `static RUNTIME_LOADED: OnceLock<()>`
+挡住重复加载（`/api/midi/status` 是 2 秒轮询的；`ort::init_from` 内部也是 `OnceLock`，
+重复无害，但没必要每次进 `load_dynamic`）。
+
+⚠️ 推论：**凡是新增「还没开始扒谱就会调 ORT」的代码路径，都得自己保证运行时已加载**，
+不能依赖 `transcribe` 里那一句。
+
+---

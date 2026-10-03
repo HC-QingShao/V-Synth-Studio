@@ -73,10 +73,11 @@ WebView2 窗口（Tauri 2）
 
 ---
 
-## 2. 路由总表（67 条路径 / 68 个 `.route()` 目标，逐条）
+## 2. 路由总表（68 条路径 / 71 个 `.route()` 目标，逐条）
 
-路由表在 `app/desktop/src/server/mod.rs::router`（68 个 `.route(...)`；其中 1 个挂了 GET+POST 两个方法，末尾还有一个 `fallback` 静态文件处理器不计入）。
+路由表在 `app/desktop/src/server/mod.rs::router`（68 个 `.route(...)`，路径去重后也是 68 —— 实测数出来的；其中 **3** 个挂了 GET+POST 两个方法：`/api/config`、`/api/svsep/backend/inference`、`/api/midi/device`，所以目标是 71 个。末尾还有一个 `fallback` 静态文件处理器不计入）。
 
+> 2026-10-03：人声转 MIDI 加了「推理方式（自动 / GPU / CPU）」（**63** 号 `/api/midi/device`），`/api/midi/*` 从 11 涨到 **12** 条、路由从 67 涨到 68 条路径。
 > 2026-10-03：加了「人声转 MIDI」一页（57~67 共 11 条 `/api/midi/*`），路由从 56 涨到 67 条路径。
 > 2026-10-02：加了「音轨分离」一页（41~56），路由从 40 涨到 56（其中 46~48 是暂停 / 停止 / 一键删除依赖）。前 40 条见下，顺序与 `router()` 一致。
 
@@ -146,11 +147,12 @@ WebView2 窗口（Tauri 2）
 | 60 | POST | `/api/midi/download/pause` | `server/midi.rs::download_pause` | ⚠️ **等价于「停止」** —— 这个包不支持续传，`resumable` 恒为 false，界面上**没有**这个按钮 | **无人调用** |
 | 61 | POST | `/api/midi/download/stop` | `server/midi.rs::download_stop` | 停下载（`.part` 一起删） | Midi |
 | 62 | POST | `/api/midi/deps/delete` | `server/midi.rs::deps_delete` | 一键删除依赖（模型 + 动态库），回 `{files, bytes, note}` | Midi |
-| 63 | POST | `/api/midi/transcribe` | `server/midi.rs::transcribe` | 提交一次扒谱，回 `{jobId}`（同时只允许一个） | Midi |
-| 64 | GET | `/api/midi/task/{id}` | `server/midi.rs::task` | 查任务（`lib/useJob.ts` 同时走 `/api/jobs/get`） | Midi |
-| 65 | POST | `/api/midi/task/{id}/cancel` | `server/midi.rs::cancel` | 取消任务（⚠️ **不清 `RUNNING` 槽**，那是收工时的活） | Midi |
-| 66 | GET | `/api/midi/task/{id}/file/{name}` | `server/midi.rs::output` | 取产物（`.mid` / `.csv` / `.json`） | Midi |
-| 67 | POST | `/api/midi/open-output` | `server/midi.rs::open_output` | 打开输出目录（**要传 `task.result.dir`**，落点是用户选的） | Midi |
+| 63 | GET+POST | `/api/midi/device` | `server/midi.rs::device_get` / `device_set` | 推理方式 auto / gpu / cpu，并报这台机器能不能用 CUDA | Midi |
+| 64 | POST | `/api/midi/transcribe` | `server/midi.rs::transcribe` | 提交一次扒谱，回 `{jobId}`（同时只允许一个） | Midi |
+| 65 | GET | `/api/midi/task/{id}` | `server/midi.rs::task` | 查任务（`lib/useJob.ts` 同时走 `/api/jobs/get`） | Midi |
+| 66 | POST | `/api/midi/task/{id}/cancel` | `server/midi.rs::cancel` | 取消任务（⚠️ **不清 `RUNNING` 槽**，那是收工时的活） | Midi |
+| 67 | GET | `/api/midi/task/{id}/file/{name}` | `server/midi.rs::output` | 取产物（`.mid` / `.csv` / `.json`） | Midi |
+| 68 | POST | `/api/midi/open-output` | `server/midi.rs::open_output` | 打开输出目录（**要传 `task.result.dir`**，落点是用户选的） | Midi |
 
 ---
 
@@ -651,13 +653,13 @@ resources.json
 | 读夹具 | `src/game/fixture.rs` | 读 golden 向量；推理路径只用它的 `read_wav_mono_f32` |
 | 推理 | `src/game/engine.rs` | 三个 ONNX 会话 + 跑完一条音频（进度回调） |
 | 文件与下载 | `src/midi_transcribe.rs` | 路径 / 状态 / 下载解包 / ffmpeg 转码 / 落盘 / 任务注册 |
-| 路由 | `src/server/midi.rs` | 11 条 `/api/midi/*` |
+| 路由 | `src/server/midi.rs` | 12 条 `/api/midi/*` |
 | 页面 | `app/web-next/src/pages/Midi.tsx` + `Midi.css` | 选择、参数、进度、钢琴卷帘、许可声明 |
 
-**路由（11 条 `/api/midi/*`）**：`status` / `models/download` / `runtime/download` /
-`download/pause`（⚠️ 等价于停止，界面不用它）/ `download/stop` / `deps/delete` /
+**路由（12 条 `/api/midi/*`）**：`status` / `models/download` / `runtime/download` /
+`download/pause`（⚠️ 等价于停止，界面不用它）/ `download/stop` / `deps/delete` / **`device`** /
 `transcribe` / `task/{id}` / `task/{id}/cancel` / `task/{id}/file/{name}` / `open-output`
-（逐条编号见第 2 节路由总表 57~67）。
+（逐条编号见第 2 节路由总表 57~68）。
 ⚠️ 进度订阅**复用既有的 `/api/jobs/get` 与 `/api/jobs/{id}/stream`**，没有另造一套。
 
 **磁盘布局**（和 `svsep` 同一套两层模型）：
@@ -735,6 +737,90 @@ debug 构建可以用 `VSS_MIDI_MODEL_URL` / `VSS_MIDI_RUNTIME_URL` 顶掉这两
   对照结果；42 音符这次用的是**真随机**，所以边界数本来就会不同 —— 见 `INTEGRATIONS.md`）。
 - ⚠️ **纯 CPU，约 10 秒墙钟换 1 秒音频**（本机 AMD RX 580 没有可用的 GPU 后端）。
   页面上把这句话放在按钮**上方**。3 分钟干声 ≈ 半小时，这是硬约束不是 bug。
+  **装了音轨分离的 N 卡用户可以把「推理方式」切到 GPU**（见下），那时这条数字会变；
+  ⚠️ 上游没给过 GAME 的 GPU 参考数据，**别在界面上写倍数**。
+
+**推理方式三选一（自动 / GPU / CPU，2026-10-03 补）**：设置落在
+**`<可写>/midi/midi_settings.json`**（键名 `device`，两空格缩进）。
+⛔ 与音轨分离那个 `<可写>/svsep/data/inference_settings.json`（Python 管、键名 `mode`）
+**是两个文件、两个键名，别合并** —— `midi_transcribe::tests::device_settings_round_trip_and_fall_back_to_auto`
+专门盯着这条。认不出的值 / 坏文件 / 文件不存在一律回 `auto`（界面永远拿得到一个合法值）。
+
+| 值 | 意思 |
+|---|---|
+| `auto` | 默认。**与 `cpu` 等价** —— 显式选 GPU 是唯一让 ONNX Runtime 走 CUDA 的路径，别指望「自动」在某台机器上偷偷开 GPU |
+| `gpu` | 建会话时挂 `CUDA::default().build().error_on_failure()` + CPU 兜底 |
+| `cpu` | 三个会话都只挂 `CPUExecutionProvider` |
+
+**GPU 那一格什么时候解锁**（后端探，前端不猜）：
+
+| 条件 | 界面 |
+|---|---|
+| `device.cuda.ok === true` | GPU 那格可选 |
+| `false` | 那格锁着；点它弹提示，提示里带上 `device.cuda.detail`（为什么不行） |
+| `mode === 'gpu'` 但 `ok === false` | 参数面板下方显示后端给的 `device.note`（「现在这一台用不了 GPU：…。先按 CPU 跑。」） |
+
+**探测判据**（`midi_transcribe::probe_cuda`）：先确保 ONNX Runtime 本体已加载
+（`engine::load_runtime`，**任何 ORT 调用之前必须先做**，否则 tokio 线程 panic、
+接口连回复都没有 —— 见 `INTEGRATIONS.md`「五之五·补」⑥），再沿 `runtime_dll()`
+的父目录往上找**下面有 `nvidia/` 的那一层**，把那 12 个 CUDA 组件所在的
+**四个 `bin\` 目录加进进程 `PATH`**，最后**真拿 CUDA 建一个会话**（见下）。
+⇒ **解锁条件就是「装了音轨分离那个运行时」**，用户不用再下任何东西（那 12 个 dll 全在
+`svsep\runtime\Lib\site-packages\nvidia\` 里，合计 2,452.4 MB；缺的从来不是它们，而是
+把它们的目录加进 DLL 搜索路径）。
+
+⛔⛔ **最后那一步必须是「建会话」，不能是 `CUDA::is_available()`。** 后者只回答
+「这份 ORT 构建里**编进了** CUDA provider 没有」，**与有没有 N 卡无关** ——
+本机 AMD RX 580 实测回 `Ok(true)`，也就是「GPU 默认锁死、装完 CUDA 才解锁」这个需求
+会当场失效（A 卡用户照样看到 GPU 那格亮着）。真判据是拿一张 1×1 的 Identity 图
+`commit_from_memory` 一次；本机实测拿回的原话是
+`CUDA failure 35: CUDA driver version is insufficient for CUDA runtime version`，
+**原样透给用户**。⚠️ 那张手写字节的探针图有**两处「写错也能解析、只有 ORT 会拒收」**的
+坑（`ValueInfoProto.type` 是**字段 2**；`shape.dim.dim_value` 不能丢），
+**手写的线格式自检测试抓不到**，必须以真 ORT 建会话为准 —— 细节见
+`INTEGRATIONS.md`「五之五·补」⑤·补二。
+
+⚠️⚠️ **那 12 个 dll 分在四个目录里，不是一个**：
+`cuda_runtime/bin/`（cudart64_12）、`cublas/bin/`（cublas64_12 + cublasLt64_12）、
+`cufft/bin/`（cufft64_11）、`cudnn/bin/`（8 个 `cudnn*_9.dll`）。
+⛔ **`ort::ep::cuda::preload_dylibs` 表达不了这件事**：它只吃**一个** CUDA 根目录 +
+**一个** cuDNN 根目录，然后把这 4 + 8 个名字全拼到那两个根上
+（`cuda.rs:441-454`）—— 实测会报
+`Failed to preload 'cublasLt64_12.dll': LoadLibraryExW failed（…\nvidia\cuda_runtime\bin）`。
+✅ 改成**把这四个目录加进 `PATH`**（`LoadLibraryExW` 不带 `LOAD_LIBRARY_SEARCH_*` 时会搜
+`PATH`，所以 CUDA EP 加载自己的依赖时就能找到）—— 和 Python 侧
+`os.add_dll_directory` 是同一个道理。别用 `std::env::join_paths` 拼（路径含 `;` 会报
+`InvalidInput`），手拼 `;` 即可；只在第一次探的时候动 `PATH`。
+
+⚠️ 找到的那一层往上必须能摸到 `nvidia`：判据是「**哪一层的下面有 `nvidia/`**」，
+不是「哪一层叫 `nvidia`」（`nvidia` 是 `site-packages` 下面的一层，`site-packages`
+自己并不叫 `nvidia` —— 写成后者条件恒假、永远解锁不了，这里真这么错过一次）。
+
+⚠️ 探测结果**两档缓存**（`static CUDA_PROBE: Mutex<Option<(Instant, CudaInfo)>>`）：
+`/api/midi/status` 是前端每 2 秒轮询的接口，所以**成功永久留、失败只留 30 秒**。
+失败**不能也永久留**（用户中途装音轨分离、不重启就该能解锁），
+**但也不能完全不缓存** —— 实测没 N 卡的机器上失败要走完整 CUDA 初始化、
+`GET /api/midi/device` 耗时 **1.14 秒**，2 秒轮询等于烧掉一半核
+（第一版写的「失败那条路又快又便宜所以不缓存」是**实测推翻的**）。
+
+**真跑起来用不了时**：`engine::build_sessions` 三个会话**顺序建、失败就停**（省掉另外
+两张图的十几秒 CUDA 初始化），任一失败就整条退回 CPU，并把 ORT 的原话写进任务日志
+（`人声转 MIDI：CUDA 建会话失败，这一首改用 CPU —— {why}`）。产物 `.json` 里的
+`"backend"` 字段记的是**实际**走的哪条（`"CPU"` / `"CUDA"`）——**用户选了 GPU 也可能
+是 `"CPU"`**，所以必须记下来，否则「我明明开了 GPU」和「怎么还是这么慢」之间没有任何
+可查的东西。
+
+⚠️ `.error_on_failure()` 别去掉：`ort` 的默认是 `fail_silently()`，那样建会话失败会
+**悄悄退回 CPU**，「一直在 CPU 上跑」毫无迹象。
+⚠️ `Cargo.toml` 里 `ort` 的 `cuda` feature 必须开（`ep::CUDA` 整个被 `#[cfg(feature = "cuda")]`
+门着）。它只影响**可用 API**（ort-sys 因 `load-dynamic` 已带 `disable-linking`），
+**构建时不需要 CUDA**，AMD 机器照样能编能跑。
+
+**这台开发机验不了「解锁」那一半**（AMD RX 580）：能验的是「锁住 + 提示 + 退回 CPU」这一半，
+实测 `device.cuda.ok = false`、`detail` 是 ORT 原话、`GET /api/midi/device` 200；
+真 unlock 由用户发给 N 卡用户实测兜底。
+⚠️ 但**「锁住」这一半本身就必须靠真会话判据才成立** —— 用 `is_available()`
+在这台机器上会得到 `ok = true`，那不是「没验到」，是**验出来了而且判错**。
 
 **许可**：代码 MIT（算法是重写的），**权重 CC BY-NC-SA 4.0（非商业）**、不随包分发。
 页面「许可与出处」那一栏是为此放的，**别删**。详见 `docs/THIRD-PARTY-NOTICES.md`。

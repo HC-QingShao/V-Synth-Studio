@@ -229,6 +229,20 @@ export const api = {
       {},
     ),
   /**
+   * 读推理方式（自动 / GPU / CPU）。内容与 `midiStatus().device` 同源，
+   * 单开一条是为了让那一格能独立刷新（比如用户刚在另一个页面装完音轨分离）。
+   */
+  midiDevice: () => request<{ ok: true } & MidiDevice>('/api/midi/device', { timeout: 20000 }),
+  /**
+   * 写推理方式。
+   *
+   * ⚠️ 后端**不校验**「这台机器能不能用 GPU」—— 盘上记的是用户的意愿，不是
+   * 硬件现状。能不能选由界面判断（`device.cuda.ok`），真跑起来用不了时后端会
+   * 自己退回 CPU 并把原因写进任务日志。
+   */
+  midiSetDevice: (mode: MidiDeviceMode) =>
+    post<{ ok: true } & MidiDevice>('/api/midi/device', { mode }),
+  /**
    * 提交一次扒谱。传的是**本机音频路径**，不是文件字节 ——
    * 音频本来就在用户盘上，多传一遍只是把同一份数据从磁盘搬到磁盘。
    *
@@ -878,12 +892,39 @@ export interface MidiModels {
    * ⛔ 别改在前端按 `dir` 的尾巴猜：三种情况的路径都以 `\game\models` 结尾。
    */
   origin: 'downloaded' | 'bundled' | 'local'
-  /** 要下多少（347 MB） */
+  /** 要下多少（364 MB，自托管在 123 云盘 CDN 上的那个包） */
   zipBytes: number
   /** 解开之后四个文件一共多大（376 MB） */
   extractBytes: number
   /** 已经下了一半的 `game-models.part` 有多大（只用来提示，不支持续传） */
   partBytes: number
+}
+
+/**
+ * 推理方式（自动 / GPU / CPU）。
+ *
+ * 落盘在 `<可写>/midi/midi_settings.json`，和音轨分离那个
+ * `inference_settings.json` **是两个文件**（一个是 Python 管的，一个是 Rust 管的）。
+ */
+export type MidiDeviceMode = 'auto' | 'gpu' | 'cpu'
+
+export interface MidiDevice {
+  mode: MidiDeviceMode
+  cuda: {
+    /**
+     * 这台机器**现在能不能**用 GPU 跑。
+     *
+     * ⚠️ 它报的是「这份 ONNX Runtime 带 CUDA provider，而且那 12 个 CUDA 组件
+     * （cudart / cublas / cublasLt / cufft / 8 个 cudnn）都加载成功」，**不是**
+     * 「保证能建出会话」—— 驱动太老、显存不够都可能在建会话时才失败，那时
+     * 后端会自己退回 CPU 并把原因写进任务日志。
+     */
+    ok: boolean
+    /** 给用户看的中文说明（为什么不能 / 为什么能） */
+    detail: string
+  }
+  /** 用户选了 GPU 但这台机器用不了时的补救话术，空串 = 没什么好说的 */
+  note: string
 }
 
 export interface MidiDownload {
@@ -906,6 +947,8 @@ export interface MidiStatus {
   license: string
   source: string
   download: MidiDownload
+  /** 推理方式（自动 / GPU / CPU）与 CUDA 能不能用 */
+  device: MidiDevice
   /** 正在跑的那次任务 id；null = 空闲（同时只允许一个） */
   running: string | null
 }

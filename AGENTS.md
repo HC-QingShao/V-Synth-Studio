@@ -466,6 +466,10 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 | `/api/fs/open` 收两种参数 | `path`（本地路径，**要求存在**）或 `url`（http/https/ftp/mailto，走系统默认程序、不做存在性检查）。**2026-10-02 之前它只读 `path`**，于是所有传 `{url}` 的调用必然 400 —— 两个前端的「在浏览器打开」都是坏的，已修（`platform::open_url` + `looks_like_url`，带单测） |
 | 接口「发了没反应 / 永远空列表」 | **先对后端源码与夹具**，别信旧前端的调用姿势：`collect` 要 `{dirs:[…]}`（旧前端发 `{dir}` → 永远 0 个文件）、`preview` 要 `{inputs,toFormat}`、`fs/list` 空 `path` **必须整个省略**（发 `path=` → 400）、`fs/roots` 字段是 `name` 不是 `label`。四处都是搬页面时实测翻出来的，见 `docs/FRONTEND.md` 第 5 节 |
 | 「改了界面但用户看不到变化」 | **先怀疑缓存**：静态文件必须发 Cache-Control: no-store（simple.rs 已加）。测试每次开全新浏览器，永远命中不了缓存，只有用户常驻的 WebView2 拿着旧文件 |
+| **某个接口连回复都没有**（curl `Empty reply from server` / `HTTP 000` / `size 0`，**没有 500、没有 JSON、没有日志**，同一进程别的路由照常 200） | 这是 **tokio worker 线程 panic**，不是路由或网络问题 —— **去抓 `--serve` 进程的 stderr**（`Start-Process -RedirectStandardError`）。真踩过：`/api/midi/status` 里调 `ort` 的 `is_available()` 时 panic（`Failed to load ONNX Runtime dylib: MissingApi { path: "onnxruntime.dll" }`）—— ort 的 `setup_api()` 是**惰性**的，**任何 ORT 调用之前必须先 `ort::init_from(...).commit()`**，否则它去找裸文件名。见 `docs/INTEGRATIONS.md`「五之五·补」⑥ |
+| 想知道「这台机器能不能用 CUDA」 | ⛔ **`ort::ep::CUDA::is_available()` 回答不了**：它只说明「这份 ORT 构建里**编进了** CUDA provider」，**AMD RX 580 上也回 `Ok(true)`**。唯一真判据是拿一张 1×1 的 Identity 图 `commit_from_memory` 一次。见「五之五·补」⑤·补 |
+| 手写 protobuf 拼 ONNX 图，ORT 报 `Tensor does not have type information.` | 错在**字段号**不在长度：`ValueInfoProto{ name = 1, type = 2 }`（`type` 是**字段 2**），`shape.dim.dim_value` 也不能丢。⛔ **自己写的「线格式自检」抓不到**（它验的是同一个错误假设、照样全绿）—— 必须以真 ORT 建一次会话为准 |
+| 「往上找某个目录」的函数永远找不到 | 先怀疑**判据写反了**（要找的层在**更下面**）：真踩过 `if d.file_name() == "nvidia"`，而 `nvidia` 是 `site-packages` **下面**的一层 ⇒ 条件恒假、不报错、只是永远不生效。见「五之五·补」③ |
 | 端口不能随机 | 固定 17878；**localStorage 按 origin 隔离**，端口一变 = 全新存储（JIZURA 标记、界面设置、PV 工程自动保存全丢） |
 | 悬停/过渡「生硬地闪一下」 | 多半是 `var(--x)` **没定义** → 整条 `transition` 静默失效。先跑 `LESSONS.md` 里那段查未定义变量的脚本 |
 | 过渡曲线 | `--ease` 管微交互、`--ease-out` 管入场、`--spring` 只给大位移；取值表在 `LESSONS.md` |
@@ -532,7 +536,7 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 | | 音轨分离（五之四） | 人声转 MIDI（五之五） |
 |---|---|---|
 | 做法 | **包一个别人的 Python 服务**：子进程 + 固定端口 + 健康检查 + 作业对象收尸 | **把算法重写进 Rust**：进程内、零子进程、零端口 |
-| 大件 | 运行时 4.7 GB + 模型 462 MB | 模型包 364 MB（解开 376 MB；运行时**能借**音轨分离那份 ORT） |
+| 大件 | 运行时 4.7 GB + 模型 462 MB | 模型包 364 MB（解开 376 MB；运行时**能借**音轨分离那份 ORT —— 包括 GPU） |
 | 代码 | `src/svsep.rs` `src/server/svsep.rs` `src/pages/Svsep.tsx` | `src/game/**` `src/midi_transcribe.rs` `src/server/midi.rs` `src/pages/Midi.tsx` |
 
 **要嵌新东西之前，先读那两节里这几条**（它们是血换来的，别重走）：

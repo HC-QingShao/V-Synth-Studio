@@ -11,6 +11,8 @@
 //!   POST /api/midi/download/pause     ⚠️ 等价于「停止」——这个包不支持续传，界面不用它
 //!   POST /api/midi/download/stop      停止下载并删掉半截文件
 //!   POST /api/midi/deps/delete        删掉下下来的模型与动态库（回 {files, bytes, note}）
+//!   GET  /api/midi/device             读推理方式（自动 / GPU / CPU）+ CUDA 能不能用
+//!   POST /api/midi/device             写推理方式（`{"mode": "gpu"}`）
 //!   POST /api/midi/transcribe         提交一次扒谱（body 里给音频路径）
 //!   GET  /api/midi/task/{id}          查任务
 //!   POST /api/midi/task/{id}/cancel   取消任务
@@ -82,6 +84,51 @@ pub async fn status(State(st): State<Arc<AppState>>) -> Json<Value> {
         o.insert("running".into(), json!(running));
     }
     Json(ok(v))
+}
+
+/* ══════════════════════════════ 推理方式（三选一） ══════════════════════════════ */
+
+/// `GET /api/midi/device` —— 现在选的推理方式，以及这台机器能不能用 GPU。
+///
+/// 内容与 `/api/midi/status` 里的 `device` 一节**同源**（都出自
+/// `mt::device_status`）。单开一条是为了让「设置」那一格能独立刷新 —— 用户刚在
+/// 另一个页面装完音轨分离，不必等整个状态对象重新拉一遍。
+///
+/// ⚠️ `cuda.ok` 报的是「provider 在、那 12 个 dll 加载成功」，**不是**「保证能建
+/// 出会话」—— 后者只有真跑一次才知道。真建不出来时 `engine` 会退回 CPU 并把
+/// ORT 的原话写进任务日志。
+pub async fn device_get(State(st): State<Arc<AppState>>) -> Json<Value> {
+    Json(ok(device_payload(&st)))
+}
+
+/// `POST /api/midi/device` —— body `{"mode": "auto" | "cpu" | "gpu"}`。
+///
+/// ⛔ **不校验「GPU 到底能不能用」**：盘上记的是用户的意愿，不是硬件现状。
+/// 硬拦下来会出现「换台机器/装完运行时要重设一次」这种莫名其妙的限制；而且
+/// 真跑起来用不了时 `engine` 会自己退回 CPU（日志里有原因）。界面负责在
+/// **选不了的时候**把格子锁住，后端不重复一遍这个判断。
+pub async fn device_set(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("auto");
+    let dev = mt::Device::parse(mode);
+    mt::write_device(&st.writable, dev)
+        .map_err(|e| ApiError::internal(format!("写推理方式失败：{e}")))?;
+    crate::log_line(&format!("人声转 MIDI：推理方式改成 {}", dev.as_str()));
+    Ok(Json(ok(device_payload(&st))))
+}
+
+/// 给界面的那一小段状态。三处（`status` / `device_get` / `device_set`）共用，
+/// 免得改了一个地方另外两个漏掉。
+fn device_payload(st: &AppState) -> Value {
+    let dll = mt::runtime_dll(&st.root, &st.writable);
+    let ds = mt::device_status(&st.writable, dll.as_deref());
+    json!({
+        "mode": ds.device.as_str(),
+        "cuda": { "ok": ds.cuda_ok, "detail": ds.cuda_detail },
+        "note": ds.note,
+    })
 }
 
 /* ══════════════════════════════════ 下载 ══════════════════════════════════ */
@@ -283,6 +330,10 @@ pub async fn transcribe(
         language: clamp_usize(body.get("language").and_then(|v| v.as_i64().map(|i| i as u64)), 4, 0, 126)
             as i64,
         threads: clamp_usize(body.get("threads").and_then(|v| v.as_u64()), 4, 1, 32),
+        /* 推理方式**以盘上的设置为准**，不看 body：那是界面上的一个开关，
+           而任务可能来自「再跑一次」或别处，body 里没有这一项时会退回默认值，
+           变成「设置里选了 GPU、这一首悄悄按 CPU 跑」。 */
+        device: mt::read_device(&st.writable),
     };
 
     let title = format!("人声转 MIDI · {}", mt::output_stem(&input_path));
@@ -290,7 +341,7 @@ pub async fn transcribe(
     convert::log_job(
         &st,
         &job_id,
-        &format!("输入：{input}（去噪 {} 步）", opts.steps),
+        &format!("输入：{input}（去噪 {} 步，推理方式 {}）", opts.steps, opts.device.as_str()),
     );
 
     let cancel = mt::Cancel::new();
