@@ -461,7 +461,16 @@ impl Svsep {
             .ok();
         let log_err = log.as_ref().and_then(|f| f.try_clone().ok());
 
+        // 不弹黑框：python.exe 是**控制台程序**，不显式关掉控制台窗口，用户桌面上
+        // 就会顶出一个黑窗口（它的输入输出其实都被我们用管道接走了，那窗口纯属碍事）。
+        // 标志和 `server::quiet_command` 里用的是同一个：0x0800_0000 = CREATE_NO_WINDOW。
         let mut cmd = Command::new(exe);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
         cmd.arg(script)
             .arg("--host")
             .arg("127.0.0.1")
@@ -627,28 +636,18 @@ impl Svsep {
         post_raw(&format!("{base}{path}"), content_type.to_string(), body).await
     }
 
-    /// 流式转发输出文件（WAV 可能几十 MB，不整个读进内存）
-    pub async fn download(
-        &self,
-        task_id: &str,
-        index: u32,
-        inline: bool,
-    ) -> Result<reqwest::Response, String> {
-        let base = self
-            .base_url()
-            .ok_or_else(|| "分离服务还没启动".to_string())?;
-        let q = if inline { "?inline=1" } else { "" };
-        let url = format!("{base}/api/download/{task_id}/out/{index}{q}");
-        let res = crate::net::client()
-            .get(&url)
-            .timeout(Duration::from_secs(300))
-            .send()
-            .await
-            .map_err(|e| format!("取输出文件失败：{e}"))?;
-        if !res.status().is_success() {
-            return Err(format!("取输出文件失败：HTTP {}", res.status().as_u16()));
-        }
-        Ok(res)
+    /// 一轨分离结果在盘上的位置：`<数据目录>/outputs/<task_id>/<filename>`。
+    ///
+    /// 取结果**走这里读盘**，不经过分离服务 —— 分离完服务会自动关掉
+    /// （见 `server::svsep::auto_stop_when_idle`），而结果必须在那之后还能听、还能下。
+    /// 上游 Python 自己也是从这儿发的（`app.py::api_download`）。
+    pub fn output_path(&self, task_id: &str, filename: &str) -> PathBuf {
+        self.data().join("outputs").join(task_id).join(filename)
+    }
+
+    /// 输出目录（整个 outputs 根，给「打开输出目录」用）
+    pub fn outputs(&self) -> PathBuf {
+        self.data().join("outputs")
     }
 }
 
@@ -960,10 +959,187 @@ impl<'a> Bundle<'a> {
     }
 }
 
+/// 链接被掐断之后还试几轮、每轮之间歇多久。
+///
+/// 为什么留这个：两个包挂在 123 云盘的 CDN 上，**几 GB 的包下到一半被掐断是常态**，
+/// 每断一次就要用户从头下一整包（流量是他自己的）。5 轮 × 10 秒 = 最多多等 50 秒，
+/// 换「一整包不白下」。
+const RETRY_ROUNDS: u32 = 5;
+const RETRY_WAIT: Duration = Duration::from_secs(10);
+
+/// 一轮下载的收场。**失败不在这里** —— 失败是 `Err`，由 `fetch_bundle` 决定
+/// 是再试一轮还是收摊。
+enum Step {
+    /// 数据读完了，`.part` 里现在是整个包
+    Done,
+    /// 用户按了暂停：半个包留着，下次带着 `Range` 接着下
+    Paused,
+    /// 用户按了停止：半个包连同记号一起删掉，下次从头下
+    Cancelled,
+}
+
+/// 进度回调报的是**哪一段**：还在下，还是已经在解压。
+///
+/// 为什么非有这个字段不可：下载与解压共用同一个 `on_progress` 通道，而解压的分母
+/// （所有条目压缩后大小之和）跟 zip 的字节数几乎一样大。不区分的话，界面上就是
+/// 「条子冲到 100% → 归零 → 在同一个『正在下载…』标签下再爬一遍」—— 看着像下完
+/// 又自动重下了一遍。用户 2026-10-03 报的就是这一幕（实际在解压）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stage {
+    /// 正在从网上拿字节
+    Download,
+    /// 整包已经在盘上，正在解压
+    Extract,
+}
+
+/// 用户按了暂停/停止时的收拾（下载途中按下、重试等待里按下，走的是同一段）。
+fn settle_user_stop(
+    ctl: &DownloadCtl,
+    zip_path: &Path,
+    on_progress: &(impl Fn(u64, Option<u64>, Stage) + Send + Sync),
+) -> Step {
+    if ctl.cancelled() {
+        // 停止 = 这次不算数，半个文件也删掉，下次从头下
+        let _ = std::fs::remove_file(zip_path);
+        let _ = std::fs::remove_file(url_marker(zip_path));
+        on_progress(0, None, Stage::Download);
+        Step::Cancelled
+    } else {
+        // 暂停 = 半个包留着，记号也留着（下次要拿它发 Range）
+        Step::Paused
+    }
+}
+
+/// 重试之前歇一会儿。返回 `true` = 歇够了可以再试；`false` = 用户在这期间按了暂停/停止。
+///
+/// ⚠️ **别写成一句 `sleep(RETRY_WAIT)`**：用户按暂停要立刻见效，所以切成小段轮着看旗标。
+async fn wait_before_retry(ctl: &DownloadCtl) -> bool {
+    for _ in 0..(RETRY_WAIT.as_millis() / 200) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if ctl.check() {
+            return false;
+        }
+    }
+    true
+}
+
+/// 发一次请求，把这一轮拿到的字节写进 `.part`。
+///
+/// `got` 既是入参（从哪接着写，也就是 `Range` 的起点）又是出参（这一轮写到哪了）：
+/// 断了之后 `fetch_bundle` 拿它当下一轮的起点 —— **绝不能退回 0**，那正是这个函数
+/// 要防的事（从头下 = 白烧用户几个 GB 的流量）。
+///
+/// 「连不上 / HTTP 不是 2xx / 流断了」三种都算 `Err`，交给调用方重试。
+async fn fetch_once(
+    url: &str,
+    zip_path: &Path,
+    label: &str,
+    got: &mut u64,
+    total: &mut Option<u64>,
+    ctl: &DownloadCtl,
+    on_progress: &(impl Fn(u64, Option<u64>, Stage) + Send + Sync),
+) -> Result<Step, String> {
+    let already = *got;
+    let mut req = crate::net::client()
+        .get(url)
+        // 6 小时：这个包可能有好几 GB，超时是按「整个响应」算的，
+        // 用 reqwest 默认的 30 秒会在第一块数据之后被掐断。
+        .timeout(Duration::from_secs(6 * 3600));
+    if already > 0 {
+        req = req.header(reqwest::header::RANGE, format!("bytes={already}-"));
+    }
+
+    let res = req
+        .send()
+        .await
+        .map_err(|e| format!("下载{label}失败：{e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        return Err(format!("下载{label}失败：HTTP {}", status.as_u16()));
+    }
+    // 206 = 服务端认了 Range；200 = 不认，要从头写
+    let resumed = status.as_u16() == 206 && already > 0;
+    let written = if resumed { already } else { 0 };
+    // 206 时 Content-Length 是「还剩多少」，总长要把已有的加上
+    *total = res.content_length().map(|len| len + written);
+
+    let mut file = if resumed {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(zip_path)
+            .map_err(|e| format!("打开临时文件失败：{e}"))?
+    } else {
+        // ⚠️ `create` 会把已有的半个包截断 —— 服务端不认 Range 时这是**对的**，
+        //    追加会拼出「旧包前半段 + 新包后半段」的坏 zip，要到解压才炸。
+        std::fs::File::create(zip_path).map_err(|e| format!("写临时文件失败：{e}"))?
+    };
+    *got = written;
+    on_progress(*got, *total, Stage::Download);
+    let mut stream = res.bytes_stream();
+    use futures_util::StreamExt;
+    use std::io::Write;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("下载中断：{e}"))?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("写文件失败（磁盘满了？）：{e}"))?;
+        *got += chunk.len() as u64;
+        on_progress(*got, *total, Stage::Download);
+        // ⚠️ 这个判断要放在写盘之后、下一块之前：放到外面会让一次暂停多下几 MB
+        if ctl.check() {
+            let _ = file.flush();
+            drop(file);
+            return Ok(settle_user_stop(ctl, zip_path, on_progress));
+        }
+    }
+    let _ = file.flush();
+    Ok(Step::Done)
+}
+
+/// 盘上那个 `.part` 是不是**一整个 zip**（而不是下了一半就断的）。
+///
+/// 什么时候会是「一整包」：上一轮把字节都下完了，收尾（解压）没跑完 —— 解压途中
+/// 关窗口、解压报错、磁盘满。`.part` 与旁边的链接记号都还在，于是「点继续下载」
+/// 会带着 `Range: bytes=<整包长>-` 再发一次请求：服务端回 416 就永远下不动，
+/// 回 200（不认 Range 的服务器）就把几个 GB **从头下一遍**。
+/// 包既然已经完整，一个字节都不该再要 —— 直接去解压（见 `fetch_bundle` 开头）。
+///
+/// 判据 = 中央目录读得出来，而且**每个条目的数据段都真的落在文件里**
+/// （`data_offset + 30 + compressed_size <= 文件大小`；本地头里的 name/extra
+/// 长度 ≥ 0，所以这是个放宽版判据）。半截包连中央目录都读不出来 —— 目录在文件
+/// 末尾，压根没下到 —— 第一步就返回 false 了。
+///
+/// ⚠️ 成本 = 读一遍中央目录（runtime 那个约 2.4 MB），所以只在**点下载时**调，
+///    别放进每 2 秒一次的状态轮询里。
+fn part_is_whole_zip(zip_path: &Path) -> bool {
+    let Ok(f) = std::fs::File::open(zip_path) else {
+        return false;
+    };
+    let Ok(size) = f.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    let Ok(mut z) = ZipReader::new(f) else {
+        return false;
+    };
+    let Ok(entries) = z.entries() else {
+        return false;
+    };
+    !entries.is_empty()
+        && entries.iter().all(|e| {
+            e.data_offset
+                .saturating_add(30)
+                .saturating_add(e.compressed_size)
+                <= size
+        })
+}
+
 /// 下载一个包、解压、清掉临时文件。`download_models` / `download_runtime` 都走这里。
 ///
 /// 三种收场，见 `FetchOutcome`：下完解好 / 用户按了暂停（留着 `.part`，下次接着下）
 /// / 用户按了停止（删掉 `.part`，下次从头下）。
+///
+/// ⚠️ **中途断了会自己接着下**：链接被掐断时歇 `RETRY_WAIT` 再发一次请求，最多
+///    `RETRY_ROUNDS` 轮，每轮都带 `Range` 从**盘上已有的字节**接着下（不是从头下）。
+///    5 轮都不成才报错，那半个包留着 —— 界面上还能点「继续下载」接着下。
 ///
 /// ⚠️ **续传是按 `.part` 在不在判的**：文件在那儿就发 `Range: bytes=<已有>-`，
 ///    服务端回 206 就从那儿接着写。回到 200（不认 Range 的服务器，比如某些
@@ -972,10 +1148,12 @@ impl<'a> Bundle<'a> {
 /// ⚠️ 下载途中写的是 `<dest>/<zip_name>.part`，**不是 `.zip`** —— 万一用户
 ///    中途去点了「开始分离」，`runtime_ready()` 看到的是半个 zip，不会把它
 ///    当成装好了。
+/// ⚠️ **开工前先看盘上那个 `.part` 是不是一整包**（上一轮下完、解压没收尾）：
+///    是就一个字节都不再要，直接解压（见 `part_is_whole_zip`）。
 async fn fetch_bundle(
     b: &Bundle<'_>,
     ctl: &DownloadCtl,
-    on_progress: &(impl Fn(u64, Option<u64>) + Send + Sync),
+    on_progress: &(impl Fn(u64, Option<u64>, Stage) + Send + Sync),
 ) -> Result<FetchOutcome, String> {
     let url = b.resolved_url();
     if url.is_empty() {
@@ -997,100 +1175,108 @@ async fn fetch_bundle(
     //
     // ⚠️ 光有 `resume_url` 还不够：那个链接必须和 `.part` 旁边记的**对得上**，
     //    否则这半个包是别的文件的，接上去会拼出一个坏 zip（见 `stored_resume`）。
-    let mut already = match ctl.resume_url.as_deref() {
+    /* ★ 盘上那个 `.part` 要是**一整包**，一个字节都别再要 —— 直接去解压。
+
+       什么时候会这样：上一轮把字节都下完了，但收尾（解压）没跑完 —— 解压途中关
+       窗口、解压报错、磁盘满。`.part` 与链接记号都还在，于是「点继续下载」会带着
+       `Range: bytes=<整包长>-` 再发一次请求，把几 GB 从头再下一遍（用户 2026-10-03
+       撞到的就是这一幕）。⚠️ 这个判断必须排在下面「`already == 0` 就删 `.part`」
+       **之前**：那一行会连一整包一起删掉。记号在不在都不影响这个判断 —— 包是完整
+       的，记号只管续传。 */
+    let whole = part_is_whole_zip(&zip_path);
+    let already = match ctl.resume_url.as_deref() {
         Some(u) if stored_resume(&zip_path, u) => file_size(&zip_path),
         _ => 0,
     };
-    if already == 0 {
+    if already == 0 && !whole {
         let _ = std::fs::remove_file(&zip_path);
-        let _ = std::fs::remove_file(url_marker(&zip_path));
-    } else {
-        // 记一笔「这半个包是这个链接的」。写在发请求**之前**：万一进程在这儿
-        // 被杀掉，下次也知道它属于谁。
-        let _ = write_url_marker(&zip_path, url);
     }
-
-    // 从头下 / 接着下的差异只在这三行：一个 Range 头、一个追加标志、一个起始计数
-    let mut req = crate::net::client()
-        .get(url)
-        // 6 小时：这个包可能有好几 GB，超时是按「整个响应」算的，
-        // 用 reqwest 默认的 30 秒会在第一块数据之后被掐断。
-        .timeout(Duration::from_secs(6 * 3600));
-    if already > 0 {
-        req = req.header(reqwest::header::RANGE, format!("bytes={already}-"));
-    }
-
-    let res = req
-        .send()
-        .await
-        .map_err(|e| format!("下载{}失败：{e}", b.label))?;
-    let status = res.status();
-    if !status.is_success() {
-        return Err(format!("下载{}失败：HTTP {}", b.label, status.as_u16()));
-    }
-    // 206 = 服务端认了 Range；200 = 不认，要从头写
-    let resumed = status.as_u16() == 206 && already > 0;
-    if !resumed {
-        already = 0;
-    }
-    // 206 时 Content-Length 是「还剩多少」，总长要把已有的加上
-    let total = res.content_length().map(|len| len + already);
-
-    let mut file = if resumed {
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&zip_path)
-            .map_err(|e| format!("打开临时文件失败：{e}"))?
-    } else {
-        std::fs::File::create(&zip_path).map_err(|e| format!("写临时文件失败：{e}"))?
-    };
     let mut got: u64 = already;
-    on_progress(got, total);
-    let mut stream = res.bytes_stream();
-    use futures_util::StreamExt;
-    use std::io::Write;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("下载中断：{e}"))?;
-        file.write_all(&chunk)
-            .map_err(|e| format!("写文件失败（磁盘满了？）：{e}"))?;
-        got += chunk.len() as u64;
-        on_progress(got, total);
-        // ⚠️ 这个判断要放在写盘之后、下一块之前：放到外面会让一次暂停多下几 MB
-        if ctl.check() {
-            let _ = file.flush();
-            drop(file);
-            return Ok(if ctl.cancelled() {
-                // 停止 = 这次不算数，半个文件也删掉，下次从头下
-                let _ = std::fs::remove_file(&zip_path);
-                let _ = std::fs::remove_file(url_marker(&zip_path));
-                on_progress(0, None);
-                FetchOutcome::Cancelled
-            } else {
-                // 暂停 = 半个包留着，记号也留着（下次要拿它发 Range）
-                FetchOutcome::Paused { bytes: got }
-            });
+    let mut total: Option<u64> = None;
+    let mut round: u32 = 0;
+    let step = if whole {
+        // 一整包已经躺在盘上了：这一轮什么都不做（不发请求、不写记号）
+        Step::Done
+    } else {
+        // 记号写在发请求**之前**，而且**从头下时也要写**：万一进程在这儿被掐掉，
+        // 下次才知道这半个包属于哪条链接。缺记号的 `.part` 会被当成「谁的都行」
+        // （见 `stored_resume`），那正是「换了链接还接着下、拼出坏 zip」那条路。
+        let _ = write_url_marker(&zip_path, url);
+
+        /* ── 拉数据：断了就歇一会儿再来，最多 RETRY_ROUNDS 轮 ──────────────
+
+           续传点**从盘上重新读**（`file_size`），不认内存里的计数：只有真落进
+           `.part` 的字节才能当下一轮的 `Range` 起点。⚠️ 断了之后绝不能退回 0 ——
+           那正是「从头下」= 白烧用户几个 GB 的流量。 */
+        loop {
+            round += 1;
+            match fetch_once(url, &zip_path, b.label, &mut got, &mut total, ctl, on_progress)
+                .await
+            {
+                Ok(step) => break step,
+                Err(e) => {
+                    // ⚠️ 万一这一轮其实已经把整包下到手、只是收尾报了错：就地改判成
+                    //    「下完了」去解压。不改判的话，下一圈会带着「整包长」的 Range
+                    //    再发一次请求 —— 那是把几个 GB 从头下一遍。
+                    if part_is_whole_zip(&zip_path) {
+                        break Step::Done;
+                    }
+                    if round > RETRY_ROUNDS {
+                        return Err(format!(
+                            "{e}（试了 {RETRY_ROUNDS} 轮、每轮隔 {} 秒。已下的 {} 字节留在盘上，\
+                             下次点「继续下载」从这儿接着下）",
+                            RETRY_WAIT.as_secs(),
+                            file_size(&zip_path)
+                        ));
+                    }
+                    // 断在哪儿就以哪儿为起点（这一轮写进去的都算数）
+                    got = file_size(&zip_path);
+                    on_progress(got, total, Stage::Download);
+                    // 等待里用户按了暂停/停止：收场，别再试了
+                    if !wait_before_retry(ctl).await {
+                        break settle_user_stop(ctl, &zip_path, on_progress);
+                    }
+                }
+            }
+        }
+    };
+    if let Step::Paused = step {
+        return Ok(FetchOutcome::Paused { bytes: got });
+    }
+    if let Step::Cancelled = step {
+        return Ok(FetchOutcome::Cancelled);
+    }
+
+    // 下面这一段是**解压**、不是下载：先把进度归零并换成 `Extract`，界面据此把标签
+    // 从「正在下载…」改成「正在解压…」。不换的话条子会归零重爬，看着像又下了一遍
+    // （见 `Stage` 的注释）。
+    on_progress(0, None, Stage::Extract);
+    let report = extract_zip(&zip_path, &b.dest, b.strip, |done, all| {
+        on_progress(done, Some(all), Stage::Extract)
+    });
+    match report {
+        Ok(report) => {
+            // 解好了才删：它有几 GB，留着没用（`.part` 这名字也保证下次不会被当成
+            // .zip 用）。记号跟着走 —— 没有「半个包」可续了。
+            let _ = std::fs::remove_file(&zip_path);
+            let _ = std::fs::remove_file(url_marker(&zip_path));
+            Ok(FetchOutcome::Done(json!({
+                "ok": true,
+                "dir": b.dest.to_string_lossy(),
+                "files": report.files,
+                "bytes": report.bytes,
+            })))
+        }
+        Err(e) => {
+            /* ⚠️ 解压失败时**不删** `.part`，记号也不删。
+
+               以前是「不论成败都删」，理由是「几 GB 留着毫无用处」——那个理由在
+               「盘上本来就是一整包」时是错的：删掉 = 用户得把几 GB 再下一遍（流量
+               是他自己的）。留着的话界面会显示「已经下好 N，接着下」，用户再点一次
+               走的是 `part_is_whole_zip` 那条短路 —— 不发请求，直接重解。 */
+            Err(e)
         }
     }
-    drop(file);
-
-    // ⚠️ 解压放在 `?` 之前：解压失败要落在下面的收尾里把 zip 删掉，
-    //    不能直接从这儿 return（那样会留下几 GB 的残包）
-    let report = extract_zip(&zip_path, &b.dest, b.strip, |done, all| {
-        on_progress(done, Some(all))
-    });
-    // 不论成败都把 zip 删掉 —— 它有几 GB，留着毫无用处
-    // （`.part` 这个名字也保证了下次不会误当成 .zip 用）
-    let _ = std::fs::remove_file(&zip_path);
-    // 记号跟着走：包已经解完（或解失败），没有「半个包」可续了
-    let _ = std::fs::remove_file(url_marker(&zip_path));
-    let report = report?;
-
-    Ok(FetchOutcome::Done(json!({
-        "ok": true,
-        "dir": b.dest.to_string_lossy(),
-        "files": report.files,
-        "bytes": report.bytes,
-    })))
 }
 
 /// 下载模型 zip 并解压到 `<可写>/svsep/models/`。
@@ -1101,7 +1287,7 @@ pub async fn download_models(
     writable: &Path,
     url: &str,
     ctl: &DownloadCtl,
-    on_progress: impl Fn(u64, Option<u64>) + Send + Sync + 'static,
+    on_progress: impl Fn(u64, Option<u64>, Stage) + Send + Sync + 'static,
 ) -> Result<FetchOutcome, String> {
     let given = if url.trim().is_empty() { None } else { Some(url) };
     let b = Bundle::models(writable, given);
@@ -1133,7 +1319,7 @@ pub async fn download_runtime(
     root: &Path,
     url: &str,
     ctl: &DownloadCtl,
-    on_progress: impl Fn(u64, Option<u64>) + Send + Sync + 'static,
+    on_progress: impl Fn(u64, Option<u64>, Stage) + Send + Sync + 'static,
 ) -> Result<FetchOutcome, String> {
     let given = if url.trim().is_empty() { None } else { Some(url) };
     let b = Bundle::runtime(root, given);
@@ -2142,7 +2328,7 @@ mod tests {
         static NO_PAUSE: AtomicBool = AtomicBool::new(false);
         static NO_STOP: AtomicBool = AtomicBool::new(false);
         let ctl = DownloadCtl::new(&NO_PAUSE, &NO_STOP, None);
-        let out = download_models(&dest, &url, &ctl, move |got, _total| {
+        let out = download_models(&dest, &url, &ctl, move |got, _total, _stage| {
             let mut s = seen2.lock().unwrap();
             s.0 = got;
             s.1 += 1;
@@ -2219,7 +2405,7 @@ mod tests {
         let ctl = DownloadCtl::new(&PAUSE, &STOP, None);
         let marks = std::sync::Arc::new(std::sync::Mutex::new(0u64));
         let marks2 = marks.clone();
-        let out = download_models(&dest, &url, &ctl, move |got, _| {
+        let out = download_models(&dest, &url, &ctl, move |got, _, _stage| {
             let mut m = marks2.lock().unwrap();
             *m = got;
             // ⚠️ 旗标是**另一条手臂**在真实场景里立的（HTTP 请求进来），这里就地立；
@@ -2264,7 +2450,7 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(u64, u64)>::new()));
         let seen2 = seen.clone();
         let t = std::time::Instant::now();
-        let out2 = download_models(&dest, &resumed_from, &ctl2, move |got, total| {
+        let out2 = download_models(&dest, &resumed_from, &ctl2, move |got, total, _stage| {
             seen2.lock().unwrap().push((got, total.unwrap_or(0)));
         })
         .await
@@ -2294,6 +2480,287 @@ mod tests {
         assert!(!models.join("svsep-models.zip").exists(), "下完了 zip 还在");
         let st = models_status(&dest);
         assert_eq!(st["ok"], serde_json::Value::Bool(true), "续传后状态复查说没齐");
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /* ══ 断线重试：接着下，不从头下 ═══════════════════════════════════════
+
+       要验的就是一句话：「下载期间链接失败 → 自己再试，而且是接着刚刚那个
+       字节继续下，不是从头下」。⛔ **这条全程在 127.0.0.1 上跑，一个字节的
+       公网流量都不花** —— 真包是 462 MB / 4.7 GB，用户的流量按 GB 算钱。
+       「断线 / Range 起点 / 拼出来的包完不完整」本地这个服务器全能验。 */
+
+    /// 从一段请求头里取出 `Range: bytes=N-` 的 N（没带就回 `None`）。
+    ///
+    /// ⚠️ **大小写不能当准**：HTTP 头名不区分大小写，客户端发出去的是 `range:`。
+    fn range_start(head: &str) -> Option<usize> {
+        head.lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+            .and_then(|l| l.split('=').nth(1))
+            .and_then(|v| v.trim().trim_end_matches('-').parse::<usize>().ok())
+    }
+
+    /// 一个只会说 HTTP/1.1 的最小服务器：**第一次**请求声明整个长度、却只写半份
+    /// 就关掉连接（= 链接中途断了），之后认 `Range` 回 206 + 剩下的部分。
+    ///
+    /// 收到的请求头都记进返回的 `Vec` 里 —— 测试拿它当「有没有带 Range 接着下」
+    /// 的证据。每条响应都带 `Connection: close`，免得客户端复用那条被掐掉的连接。
+    fn half_then_resume_server(payload: Vec<u8>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let log2 = log.clone();
+        std::thread::spawn(move || {
+            let total = payload.len();
+            let mut n = 0usize;
+            for conn in listener.incoming() {
+                let Ok(mut s) = conn else { continue };
+                n += 1;
+                // 读请求头就够（GET，没有请求体）
+                let mut buf = [0u8; 4096];
+                let read = s.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..read]).to_string();
+                log2.lock().unwrap().push(head.clone());
+                let from = range_start(&head).unwrap_or(0).min(total);
+                let (code, declared, body): (&str, usize, &[u8]) = if n == 1 {
+                    // ⚠️ 长度声明成**整个**、只发一半：客户端才认得出「少了半截」，
+                    //    这才是真实世界里「下到一半链接断了」的样子
+                    ("200 OK", total, &payload[..total / 2])
+                } else {
+                    ("206 Partial Content", total - from, &payload[from..])
+                };
+                let mut resp = format!(
+                    "HTTP/1.1 {code}\r\nContent-Length: {declared}\r\nConnection: close\r\n"
+                );
+                if code.starts_with("206") {
+                    resp.push_str(&format!(
+                        "Content-Range: bytes {from}-{}/{total}\r\n",
+                        total.saturating_sub(1)
+                    ));
+                }
+                resp.push_str("\r\n");
+                let _ = s.write_all(resp.as_bytes());
+                let _ = s.write_all(body);
+                let _ = s.flush();
+                // 关连接：第一条就这样收场，客户端读到的是「少了半截」
+            }
+        });
+        (format!("http://127.0.0.1:{port}/x.zip"), log)
+    }
+
+    #[tokio::test]
+    async fn a_broken_download_retries_and_resumes_from_the_bytes_on_disk() {
+        // 造一个**真的 zip**：「拼出来的包完不完整」才有硬判据 ——
+        // 断点接错位置（比如又从头写）解压就直接失败。
+        let inner = "BS-Roformer-SW".repeat(400);
+        let zip = make_zip(&[
+            ("models/a.onnx", inner.as_bytes(), true),
+            ("models/b.ckpt", &[7u8; 3000], false),
+        ]);
+        let (url, reqs) = half_then_resume_server(zip.clone());
+
+        let dest = std::env::temp_dir().join("vss-svsep-retry-test");
+        let _ = std::fs::remove_dir_all(&dest);
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, None);
+        let ticks = std::sync::Arc::new(Mutex::new(Vec::<(u64, Option<u64>, Stage)>::new()));
+        let ticks2 = ticks.clone();
+
+        let b = Bundle::models(&dest, Some(&url));
+        let t = Instant::now();
+        let out = fetch_bundle(&b, &ctl, &move |got, total, stage| {
+            ticks2.lock().unwrap().push((got, total, stage));
+        })
+        .await
+        .expect("断线之后应该自己接着下，结果整条失败了");
+        println!("断线 → 重试 → 下完，耗时 {:?}（含一轮 10 秒等待）", t.elapsed());
+        assert!(matches!(out, FetchOutcome::Done(_)), "没下完：{out:?}");
+
+        // 解出来的字节必须和原包**一模一样** —— 接错位置这里就会炸
+        let models = models_dir(&dest);
+        assert_eq!(
+            std::fs::read(models.join("a.onnx")).unwrap(),
+            inner.as_bytes(),
+            "接着下拼出来的包不对（断点接错位置了）"
+        );
+        assert_eq!(std::fs::read(models.join("b.ckpt")).unwrap().len(), 3000);
+        // 下完就该收拾干净：`.part` 与记号都不留
+        let part = models.join("svsep-models.zip.part");
+        assert!(!part.exists(), "下完了 .part 还在");
+        assert!(!url_marker(&part).exists(), "下完了 .part.url 还在");
+
+        /* ★ 这两条才是「接着下」的证据：
+           ① 正好两次请求 —— 断一次、自己重试一次；
+           ② 第二次带了 `Range`，起点 = 第一次真的落到盘上的字节数。 */
+        let reqs = reqs.lock().unwrap();
+        assert_eq!(
+            reqs.len(),
+            2,
+            "该是「断一次 → 重试一次」，实际发了 {} 次请求",
+            reqs.len()
+        );
+        assert!(
+            range_start(&reqs[0]).is_none(),
+            "第一次不该带 Range：{}",
+            reqs[0]
+        );
+        assert_eq!(
+            range_start(&reqs[1]),
+            Some(zip.len() / 2),
+            "重试的起点不是断点（= 从头下了）：{}",
+            reqs[1]
+        );
+        drop(reqs);
+
+        // 进度回调也得把「已有字节」报上去，界面才不会在重试时跳回 0
+        let ticks = ticks.lock().unwrap();
+        assert!(
+            ticks.iter().any(|(got, _, _)| *got == (zip.len() / 2) as u64),
+            "进度回调里没出现过断点（{ticks:?}）"
+        );
+        /* 而且最后报的必须是**在解压**：解压的分母（各条目压缩后大小之和）跟整包
+           字节数差不多大，界面就靠这个字段把标签从「正在下载…」换成「正在解压…」——
+           不换的话条子归零重爬，看着像下完又自动重下了一遍（用户 2026-10-03 报的）。 */
+        assert!(
+            ticks.iter().any(|(_, _, s)| *s == Stage::Download),
+            "下载那一段一次都没报过（{ticks:?}）"
+        );
+        assert_eq!(
+            ticks.last().map(|(_, _, s)| *s),
+            Some(Stage::Extract),
+            "最后一段该是「在解压」（{ticks:?}）"
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// ★ 盘上那个 `.part` 已经是**一整包**时：一个字节都别再要，直接解压。
+    ///
+    /// 这是用户 2026-10-03 报的那一幕的修法：下完 → 解压到一半关窗口 → `.part`
+    /// 里躺着一整包 → 再点「继续下载」照原样会带着 `Range: bytes=<整包长>-` 再发
+    /// 一次请求（服务端不认 Range 就从头下一遍）。判据见 `part_is_whole_zip`。
+    #[tokio::test]
+    async fn a_part_that_is_already_a_whole_zip_is_extracted_without_downloading() {
+        let inner = "BS-Roformer-SW".repeat(400);
+        let zip = make_zip(&[
+            ("models/a.onnx", inner.as_bytes(), true),
+            ("models/b.ckpt", &[7u8; 3000], false),
+        ]);
+        // 假服务器：真发出请求就会被记下来，而这条测试要求它**一次都没被碰**
+        let (url, reqs) = half_then_resume_server(zip.clone());
+
+        let dest = std::env::temp_dir().join("vss-svsep-whole-part-test");
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(models_dir(&dest)).unwrap();
+        // 把一整包摆在 `.part` 上、记号也写好：就是「下完了、解压没跑完」那个现场
+        let part = models_dir(&dest).join("svsep-models.zip.part");
+        std::fs::write(&part, &zip).unwrap();
+        let _ = write_url_marker(&part, &url);
+
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, None);
+        let b = Bundle::models(&dest, Some(&url));
+        let out = fetch_bundle(&b, &ctl, &|_, _, _| {})
+            .await
+            .expect("一整包躺在盘上，该直接解开而不是再下一次");
+
+        assert!(matches!(out, FetchOutcome::Done(_)), "没解开：{out:?}");
+        let hits = reqs.lock().unwrap().len();
+        assert_eq!(hits, 0, "整包都在盘上了还去发请求了（{hits} 次）");
+        let models = models_dir(&dest);
+        assert_eq!(
+            std::fs::read(models.join("a.onnx")).unwrap(),
+            inner.as_bytes(),
+            "解出来的内容不对"
+        );
+        assert!(!part.exists(), "解完了 `.part` 还在（下次会被当成半个包）");
+        assert!(!url_marker(&part).exists(), "解完了 `.part.url` 还在");
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// 「一整包」的判据不能把半截包也认成一整包 —— 认错了就是拿坏 zip 去解压。
+    #[test]
+    fn only_a_whole_zip_counts_as_a_whole_zip() {
+        let inner = "BS-Roformer-SW".repeat(400);
+        let zip = make_zip(&[("models/a.onnx", inner.as_bytes(), true)]);
+        let dir = std::env::temp_dir().join("vss-svsep-whole-zip-check");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.part");
+
+        assert!(!part_is_whole_zip(&p), "文件都不在，怎么算得上一整包");
+        std::fs::write(&p, b"").unwrap();
+        assert!(!part_is_whole_zip(&p), "空文件不能算一整包");
+        std::fs::write(&p, &zip[..zip.len() / 2]).unwrap();
+        assert!(!part_is_whole_zip(&p), "下了一半的包被当成了一整包");
+        // 尾巴被切掉也不行：中央目录在文件末尾，少一个字节就读不出来
+        std::fs::write(&p, &zip[..zip.len() - 8]).unwrap();
+        assert!(!part_is_whole_zip(&p), "少了尾巴的包被当成了一整包");
+        std::fs::write(&p, &zip).unwrap();
+        assert!(part_is_whole_zip(&p), "完整的一整包没认出来（那就白下了）");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 5 轮都不成才报错，而且**半个包留着** —— 界面上还能点「继续下载」接着下。
+    ///
+    /// ⚠️ 这条要跑满 5 × 10 秒（真的等），所以标 `#[ignore]`：它验的是「放弃之后
+    /// 的收场」，不是每次改下载代码都要过一遍的东西。跑法：
+    ///     cargo test --bins -- --ignored gives_up_after_five_rounds --nocapture
+    #[tokio::test]
+    #[ignore = "要真等 50 秒（5 轮 × 10 秒），按需手动跑"]
+    async fn gives_up_after_five_rounds_and_keeps_the_half_pack() {
+        /// 只会掐线、永远不给数据的服务器
+        fn dead_server() -> String {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                for conn in listener.incoming() {
+                    let Ok(mut s) = conn else { continue };
+                    let mut buf = [0u8; 4096];
+                    let _ = s.read(&mut buf);
+                    // 每个响应都声明 1000 字节、只给 100 字节，然后关掉
+                    let _ = s.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
+                    );
+                    let _ = s.write_all(&[1u8; 100]);
+                    let _ = s.flush();
+                }
+            });
+            format!("http://127.0.0.1:{port}/x.zip")
+        }
+
+        let url = dead_server();
+        let dest = std::env::temp_dir().join("vss-svsep-retry-giveup");
+        let _ = std::fs::remove_dir_all(&dest);
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, None);
+        let b = Bundle::models(&dest, Some(&url));
+
+        let t = Instant::now();
+        let err = fetch_bundle(&b, &ctl, &|_, _, _| {}).await.unwrap_err();
+        let took = t.elapsed();
+        println!("放弃用了 {took:?}，报错：{err}");
+        assert!(err.contains("试了 5 轮"), "报错里该说清试了几轮：{err}");
+        assert!(
+            took >= Duration::from_secs(5 * 10),
+            "5 轮 × 10 秒没等够就放弃了：{took:?}"
+        );
+        // 半个包留着：界面上「继续下载」还有得续
+        let part = Bundle::models(&dest, None).dest.join("svsep-models.zip.part");
+        assert!(file_size(&part) > 0, "放弃之后半个包也没了，下次只能从头下");
+        assert_eq!(
+            resume_point(&dest, &dest, "models", &url),
+            Some(file_size(&part)),
+            "留下的半个包认不出来（`resume_point` 拿不到断点）"
+        );
 
         let _ = std::fs::remove_dir_all(&dest);
     }

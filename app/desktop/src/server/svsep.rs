@@ -14,9 +14,12 @@
 //!   POST /api/svsep/download/stop       停止下载（删 .part，下次从头下）
 //!   POST /api/svsep/deps/delete         一键删掉下下来的模型与运行时
 //!   POST /api/svsep/separate            提交一次分离（multipart 原样转发）
-//!   GET  /api/svsep/task/{id}           查任务
-//!   GET  /api/svsep/task/{id}/out/{i}   取输出文件（流式）
-//!   POST /api/svsep/open-output         在资源管理器里打开输出目录
+//!   GET  /api/svsep/task/{id}           查任务（查到任务结束就把服务关掉）
+//!   GET  /api/svsep/task/{id}/file/{n}  取输出文件（**读磁盘**，服务关着也能听）
+//!   GET  /api/svsep/backend/inference   读/写推理方式（自动 / GPU / CPU）
+//!
+//! 用户不管服务的启停：提交时自动起（前端与 `separate` 各做一半），任务结束、
+//! 队列空了就自动关（`auto_stop_when_idle`）—— 那服务占着约 5 GB 内存。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -52,6 +55,22 @@ static DL_KIND: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(N
 static DL_PAUSE: AtomicBool = AtomicBool::new(false);
 /// 用户按了「停止」：收手并且**删掉 `.part`**（下次从头下）
 static DL_STOP: AtomicBool = AtomicBool::new(false);
+/// 现在跑到哪一段了：0 = 在下字节，1 = 下完了、正在解压（`crate::svsep::Stage`）。
+///
+/// 为什么要让界面知道：解压的分母（所有条目压缩后大小之和）跟 zip 的字节数几乎
+/// 一样大，界面上不分段看着就像「下到 100% 又归零、在同一个『正在下载…』标签下
+/// 重下一遍」—— 用户 2026-10-03 报的就是这一幕（实际在解压）。
+static DL_STAGE: AtomicU64 = AtomicU64::new(0);
+/// 跑完的任务留一份快照（最近 `KEEP_TASKS` 个，新的在前）。
+///
+/// **为什么需要**：任务一结束我们就自动把分离服务关了（`auto_stop_when_idle`），
+/// 而界面是靠「再轮询一次拿到 `status=done`」才知道该显示那几轨的 —— 轮询间隔
+/// 2 秒、关服务在 1.5 秒后，正好错开的话那道 `done` 就永远问不到了：服务已经没了，
+/// 界面卡在 90% 还会每 2 秒弹一次「分离服务还没启动」。
+/// 终态一到就抄一份在这儿，服务停了也照样答得上（文件本身走 `output`，读盘）。
+static DONE_TASKS: std::sync::Mutex<Vec<(String, Value)>> = std::sync::Mutex::new(Vec::new());
+/// 留着几条 —— 够用户回看最近几次，也不会把内存当缓存使。
+const KEEP_TASKS: usize = 8;
 /// 「一键删除依赖」在跑吗
 static DEL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DEL_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -103,6 +122,9 @@ fn download_state(root: &std::path::Path, writable: &std::path::Path) -> Value {
         "active": active,
         // "runtime" / "models"；没有下载时是 null
         "kind": kind,
+        // "download" / "extract"：界面据此把标签换成「正在解压…」，
+        // 并在解压期间藏起暂停/停止（那两个按钮对解压无效）
+        "stage": if DL_STAGE.load(Ordering::Relaxed) == 1 { "extract" } else { "download" },
         "done": DL_BYTES.load(Ordering::Relaxed) as f64,
         "total": DL_TOTAL.load(Ordering::Relaxed) as f64,
         "error": err,
@@ -147,6 +169,7 @@ where
     }
     DL_PAUSE.store(false, Ordering::Relaxed);
     DL_STOP.store(false, Ordering::Relaxed);
+    DL_STAGE.store(0, Ordering::Relaxed);
     DL_ACTIVE.store(1, Ordering::Relaxed);
 
     tokio::spawn(async move {
@@ -176,11 +199,19 @@ where
     Ok(Json(ok(json!({ "started": true }))))
 }
 
-fn note_progress(got: u64, total: Option<u64>) {
+fn note_progress(got: u64, total: Option<u64>, stage: crate::svsep::Stage) {
     DL_BYTES.store(got, Ordering::Relaxed);
     if let Some(t) = total {
         DL_TOTAL.store(t, Ordering::Relaxed);
     }
+    DL_STAGE.store(
+        if stage == crate::svsep::Stage::Extract {
+            1
+        } else {
+            0
+        },
+        Ordering::Relaxed,
+    );
 }
 
 /// 暂停下载：`.part` 留着，下次点「继续下载」带 Range 接着下。
@@ -274,6 +305,7 @@ pub async fn status(State(st): State<Arc<AppState>>) -> Json<Value> {
         "dir": s.dir().to_string_lossy(),
         "modelsDir": s.models().to_string_lossy(),
         "dataDir": s.data().to_string_lossy(),
+        "outputsDir": s.outputs().to_string_lossy(),
         "runtime": crate::svsep::runtime_status(&st.root),
         "models": crate::svsep::models_status(s.writable()),
         "download": download_state(&st.root, s.writable()),
@@ -383,11 +415,19 @@ pub async fn separate(
         st.svsep.start().await.map_err(ApiError::bad_request)?;
     }
 
-    let out = st
+    let mut out = st
         .svsep
         .submit(engine, body.to_vec(), &ct)
         .await
         .map_err(ApiError::bad_request)?;
+    // 任务对象捋平：前端拿 `res.task` 直接当任务记录用（`Svsep.tsx::doSeparate`），
+    // 而它读的是 `task.id` —— 上游发的是 `task_id`、还包在 `task` 里，见 `flat_task`
+    if let Some(o) = out.as_object_mut() {
+        if o.contains_key("task") {
+            let t = flat_task(o.get("task").cloned().unwrap_or(Value::Null));
+            o.insert("task".to_string(), t);
+        }
+    }
     Ok(Json(ok(out)))
 }
 
@@ -395,12 +435,49 @@ pub async fn task(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    /* 服务已经自动关了（任务跑完就关，见 `auto_stop_when_idle`）：这时 `get()` 只会
+       回「分离服务还没启动」，可界面要的恰恰是最后那道 `done` —— 先看快照。 */
+    if !st.svsep.probe().await {
+        if let Some(t) = recall_task(&id) {
+            return Ok(Json(ok(t)));
+        }
+    }
     let v = st
         .svsep
         .get(&format!("/api/status/{id}"))
         .await
         .map_err(ApiError::bad_request)?;
-    Ok(Json(ok(v)))
+    let t = flat_task(v);
+    /* 任务结束了就把服务关掉 —— 用户不用记着点「停止服务」，也不用白占 5 GB 内存。
+       隔一会儿、并且确认队列空了才真关（见 `auto_stop_when_idle`）。 */
+    if matches!(
+        t.get("status").and_then(Value::as_str),
+        Some("done") | Some("failed") | Some("cancelled")
+    ) {
+        remember_task(&id, &t);
+        tokio::spawn(auto_stop_when_idle(st.clone()));
+    }
+    Ok(Json(ok(t)))
+}
+
+/// 服务已经不在了（任务跑完自动关的）：把终态快照掏出来答。
+///
+/// 放在 `task` 的最前面 —— 没服务的时候 `get()` 只会回「分离服务还没启动」，
+/// 而这时候界面要的恰恰是最后那道 `done` 与那几轨的名字。
+fn recall_task(id: &str) -> Option<Value> {
+    DONE_TASKS
+        .lock()
+        .ok()
+        .and_then(|all| all.iter().find(|(k, _)| k == id).map(|(_, v)| v.clone()))
+}
+
+fn remember_task(id: &str, t: &Value) {
+    let Ok(mut all) = DONE_TASKS.lock() else {
+        return;
+    };
+    all.retain(|(k, _)| k != id);
+    all.insert(0, (id.to_string(), t.clone()));
+    all.truncate(KEEP_TASKS);
 }
 
 pub async fn cancel(
@@ -428,42 +505,42 @@ pub async fn open_output(
     Ok(Json(ok(v)))
 }
 
-/// 取输出文件 —— 流式转发，不把 WAV 整个读进内存。
+
+
+/// 取一轨分离结果。
+///
+/// **直接读磁盘**：`<数据目录>/outputs/<task_id>/<filename>`。不走分离服务，
+/// 因为任务一结束服务就自动关了（见 `auto_stop_when_idle`），而结果必须在那之后
+/// 还能试听、还能下载。上游 Python 也是从同一个目录发的（`app.py::api_download`）。
+///
+/// 不做 Range：读的是本机磁盘，整个文件几十 MB 一次性发完，`<audio>` 拖动进度条
+/// 也只是让它重新拿一遍 —— 比在转发里维护 Range 语义省事，效果看不出差别。
 pub async fn output(
     State(st): State<Arc<AppState>>,
-    Path((id, index)): Path<(String, u32)>,
-    Query(q): Query<std::collections::HashMap<String, String>>,
+    Path((id, name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let inline = q.get("inline").map(|v| v == "1").unwrap_or(false);
-    let res = st
-        .svsep
-        .download(&id, index, inline)
-        .await
-        .map_err(ApiError::bad_request)?;
-
-    let ctype = res
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    let disp = res
-        .headers()
-        .get(header::CONTENT_DISPOSITION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-
-    let mut out = Response::builder().status(StatusCode::OK);
-    out = out.header(header::CONTENT_TYPE, ctype);
-    out = out.header(header::ACCEPT_RANGES, "bytes");
-    if let Some(d) = disp {
-        out = out.header(header::CONTENT_DISPOSITION, d);
+    // 两个参数都会拼进路径，所以只认「纯名字」：id 是上游发的 uuid hex，
+    // name 是 `outputs[].filename`（上游存的就是 basename，带扩展名）。
+    if id.is_empty()
+        || name.is_empty()
+        || !id.chars().all(|c| c.is_ascii_alphanumeric())
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+    {
+        return Err(ApiError::bad_request("输出文件名不合法"));
     }
-    if let Some(len) = res.content_length() {
-        out = out.header(header::CONTENT_LENGTH, len.to_string());
-    }
-    let body = Body::from_stream(res.bytes_stream());
-    out.body(body)
+
+    let path = st.svsep.output_path(&id, &name);
+    let bytes = tokio::fs::read(&path).await.map_err(|e| {
+        ApiError::not_found(format!("取不到这一轨（{}）：{e}", path.to_string_lossy()))
+    })?;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, audio_mime(&path))
+        .header(header::CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
         .map_err(|e| ApiError::internal(format!("构造响应失败：{e}")))
 }
 
@@ -486,23 +563,263 @@ pub async fn system_stats(State(st): State<Arc<AppState>>) -> Result<Json<Value>
     Ok(Json(ok(v)))
 }
 
+/// 推理方式：自动 / GPU / CPU。
+///
+/// 服务在跑就问它（它会顺手探一下硬件，给出 `badge` / `hardware`）；**服务没跑
+/// 就读盘**上的 `<数据目录>/inference_settings.json` —— 任务一结束服务就自动关
+/// 了（`auto_stop_when_idle`），可这个设置项在界面上得一直看得见、改得动。
 pub async fn inference_get(State(st): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let v = st
-        .svsep
-        .get("/api/inference-settings")
-        .await
-        .map_err(ApiError::bad_request)?;
-    Ok(Json(ok(v)))
+    if st.svsep.probe().await {
+        if let Ok(v) = st.svsep.get("/api/inference-settings").await {
+            return Ok(Json(ok(v)));
+        }
+    }
+    let mode = read_infer_mode(&st);
+    Ok(Json(ok(infer_reply(&mode, true))))
 }
 
 pub async fn inference_set(
     State(st): State<Arc<AppState>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let v = st
-        .svsep
-        .post_json("/api/inference-settings", &body)
-        .await
-        .map_err(ApiError::bad_request)?;
-    Ok(Json(ok(v)))
+    let raw = body.get("mode").and_then(Value::as_str).unwrap_or("");
+    if !["auto", "cpu", "gpu"].contains(&raw.trim().to_ascii_lowercase().as_str()) {
+        return Err(ApiError::bad_request("无效模式，请选择 auto / cpu / gpu"));
+    }
+    let mode = normalize_mode(raw);
+    write_infer_mode(&st, &mode)?;
+    /* 服务在跑就再告诉它一声：它把 mode 缓存在进程内存里（`inference_settings.py`
+       的 `_cached_mode`），光改文件它不认。它没起来、或者答错了都不影响结果 ——
+       下次启动读的就是这个文件。 */
+    if st.svsep.probe().await {
+        if let Ok(v) = st
+            .svsep
+            .post_json("/api/inference-settings", &json!({ "mode": mode }))
+            .await
+        {
+            return Ok(Json(ok(v)));
+        }
+    }
+    Ok(Json(ok(infer_reply(&mode, true))))
+}
+
+/* ══════════════════════════════ 小工具 ══════════════════════════════ */
+
+/// 把上游的任务对象捋平。
+///
+/// 上游 `GET /api/status/<id>` 回的是 `{"ok":true,"task":{…}}`，而且里面的任务
+/// id 叫 `task_id`；前端（`api.ts::SvsepTask`）按**扁平 + `id`** 读。2026-10-03
+/// 之前这里是原样透传的 —— 前端第一轮轮询拿到的是外壳对象，`task.id` 变
+/// undefined，任务轮询自己停掉：界面永远停在提交那一刻（用户报的「分离完了
+/// 进度还卡在 5%」就是这个）。
+fn flat_task(v: Value) -> Value {
+    let mut t = if v.get("task").map(Value::is_object).unwrap_or(false) {
+        v.get("task").cloned().unwrap_or(Value::Null)
+    } else {
+        v
+    };
+    if let Some(o) = t.as_object_mut() {
+        if let Some(id) = o.get("task_id").cloned() {
+            o.entry("id").or_insert(id);
+        }
+    }
+    t
+}
+
+/// 后端还有活没干完吗（排队中或正在算）。
+///
+/// 判据是上游 `/api/status` 里的 `queues.{uvr,roformer}.{waiting,processing}`。
+/// **读不懂就当成「有活」** —— 宁可不关服务，也不能把用户刚排上的任务连锅端。
+fn queues_busy(status: &Value) -> bool {
+    let Some(q) = status.get("queues").and_then(Value::as_object) else {
+        return true;
+    };
+    q.values().any(|e| {
+        ["waiting", "processing"]
+            .iter()
+            .any(|k| e.get(*k).and_then(Value::as_u64).unwrap_or(0) > 0)
+    })
+}
+
+/// 任务结束了 → 队列也空了 → 把分离服务关掉。
+///
+/// 隔 1.5 秒再看一眼：用户可能正好在这时又提交了一个文件，那个任务还在排队
+/// （`queues_busy` 会拦住）。`stop()` 是幂等的（`svsep.rs`），重复调用无害。
+async fn auto_stop_when_idle(st: Arc<AppState>) {
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let Ok(v) = st.svsep.get("/api/status").await else {
+        return;
+    };
+    if queues_busy(&v) {
+        return;
+    }
+    crate::log_line("音轨分离：任务结束，自动关掉分离服务");
+    st.svsep.stop();
+}
+
+/// 推理方式的设置文件 —— 上游存的就是 `<数据目录>/inference_settings.json`
+/// （`inference_settings.py::_SETTINGS_PATH`）。
+fn inference_file(st: &AppState) -> std::path::PathBuf {
+    st.svsep.data().join("inference_settings.json")
+}
+
+/// 读盘上的推理方式（没有文件、文件坏了都算 `auto`，跟上游一致）。
+fn read_infer_mode(st: &AppState) -> String {
+    std::fs::read_to_string(inference_file(st))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("mode").and_then(Value::as_str).map(str::to_string))
+        .map(|m| normalize_mode(&m))
+        .unwrap_or_else(|| "auto".to_string())
+}
+
+/// 认不出的一律回 `auto`（上游的 `VALID_MODES` 也只有这三个）。
+fn normalize_mode(m: &str) -> String {
+    let m = m.trim().to_ascii_lowercase();
+    if ["auto", "cpu", "gpu"].contains(&m.as_str()) {
+        m
+    } else {
+        "auto".to_string()
+    }
+}
+
+/// 写盘上的推理方式。格式跟上游 `set_mode()` 一样（`{"mode": …}`、两空格缩进），
+/// 这样服务和界面谁先谁后写都不会打架。
+fn write_infer_mode(st: &AppState, mode: &str) -> Result<(), ApiError> {
+    let path = inference_file(st);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| ApiError::internal(format!("建目录失败：{e}")))?;
+    }
+    let body = serde_json::to_string_pretty(&json!({ "mode": mode })).unwrap_or_default();
+    std::fs::write(&path, body).map_err(|e| ApiError::internal(format!("写推理设置失败：{e}")))
+}
+
+/// 服务没跑时给界面的回包 —— 键跟上游 `public_settings()` 对得上，`offline`
+/// 让界面知道这不是现探的硬件。
+fn infer_reply(mode: &str, offline: bool) -> Value {
+    json!({
+        "mode": mode,
+        "effective_mode": mode,
+        "badge": infer_badge(mode),
+        "detail": if offline { "分离服务没在跑，这是盘上的设置；开始分离时按它来。" } else { "" },
+        "offline": offline,
+    })
+}
+
+fn infer_badge(mode: &str) -> &'static str {
+    match mode {
+        "cpu" => "CPU（下次分离生效）",
+        "gpu" => "GPU（下次分离生效）",
+        _ => "自动（下次分离生效）",
+    }
+}
+
+/// 输出文件的内容类型。上游只产音频（wav/mp3/flac…），认不出就当二进制。
+///
+/// ⚠️ 这里写全路径 `std::path::Path`：本模块顶上的 `Path` 是 axum 的提取器。
+fn audio_mime(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("wav") => "audio/wav",
+        Some("mp3") => "audio/mpeg",
+        Some("flac") => "audio/flac",
+        Some("m4a") => "audio/mp4",
+        Some("aac") => "audio/aac",
+        Some("ogg") => "audio/ogg",
+        Some("wma") => "audio/x-ms-wma",
+        _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_task_envelope_is_flattened_and_task_id_becomes_id() {
+        let t = flat_task(json!({
+            "ok": true,
+            "task": { "task_id": "abc", "status": "processing", "progress": 42 },
+        }));
+        assert_eq!(t.get("id").and_then(Value::as_str), Some("abc"));
+        assert_eq!(t.get("progress").and_then(Value::as_u64), Some(42));
+        assert!(t.get("task").is_none() || t.get("task").map(Value::is_object) != Some(true));
+
+        // 上游哪天改成扁平的了也不能坏
+        let flat = flat_task(json!({ "task_id": "x", "status": "done" }));
+        assert_eq!(flat.get("id").and_then(Value::as_str), Some("x"));
+        assert_eq!(flat.get("status").and_then(Value::as_str), Some("done"));
+    }
+
+    #[test]
+    fn an_empty_queue_is_idle_but_an_unreadable_one_is_busy() {
+        let idle = json!({ "queues": {
+            "uvr": { "waiting": 0, "processing": 0 },
+            "roformer": { "waiting": 0, "processing": 0 },
+        }});
+        assert!(!queues_busy(&idle));
+
+        let queued = json!({ "queues": { "roformer": { "waiting": 1, "processing": 0 } }});
+        assert!(queues_busy(&queued));
+        let running = json!({ "queues": { "uvr": { "waiting": 0, "processing": 1 } }});
+        assert!(queues_busy(&running));
+
+        // 读不懂就当有活 —— 不能因为看不懂就把服务关了
+        assert!(queues_busy(&json!({})));
+        assert!(queues_busy(&json!({ "queues": "?" })));
+    }
+
+    #[test]
+    fn audio_mime_covers_what_the_backend_writes() {
+        use std::path::Path as StdPath;
+        assert_eq!(audio_mime(StdPath::new("a/vocals_x.wav")), "audio/wav");
+        assert_eq!(audio_mime(StdPath::new("a.mp3")), "audio/mpeg");
+        assert_eq!(audio_mime(StdPath::new("A.FLAC")), "audio/flac");
+        assert_eq!(
+            audio_mime(StdPath::new("notes.txt")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            audio_mime(StdPath::new("noext")),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn inference_mode_falls_back_to_auto() {
+        assert_eq!(normalize_mode("GPU"), "gpu");
+        assert_eq!(normalize_mode(" cpu "), "cpu");
+        assert_eq!(normalize_mode("cuda"), "auto");
+        assert_eq!(normalize_mode(""), "auto");
+        assert!(infer_badge("gpu").starts_with("GPU"));
+    }
+
+    #[test]
+    fn a_finished_task_stays_answerable_after_the_service_is_gone() {
+        // 服务停掉以后界面还得靠这道 `done` 才显示那几轨，所以终态要能再掏出来
+        let done = json!({ "id": "t1", "status": "done", "outputs": [{ "filename": "a.wav" }] });
+        remember_task("t1", &done);
+        assert_eq!(
+            recall_task("t1").and_then(|v| v.get("status").cloned()),
+            Some(json!("done"))
+        );
+        assert!(recall_task("nope").is_none());
+
+        // 同 id 再记一次只留一份（不然轮询几次就攒一摞）
+        remember_task("t1", &done);
+        assert!(DONE_TASKS.lock().unwrap().iter().filter(|(k, _)| k == "t1").count() == 1);
+
+        // 只留最近 KEEP_TASKS 个，新的在前
+        for i in 0..KEEP_TASKS + 3 {
+            remember_task(&format!("old{i}"), &json!({ "status": "done" }));
+        }
+        let all = DONE_TASKS.lock().unwrap();
+        assert!(all.len() <= KEEP_TASKS);
+        assert!(all.iter().any(|(k, _)| k == "old10"));
+        assert!(!all.iter().any(|(k, _)| k == "t1"));
+    }
 }

@@ -103,6 +103,15 @@
   margin-bottom: var(--lg-space-3);
 }
 
+/* ── 推理方式（自动 / GPU / CPU）─────────────────────────
+   摆在按钮行里，左边一个小标签，右边是玻璃分段控件（原版软件在标题栏上） */
+.svsep-infer {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lg-space-2);
+  margin-right: auto;
+}
+
 /* ── 进度条 ─────────────────────────────────────────────── */
 .svsep-progress {
   margin-bottom: var(--lg-space-3);

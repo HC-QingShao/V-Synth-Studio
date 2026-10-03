@@ -186,7 +186,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/svsep/task/{id}", get(svsep::task))
         .route("/api/svsep/task/{id}/cancel", post(svsep::cancel))
-        .route("/api/svsep/task/{id}/out/{index}", get(svsep::output))
+        // 按**文件名**取输出（读磁盘，不经分离服务 —— 服务分离完会自动关）
+        .route("/api/svsep/task/{id}/file/{name}", get(svsep::output))
         .route("/api/svsep/open-output", post(svsep::open_output))
         // 分离后端自己的状态 / 设备 / 队列，原样透出去
         .route("/api/svsep/backend/status", get(svsep::backend_status))

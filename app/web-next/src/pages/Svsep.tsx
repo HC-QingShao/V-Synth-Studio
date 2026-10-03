@@ -3,6 +3,7 @@ import { api, svsepFileUrl, type SvsepOutput, type SvsepStatus, type SvsepTask }
 import { Button, IconButton } from '@/components/Button'
 import { Icon } from '@/components/Icon'
 import { Chip, Finding, Panel, PanelHead, Stat } from '@/components/Panel'
+import { GlassSegmentedControl } from '@ttqtt/liquid-glass-react'
 import { formatBytes } from '@/lib/format'
 import type { PageProps } from './types'
 import './Svsep.css'
@@ -16,8 +17,9 @@ import './Svsep.css'
  * （`炽小阳音轨分离站离线版` 的后端，源码在 `app/data/svsep/backend/`，
  * 由 Rust 的 `svsep.rs` 拉起）。这一个事实派生出页面上大部分状态：
  *
- *   * 服务**可以没起**（`running` 假）—— 那就先给一颗「启动服务」，别让用户
- *     点了「开始分离」再看一句 red toast。
+ *   * 服务**由这一页自己管**：点「开始分离」时自动起（第一次要十几秒），任务
+ *     跑完、队列空了自动关 —— 它常驻会占约 5 GB 内存。所以界面上**没有**
+ *     「启动服务 / 停止服务」两颗按钮，状态里只说「运行中 / 空闲」。
  *   * 第一次用**两样都没有**：运行时 4.7 GB（解压 7.4 GB）+ 模型 462 MB
  *     （解压 731 MB），**都不随包发**。所以界面上必须把「要下多少」写清楚 ——
  *     用户看到「下载模型 730 MB」会以为是整个功能只要 730 MB，而真正的大头
@@ -69,6 +71,20 @@ const ESTIMATE_NOTE = '按本机纯 CPU 实测估的时长；装了 NVIDIA 显�
 const POLL_STATUS = 2000
 const POLL_BACKEND = 8000
 
+/**
+ * 推理方式 —— 原版软件标题栏上就有这个三选一（`自动 / GPU / CPU`），
+ * 能不能真用上 GPU 由 Python 那边探（本机是 AMD 卡，只会回退 CPU）。
+ */
+const INFER_MODES = [
+  { value: 'auto' as const, label: '自动' },
+  { value: 'gpu' as const, label: 'GPU' },
+  { value: 'cpu' as const, label: 'CPU' },
+]
+type InferMode = (typeof INFER_MODES)[number]['value']
+const INFER_LABEL: Record<InferMode, string> = { auto: '自动', gpu: 'GPU', cpu: 'CPU' }
+/** 认不出的值一律当 auto（后端也是这么兜的） */
+const asInferMode = (v: unknown): InferMode => (v === 'cpu' || v === 'gpu' ? v : 'auto')
+
 const STEM_LABEL: Record<string, string> = {
   vocals: '人声',
   instrumental: '伴奏',
@@ -106,7 +122,8 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
   const [file, setFile] = useState<File | null>(null)
   const [engine, setEngine] = useState<'uvr' | 'roformer'>('roformer')
   const [busy, setBusy] = useState(false)
-  const [starting, setStarting] = useState(false)
+  /* 推理方式：跟盘上的 `inference_settings.json` 对齐（服务在跑时以 Python 为准） */
+  const [inferMode, setInferMode] = useState<InferMode>('auto')
   const [task, setTask] = useState<SvsepTask | null>(null)
   /* 「删除全部依赖」的两段式确认：第一下只是把这个立起来，第二下才真删 */
   const [armDelete, setArmDelete] = useState(false)
@@ -136,11 +153,10 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
   const running = !!st?.running
 
   /* ── 轮询：分离后端自己的状态（设备 / 队列）───────────── */
+  /* ⚠️ 服务停了**不清空** `backend`：任务跑完服务就自动关了，可上次探到的设备
+     与队列还得留在界面上 —— 清掉的话「设备」那条 Stat 会跟着服务一起消失。 */
   useEffect(() => {
-    if (!running) {
-      setBackend(null)
-      return
-    }
+    if (!running) return
     let alive = true
     const tick = async () => {
       try {
@@ -158,9 +174,44 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
     }
   }, [running])
 
+  /* ── 推理方式：服务在跑问它，没跑读盘 ─────────────────── */
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const v = await api.svsepInference()
+        if (alive) setInferMode(asInferMode(v.mode))
+      } catch {
+        /* 读不到就留着 auto —— 跟后端缺省一致，不打扰用户 */
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const doSetInfer = async (m: InferMode) => {
+    const prev = inferMode
+    setInferMode(m) // 先把按钮点亮，别让网络往返卡住手感
+    try {
+      const v = await api.svsepSetInference(m)
+      setInferMode(asInferMode(v.mode ?? m))
+      onToast(`推理方式：${INFER_LABEL[m]}（下次分离生效）`, 'ok')
+    } catch (e) {
+      setInferMode(prev) // 没存下来就把按钮弹回去
+      onToast(errText(e), 'err')
+    }
+  }
+
   /* ── 任务轮询：任务没结束就一直问 ───────────────────── */
   const taskId = task?.id
-  const settled = !!task && (task.status === 'done' || task.status === 'error' || task.status === 'failed')
+  const settled =
+    !!task &&
+    (task.status === 'done' ||
+      task.status === 'error' ||
+      task.status === 'failed' ||
+      /* 上游的取消写 `cancelled`（`task_manager.py`），漏了它就会一直轮询下去 */
+      task.status === 'cancelled')
   useEffect(() => {
     if (!taskId || settled) return
     let alive = true
@@ -221,29 +272,6 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
   const outputs = useMemo(() => task?.outputs ?? [], [task])
 
   /* ── 动作 ───────────────────────────────────────────── */
-
-  const doStart = async () => {
-    setStarting(true)
-    try {
-      await api.svsepStart()
-      await refresh()
-      onToast('分离服务已启动', 'ok')
-    } catch (e) {
-      onToast(errText(e), 'err')
-    } finally {
-      setStarting(false)
-    }
-  }
-
-  const doStop = async () => {
-    try {
-      await api.svsepStop()
-      await refresh()
-      onToast('分离服务已停止', 'info')
-    } catch (e) {
-      onToast(errText(e), 'err')
-    }
-  }
 
   const doDownloadModels = async () => {
     try {
@@ -318,10 +346,11 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
     }
     setBusy(true)
     try {
-      /* 服务没起就顺手起一下 —— 后端路由里也做了这件事，这里做是为了
-         「启动中…」这段等待有反馈（起 Python 要十几秒） */
+      /* 服务没起就顺手起一下（后端 `separate` 里也做了这件事，这里做是为了
+         「正在启动…」这段等待有反馈 —— 起 Python 要十几秒）。跑完之后服务会
+         自己关掉：Rust 那边 `auto_stop_when_idle`。 */
       if (!running) {
-        onToast('分离服务还没起，先启动它…', 'info')
+        onToast('正在启动分离服务（第一次要十几秒）…', 'info')
         await api.svsepStart()
         await refresh()
       }
@@ -349,7 +378,10 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
     if (!task) return
     const el = audioRef.current
     if (!el) return
-    const url = svsepFileUrl(task.id, i, true)
+    // 按**文件名**取（`task/{id}/file/{name}`）：服务跑完就关了，这条路读磁盘
+    const o = (task.outputs ?? [])[i]
+    if (!o?.filename) return
+    const url = svsepFileUrl(task.id, o.filename, true)
     setPreviewIdx(i)
     /* 换 source 后要显式 load，不然改了 src 的播放器不会自己重载 */
     el.src = url
@@ -528,12 +560,14 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
           <PanelHead
             title="离线引擎"
             desc="在你自己电脑上跑，音频不出本机"
-            extra={
-              running ? <Chip tone="ok">运行中</Chip> : <Chip tone="warn">未启动</Chip>
-            }
+            extra={running ? <Chip tone="ok">运行中</Chip> : <Chip>空闲</Chip>}
           />
           <div className="svsep-stats">
-            <Stat label="服务" value={running ? `端口 ${st?.port ?? '—'}` : '未启动'} />
+            <Stat
+              label="服务"
+              value={running ? '运行中' : '空闲'}
+              sub={running ? `端口 ${st?.port ?? '—'}` : '分离时自动启动'}
+            />
             <Stat
               label="运行时"
               value={runtimeReady ? '就绪' : '缺失'}
@@ -556,7 +590,13 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
           {dl?.active && (
             <div className="svsep-progress">
               <div className="svsep-progress-head">
-                <span>{dl.kind === 'runtime' ? '正在下载运行时…' : '正在下载模型…'}</span>
+                {/* 下载与解压共用这一条进度条，标签必须说清是哪一段：解压的分母跟
+                    整包字节数差不多大，只写「正在下载…」就成了「下到 100% 又归零
+                    重爬」，看着像下完又重下了一遍（见 api.ts 里 `stage` 的注释） */}
+                <span>
+                  {dl.stage === 'extract' ? '正在解压' : '正在下载'}
+                  {dl.kind === 'runtime' ? '运行时…' : '模型…'}
+                </span>
                 <span className="svsep-dim">
                   {formatBytes(dl.done)}
                   {dl.total > 0 ? ` / ${formatBytes(dl.total)}` : ''}
@@ -574,20 +614,23 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
                   style={dl.total > 0 ? { width: `${dlPct}%` } : undefined}
                 />
               </div>
-              {/* 两个按钮的差别只有「下次要不要重下」这一件事，所以文案里直说 */}
-              <div className="btn-row svsep-dl-acts">
-                <Button icon="pause" onClick={() => void doPauseDownload()}>
-                  暂停
-                </Button>
-                <Button variant="ghost" icon="x" onClick={() => void doStopDownload()}>
-                  停止（删掉已下的）
-                </Button>
-              </div>
+              {/* 解压那一段**没有**暂停/停止可点（解压不吃 `ctl`，按了也不会停），
+                  所以直接藏起来 —— 留着两个按不动的按钮比没有更糟 */}
+              {dl.stage !== 'extract' && (
+                <div className="btn-row svsep-dl-acts">
+                  <Button icon="pause" onClick={() => void doPauseDownload()}>
+                    暂停
+                  </Button>
+                  <Button variant="ghost" icon="x" onClick={() => void doStopDownload()}>
+                    停止（删掉已下的）
+                  </Button>
+                </div>
+              )}
               {dl.kind === 'runtime' && (
                 <p className="hint">
-                  这一包几 GB，下完还要解压两万多个文件，可能要几十分钟 ——
-                  下的时候可以让它自己跑，别关工作站。暂停只是不再往下拿数据，
-                  已经下好的那部分留着，下次点「继续下载」接着下。
+                  {dl.stage === 'extract'
+                    ? '整包已经下到磁盘上了，现在在解压（两万多个文件）。这一步不走网络、也不能暂停 —— 别关工作站，关了就白解，下次还得从头解一遍。'
+                    : '这一包几 GB，下完还要解压两万多个文件，可能要几十分钟 —— 下的时候可以让它自己跑，别关工作站。暂停只是不再往下拿数据，已经下好的那部分留着，下次点「继续下载」接着下。'}
                 </p>
               )}
             </div>
@@ -613,16 +656,24 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
           )}
 
           <div className="btn-row">
-            {!running ? (
-              <Button variant="primary" icon="zap" loading={starting} disabled={!runtimeReady} onClick={() => void doStart()}>
-                启动服务
-              </Button>
-            ) : (
-              <Button icon="pause" onClick={() => void doStop()}>
-                停止服务
-              </Button>
-            )}
-            {!runtimeReady && (
+            {/* 推理方式（自动 / GPU / CPU）：原版软件在标题栏上就有这个三选一。
+                服务开着时改它立刻转给 Python（它清了引擎单例，下个任务按新方式来）；
+                服务关着时写盘上的 `inference_settings.json`，下次分离读它。 */}
+            <div className="svsep-infer">
+              <span className="svsep-dim">推理方式</span>
+              <GlassSegmentedControl
+                aria-label="推理方式"
+                items={INFER_MODES}
+                value={inferMode}
+                onValueChange={(v: string) => void doSetInfer(asInferMode(v))}
+              />
+            </div>
+            {/* 运行时不齐备、**或者盘上还留着半个运行时的包** → 都给这个按钮。
+                第二种情况是「上次下完了、没解完就关了窗口」：包就在盘上，点它不会
+                重新下，直接接着解压（见 svsep.rs::part_is_whole_zip）。原来只看
+                `runtimeReady`，而半解压的运行时照样算「就绪」—— 于是按钮不出现，
+                下面那句「再点上面的下载按钮」指向一个不存在的按钮。 */}
+            {(!runtimeReady || (dl?.resumable && dl?.pausedKind === 'runtime')) && (
               <Button
                 icon="download"
                 disabled={!!dl?.active || !!dl?.delete?.active}
@@ -635,7 +686,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
                     : '下载运行时'}
               </Button>
             )}
-            {runtimeReady && !modelsOk && (
+            {((runtimeReady && !modelsOk) || (dl?.resumable && dl?.pausedKind === 'models')) && (
               <Button
                 icon="download"
                 disabled={!!dl?.active || !!dl?.delete?.active}
@@ -648,7 +699,11 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
                     : '下载模型'}
               </Button>
             )}
-            <Button variant="ghost" icon="folder" onClick={() => void api.fsOpen({ path: st?.dataDir })}>
+            <Button
+              variant="ghost"
+              icon="folder"
+              onClick={() => void api.fsOpen({ path: st?.outputsDir })}
+            >
               输出目录
             </Button>
           </div>
@@ -658,12 +713,14 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
             <p className="hint">
               {dl.pausedKind === 'runtime' ? '运行时' : '模型'}已经下好{' '}
               {formatBytes(dl.pausedBytes)}，就存在磁盘上 —— 再点上面的下载按钮是
-              <b>接着下</b>，不会从头再来（程序重启过也一样）。
+              <b>接着下</b>，不会从头再来（程序重启过也一样）。要是那一包其实已经
+              下完整了（上次解压到一半被打断），这一下<b>不会再走网络</b>，直接把
+              剩下的解开。
             </p>
           )}
           <p className="hint">
-            服务只在需要时跑，用完点「停止服务」把内存还回来（它会占约 5 GB）。
-            关闭工作站时会自动停掉。
+            分离服务不用你管：点「开始分离」时它自动起（第一次要十几秒），任务跑完
+            自动关 —— 它常驻会占约 5 GB 内存。关闭工作站时也会一起停掉。
           </p>
           {/* 一键删依赖：两段式确认，因为删完要重下 8 GB 才能再用离线分离。
               不做条件渲染 —— 引擎还没下全的时候也该留着这个入口，用户可能想
@@ -717,8 +774,24 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
             desc="提交后会自动刷新"
             extra={
               task ? (
-                <Chip tone={settled ? (task.status === 'done' ? 'ok' : 'err') : 'accent'}>
-                  {task.status === 'done' ? '完成' : settled ? '失败' : '进行中'}
+                <Chip
+                  tone={
+                    task.status === 'done'
+                      ? 'ok'
+                      : task.status === 'cancelled'
+                        ? 'warn'
+                        : settled
+                          ? 'err'
+                          : 'accent'
+                  }
+                >
+                  {task.status === 'done'
+                    ? '完成'
+                    : task.status === 'cancelled'
+                      ? '已取消'
+                      : settled
+                        ? '失败'
+                        : '进行中'}
                 </Chip>
               ) : (
                 <Chip>待提交</Chip>
@@ -772,7 +845,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
                         />
                         <a
                           className="svsep-dl"
-                          href={svsepFileUrl(task.id, i)}
+                          href={svsepFileUrl(task.id, o.filename)}
                           download={o.download_name || o.filename}
                         >
                           <Icon name="download" size={14} />
@@ -782,7 +855,11 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
                     ))}
                   </ul>
                   <div className="btn-row">
-                    <Button size="sm" icon="folder" onClick={() => void api.svsepOpenOutput()}>
+                    <Button
+                      size="sm"
+                      icon="folder"
+                      onClick={() => void api.fsOpen({ path: st?.outputsDir })}
+                    >
                       打开输出目录
                     </Button>
                   </div>

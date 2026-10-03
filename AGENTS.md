@@ -1,4 +1,4 @@
-﻿# AGENTS.md —— 给接手这个项目的开发者 / 智能体
+# AGENTS.md —— 给接手这个项目的开发者 / 智能体
 
 这里写的是**看代码看不出来**的东西：为什么长这样、哪些做法会静默出错、怎么验证。
 产品与使用说明在 `README.md`，不在这一份。
@@ -615,6 +615,7 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 2. **真包解压测试**：跑完点名那三个文件，并抽查一个**偏移超 4 GiB** 的条目。
 3. **HTTP 层实测**（临时安装 + 测试端口）：暂停 → 看 `.part` 大小 → **重启进程** →
    状态里 `resumable` 仍为 true → 继续下载 → 起始字节正是暂停点。
+   （**断线重试**也能零流量验，做法见 `docs/FEATURES.md`「断线自动重试」；⛔ 别拿真链接验，流量按 GB 算钱。）
 4. **强杀进程**：任务管理器结束工作站，确认 `python.exe` 也死了。
 5. 前端 `next-smoke.mjs` 逐页冒烟 + `tests/contract/verify.mjs` 契约测试。
 

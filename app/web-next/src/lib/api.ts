@@ -176,9 +176,19 @@ export const api = {
   },
   svsepTask: (id: string) => get<SvsepTask>(`/api/svsep/task/${encodeURIComponent(id)}`, undefined, 30000),
   svsepCancel: (id: string) => post<{ ok: true }>(`/api/svsep/task/${encodeURIComponent(id)}/cancel`, {}),
-  svsepOpenOutput: () => post<{ ok: true }>('/api/svsep/open-output', {}),
   /** 分离后端自己的设备 / 队列 / 输出目录（我们只透传） */
   svsepBackendStatus: () => request<Record<string, unknown>>('/api/svsep/backend/status', { timeout: 30000 }),
+  /**
+   * 推理方式：自动 / GPU / CPU。
+   *
+   * 分离服务在跑就问它（它顺手探硬件、给 badge）；**服务没跑就读盘**上的
+   * `inference_settings.json` —— 任务一结束服务会自动关，可这个开关得一直能用。
+   * 回包键跟上游 `public_settings()` 一致：`{mode, effective_mode, badge, detail, offline?}`。
+   */
+  svsepInference: () =>
+    request<Record<string, unknown>>('/api/svsep/backend/inference', { timeout: 30000 }),
+  svsepSetInference: (mode: 'auto' | 'cpu' | 'gpu') =>
+    post<Record<string, unknown>>('/api/svsep/backend/inference', { mode }),
 
   /* ── 外部工具 ─────────────────────────────────────────── */
   detect: (force = true) =>
@@ -654,6 +664,15 @@ export interface SvsepDownload {
   done: number
   /** 总字节；`0` = 服务端没给 Content-Length，进度条改成不确定态 */
   total: number
+  /**
+   * 现在跑到哪一段：`'download'` = 还在从网上拿字节，`'extract'` = 整包已经下完、
+   * 正在解压。
+   *
+   * ⚠️ 两个阶段的**进度分母差不多一样大**（解压按各条目「压缩后」大小算），所以不
+   * 分段的界面看着就是「下到 100% → 归零 → 在同一个『正在下载…』标签下再爬一遍」，
+   * 像下完又自动重下了一遍 —— 2026-10-03 用户报的就是这一幕。别把这个字段删了。
+   */
+  stage: 'download' | 'extract'
   error?: string | null
   /**
    * 上次**暂停**留了半个包，再点下载会接着下（不是从头）。
@@ -683,6 +702,8 @@ export interface SvsepStatus {
   dir: string
   modelsDir: string
   dataDir: string
+  /** 分离结果落在哪儿（`POST /api/fs/open` 用它开资源管理器） */
+  outputsDir: string
   runtime: SvsepRuntime
   /** ⚠️ 是**对象**不是数组：`{dir, ok, downloadedBytes, expectedBytes, downloadUrl, items[], missingIndex[]}` */
   models: SvsepModels
@@ -718,8 +739,17 @@ export interface SvsepTask {
   error?: string | null
 }
 
-/** 分离任务里一条输出轨的地址（走工作站自己的转发，不用 python 那个端口） */
-export const svsepFileUrl = (taskId: string, index: number, inline = false) =>
-  `/api/svsep/task/${encodeURIComponent(taskId)}/out/${index}${inline ? '?inline=1' : ''}`
+/**
+ * 分离任务里一条输出轨的地址。
+ *
+ * 走工作站自己的转发，**按文件名取**（`task/{id}/file/{name}`）：任务结束分离
+ * 服务会自动关，所以这条路由改成直接读 `<outputs>/<task_id>/<name>`，服务关着
+ * 也能试听、也能下载。`inline=1` 给 `<audio>` 用（其实读磁盘时前端看不出来，
+ * 留着是为了跟上游 `preview_url` 的形状对得上）。
+ */
+export const svsepFileUrl = (taskId: string, filename: string, inline = false) =>
+  `/api/svsep/task/${encodeURIComponent(taskId)}/file/${encodeURIComponent(filename)}${
+    inline ? '?inline=1' : ''
+  }`
 
 export default api
