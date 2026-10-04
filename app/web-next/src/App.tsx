@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api } from '@/lib/api'
+import { getConfig, onConfigError, saveConfig, useConfig } from '@/lib/config'
 import type { AppState } from '@/lib/types'
 import { Icon, type IconName } from '@/components/Icon'
 import { GlassPanel, Panel } from '@/components/Panel'
@@ -10,7 +11,7 @@ import {
   ScrollEdge,
   useGlassPolicy,
 } from '@ttqtt/liquid-glass-react'
-import { levelMaterial, levelTransparency, useGlassLevel } from '@/lib/useGlass'
+import { levelMaterial, levelTransparency, syncGlassLevel, useGlassLevel } from '@/lib/useGlass'
 import { useNavLens } from '@/lib/useNavLens'
 import { hideBoot } from '@/lib/boot'
 import { materialOptions } from '@/components/Glass'
@@ -80,15 +81,15 @@ type PageId = (typeof PAGES)[number]['id']
 
 export type ThemeMode = 'system' | 'light' | 'dark'
 
-const THEME_KEY = 'qingmu.theme'
-
+/**
+ * 主题存在 **`config.json` 的 `theme`** 里（旧键 `qingmu.theme`）。
+ *
+ * 这里直接同步读 —— `main.tsx` 在挂载 React **之前**已经 `await ensureConfig()` 了，
+ * 所以第一帧就是用户选的那个主题，不会闪一下。
+ */
 function readTheme(): ThemeMode {
-  try {
-    const v = localStorage.getItem(THEME_KEY)
-    if (v === 'light' || v === 'dark' || v === 'system') return v
-  } catch {
-    /* 隐私模式 */
-  }
+  const v = getConfig().theme
+  if (v === 'light' || v === 'dark' || v === 'system') return v
   return 'system'
 }
 
@@ -117,7 +118,7 @@ export default function App() {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setDead(msg)
-      toast(`无法连接本地服务：${msg}`, 'err')
+      toast(`读不到工作台状态：${msg}`, 'err')
     } finally {
       setRefreshing(false)
     }
@@ -127,10 +128,22 @@ export default function App() {
     void refreshState()
   }, [refreshState])
 
-  /* 首次 /api/state 落定（成功或失败）就揭开启动画面 —— 失败也要揭，
-     否则用户看到的是一个永远转圈的遮罩，而不是「连不上本地服务」那块提示。
+  /* 配置写失败（后端拒绝、盘满…）要说出来，否则用户只会看到「改了没反应」 */
+  useEffect(() => {
+    onConfigError((msg) => toast(msg, 'err'))
+    return () => onConfigError(null)
+  }, [toast])
 
-     ⚠️ **但不能死等它**：`/api/state` 要在后端探测外部工具（真的去 spawn
+  /* 配置万一在渲染之后才变（比如迁移补写那一刀），玻璃等级要跟着走 */
+  const cfg = useConfig()
+  useEffect(() => {
+    syncGlassLevel()
+  }, [cfg])
+
+  /* 首次 get_state 落定（成功或失败）就揭开启动画面 —— 失败也要揭，
+     否则用户看到的是一个永远转圈的遮罩，而不是「读不到工作台状态」那块提示。
+
+     ⚠️ **但不能死等它**：`get_state` 要在后端探测外部工具（真的去 spawn
      `yt-dlp --version` / `python --version` + 逐段扫 PATH），机器一忙实测能拖到
      4~8 秒（连跑还会越来越慢），遮罩就一直停在「正在载入工作台…」——用户看到的就是
      「卡死」。所以 1.2 秒还没回来就先揭壳：页面先出来，数据到了再填进去
@@ -163,11 +176,7 @@ export default function App() {
 
   const changeTheme = useCallback((m: ThemeMode) => {
     setTheme(m)
-    try {
-      localStorage.setItem(THEME_KEY, m)
-    } catch {
-      /* 隐私模式：本次会话仍然生效 */
-    }
+    saveConfig({ theme: m })
   }, [])
 
   const current = PAGES.find((p) => p.id === active)!
@@ -291,7 +300,7 @@ export default function App() {
                 {dead && !state ? (
                   <Panel>
                     <div className="stack">
-                      <p className="finding-title">连不上本地服务</p>
+                      <p className="finding-title">读不到工作台状态</p>
                       <p className="finding-text">{dead}</p>
                       <Button icon="refresh" onClick={refreshState}>
                         重试

@@ -8,8 +8,10 @@ import {
   ListSection,
   Picker,
 } from '@ttqtt/liquid-glass-react'
-import { api, mediaProxyUrl } from '@/lib/api'
+import { api } from '@/lib/api'
 import type { VideoInfo, VideoParse, VideoStreams } from '@/lib/api'
+import { getConfig, saveConfig } from '@/lib/config'
+import { fileUrl } from '@/lib/ipc'
 import { Button, IconButton } from '@/components/Button'
 import { Credit, Upstream } from '@/components/Credit'
 import { DirectoryInput } from '@/components/DirPicker'
@@ -31,7 +33,7 @@ import './Video.css'
  * 下载是长任务，一律交给后端任务队列，前端只订阅进度。
  * **功能与文案都照旧页面搬，参数名一个没改**（`source` / `outDir` / `mode` /
  * `downloadCover` / `downloadDanmaku` / `downloadSubs` / `quality` / `audioQuality` /
- * `formatId` / `convertTo`，连 localStorage 键 `fandiao.video.settings` 都是同一个 ——
+ * `formatId` / `convertTo`，连设置键 `fandiao.video.settings` 都是同一个 ——
  * 同一个 origin 下新旧界面共用这份偏好，改键名等于把用户的设置丢掉）。
  *
  * ## 队列
@@ -76,8 +78,11 @@ interface Settings {
   lastUrl: string
 }
 
-/** ⚠️ 和旧前端同一个键：新旧界面共用这份设置 */
-const LS_KEY = 'fandiao.video.settings'
+/**
+ * 设置持久化 —— 存在 **`config.json` 的 `video`** 里（旧键 `fandiao.video.settings`；键名沿用旧的是为了让
+ * 老用户那份能由 `migrate_legacy_settings` 搬过来）。
+ */
+const CFG_KEY = 'video'
 
 const DEFAULT_SETTINGS: Settings = {
   outDir: '',
@@ -91,21 +96,15 @@ const DEFAULT_SETTINGS: Settings = {
 }
 
 function loadSettings(): Settings {
-  try {
-    const raw = localStorage.getItem(LS_KEY)
-    if (!raw) return { ...DEFAULT_SETTINGS }
-    return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) }
-  } catch {
-    return { ...DEFAULT_SETTINGS }
+  const saved = getConfig()[CFG_KEY]
+  if (saved && typeof saved === 'object') {
+    return { ...DEFAULT_SETTINGS, ...(saved as Partial<Settings>) }
   }
+  return { ...DEFAULT_SETTINGS }
 }
 
 function saveSettings(s: Settings) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(s))
-  } catch {
-    /* 存不了就算了，不影响使用 */
-  }
+  saveConfig({ [CFG_KEY]: s as unknown as Record<string, unknown> })
 }
 
 /** 后端 config 里 Cookie 类的脱敏占位（`server/simple.rs` 的 MASKED） */
@@ -318,6 +317,22 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
   const [detail, setDetail] = useState('')
   const etaRef = useRef<{ t: number; p: number } | null>(null)
 
+  /**
+   * 预览：远端直链 → 本机缓存文件 → `fileUrl()`。
+   *
+   * `cache` 是「远端 url → 本机路径」的记忆：换画质来回点时不用重下，
+   * 而且**同一支看第二次是瞬时的**（后端那边命中缓存也直接返回）。
+   */
+  const [preview, setPreview] = useState<{
+    videoUrl: string
+    audioUrl?: string
+    poster?: string
+    note?: string
+  } | null>(null)
+  const [previewBusy, setPreviewBusy] = useState(false)
+  const [previewErr, setPreviewErr] = useState('')
+  const previewCache = useRef(new Map<string, string>())
+
   const { job, start } = useJob()
 
   const cfgDownDir = state?.paths?.downloadDir || state?.paths?.outputDir || ''
@@ -330,7 +345,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
     })
   }
 
-  /* 首屏那次 /api/state 到了之后，把默认下载目录灌进设置（只灌一次，之后归用户） */
+  /* 首屏那次 get_state 到了之后，把默认下载目录灌进设置（只灌一次，之后归用户） */
   const seeded = useRef(false)
   useEffect(() => {
     if (seeded.current || !state) return
@@ -401,8 +416,15 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
      B 站的 dash 流视频/音频是分开的（这正是 yt-dlp 要 merge 的原因），
      yt-dlp 那边也常只有「分开的轨」，所以预览得跟着当前选中的画质走：
      durl 只放第一段，dash 取选中视频轨 + 对应音频轨，yt-dlp 优先「有音有画」那条。
-     直链一律套本机代理（`/api/media/proxy`）—— 浏览器直连 B 站 CDN 会因为缺 Referer 被 403。 */
-  const preview = (() => {
+
+     ⚠️ **2026-10-04 起没有 `/api/media/proxy` 了。** `<video src>` 要的是一个可寻址的
+     地址，而 IPC 是请求-应答、没有流也没有 Range —— 所以改成
+     `previewFetch(url)` 把流**落到本机缓存**，再 `fileUrl(路径)` 交给 `<video>`
+     （Range 由 asset 协议内置）。代价是首播要等几秒（界面里必须说出来），
+     好处是同一支看第二次瞬时，而且不再受 B 站 CDN 认 Referer 那件事的影响。
+
+     这一段只算「**该拿哪几条远端直链**」，落盘与播放状态在下面的 `preview` 里。 */
+  const previewSrc = ((): { video?: string; audio?: string; poster?: string; note?: string; src: 'bilibili' | 'ytdlp' } | null => {
     if (!parsed) return null
     if (!isBili) {
       const fs = (info.formats ?? []).filter((f) => !!f.url)
@@ -416,9 +438,10 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
       const v = both ?? onlyV
       if (!v?.url) return null
       return {
-        videoUrl: mediaProxyUrl(v.url, 'ytdlp'),
-        audioUrl: both ? undefined : onlyA?.url ? mediaProxyUrl(onlyA.url, 'ytdlp') : undefined,
+        video: v.url,
+        audio: both ? undefined : onlyA?.url,
         poster: info.thumbnail,
+        src: 'ytdlp',
         note: both
           ? `预览这条是「有音有画」的整段流（${both.resolution || both.formatId || '默认'}）。`
           : '这个站点只给了分开的视频轨 / 音频轨，播放时两个元素会对齐；直链有时会被站点限速，卡就先下载。',
@@ -428,8 +451,9 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
       const seg = streams?.streams?.[0]
       if (!seg?.url) return null
       return {
-        videoUrl: mediaProxyUrl(seg.url),
+        video: seg.url,
         poster: cover,
+        src: 'bilibili',
         note: '整段流是分段的，预览只放第一段（下载仍是整段排队）。',
       }
     }
@@ -437,9 +461,10 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
     const src = selectedVideo?.url || selectedVideo?.backupUrls?.[0]
     if (!src) return null
     return {
-      videoUrl: mediaProxyUrl(src),
-      audioUrl: a?.url ? mediaProxyUrl(a.url) : undefined,
+      video: src,
+      audio: a?.url,
       poster: cover,
+      src: 'bilibili',
       note: selectedVideo
         ? `正在预览：${selectedVideo.qualityName}${a?.qualityName ? ` + ${a.qualityName}` : ''}。换个画质这里会跟着换。`
         : undefined,
@@ -448,8 +473,60 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
 
   const runningItem = queue.find((q) => q.status === 'running')
   const doneCount = queue.filter((q) => q.status === 'done').length
+
   const failedCount = queue.filter((q) => q.status === 'error').length
   const pending = queue.some((q) => q.status === 'queued' || q.status === 'running')
+
+  /* 把上面选中那几条远端直链落到本机缓存，再交给 `<video>`。
+     依赖项一个个列出来（不用 `previewSrc` 整个对象）—— 那是每帧新造的，会让这个
+     effect 无限重跑。 */
+  const pvSrc = previewSrc?.src ?? ''
+  const pvVideo = previewSrc?.video ?? ''
+  const pvAudio = previewSrc?.audio ?? ''
+  const pvPoster = previewSrc?.poster ?? ''
+  const pvNote = previewSrc?.note ?? ''
+  useEffect(() => {
+    if (!pvVideo) {
+      setPreview(null)
+      setPreviewErr('')
+      setPreviewBusy(false)
+      return
+    }
+    let alive = true
+    setPreviewBusy(true)
+    setPreviewErr('')
+    const one = async (u: string, kind: 'bilibili' | 'ytdlp') => {
+      const hit = previewCache.current.get(u)
+      if (hit) return hit
+      const r = await api.previewFetch(u, kind)
+      previewCache.current.set(u, r.path)
+      return r.path
+    }
+    void (async () => {
+      try {
+        const [v, a] = await Promise.all([
+          one(pvVideo, pvSrc as 'bilibili' | 'ytdlp'),
+          pvAudio ? one(pvAudio, pvSrc as 'bilibili' | 'ytdlp') : Promise.resolve(''),
+        ])
+        if (!alive) return
+        setPreview({
+          videoUrl: fileUrl(v),
+          audioUrl: a ? fileUrl(a) : undefined,
+          poster: pvPoster || undefined,
+          note: pvNote || undefined,
+        })
+      } catch (e) {
+        if (!alive) return
+        setPreview(null)
+        setPreviewErr(errText(e))
+      } finally {
+        if (alive) setPreviewBusy(false)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [pvSrc, pvVideo, pvAudio, pvPoster, pvNote])
 
   /* ── 解析 ───────────────────────────────────────────────── */
 
@@ -1235,9 +1312,23 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
       )}
 
       {/* ══════════════════════ 预览 ══════════════════════ */}
-      {!parsing && preview && (
+      {!parsing && previewBusy && (
         <Panel>
-          <PanelHead title="预览" desc="不用先下载，直接在这儿看一眼（直链走本机代理取）" />
+          <PanelHead title="预览" />
+          <p className="muted">
+            正在把预览流缓存到本机…（第一次要等几秒；同一支看第二次是瞬时的）
+          </p>
+        </Panel>
+      )}
+      {!parsing && !previewBusy && previewErr && (
+        <Panel>
+          <PanelHead title="预览" />
+          <p className="muted">这一段预览不了：{previewErr}下载之后本地看是一样的。</p>
+        </Panel>
+      )}
+      {!parsing && !previewBusy && preview && (
+        <Panel>
+          <PanelHead title="预览" desc="不用先下载，直接在这儿看一眼（直链先缓存到本机再播）" />
           <VideoPreview
             videoUrl={preview.videoUrl}
             audioUrl={preview.audioUrl}

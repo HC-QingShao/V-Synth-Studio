@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { DragEvent, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { api } from '@/lib/api'
+import { subscribeDrop } from '@/lib/ipc'
 
 /**
  * 选文件的**两条入口**，都回**本机路径**。
@@ -8,94 +9,72 @@ import { api } from '@/lib/api'
  * 为什么非要回路径：后端（ffmpeg / LibreSVIP / Python 分离引擎）只认本机路径，
  * 浏览器里的 `File` 对象它看不见。所以两条路都要落到「一个路径字符串」上：
  *
- *   1. **系统「打开」对话框** —— `POST /api/fs/pick`（`platform::pick_files`）。
- *      这条**会一直挂着**直到用户点确定或取消，所以超时给到 10 分钟，取消回的是
- *      `files: []` 而**不是错误**。
- *   2. **把文件直接拖进窗口** —— 浏览器只给 `File`，所以先 `POST /api/fs/upload`
- *      把字节交上去，后端落进临时目录换回一个路径。
+ *   1. **系统对话框** —— `pick_paths`（官方 `tauri-plugin-dialog`，rfd 打底）。
+ *      取消回的是空数组而**不是错误**。
+ *   2. **把文件直接拖进窗口** —— `getCurrentWebview().onDragDropEvent()` 的载荷里
+ *      **直接就有磁盘上的真路径**（`event.payload.paths`）。旧实现是「拿到 `File`
+ *      对象 → 上传字节 → 后端落临时文件 → 换回一个路径」，那一整圈在 IPC 下没必要了。
+ *
+ * ⚠️ **页面里不要再写 HTML5 的 `onDrop` / `DataTransfer`。** Tauri 默认把拖放截走
+ * 改发成 Window 事件（`main.rs` 里那条「不再关掉拖放拦截」的注释说的就是这件事），
+ * 所以页面上的 HTML5 拖放事件**根本不会触发**。
  *
  * ⚠️ **别再画自制的目录树 / 文件树**。以前这里挂着 `DirPicker`（自己用
  * `GlassDialog` + `PathBar` + `List` 画），六个页面各挂一份、长得还不一样，
  * 而系统对话框全都有 —— 还多出「此电脑」「网络位置」和用户自己的快捷方式。
- *
- * ⚠️ 落点（`dropProps`）挂在**页面根元素**上，不挂在提示条上：用户拖文件进来时
- * 眼睛看的是整页，落在任意位置都该算数。
  */
 
 export type ToastTone = 'ok' | 'err' | 'warn' | 'info'
 
-/** 拖放那套事件处理，直接展开到页面根元素上：`<div {...dropProps}>` */
-export interface DropProps {
-  onDragEnter?: (e: DragEvent<HTMLElement>) => void
-  onDragOver?: (e: DragEvent<HTMLElement>) => void
-  onDragLeave?: (e: DragEvent<HTMLElement>) => void
-  onDrop?: (e: DragEvent<HTMLElement>) => void
-}
+/**
+ * 拖放那套东西，展开到页面根元素上：`<div {...dropProps}>`。
+ *
+ * ⚠️ 现在**是空对象**（拖放由 Tauri 的窗口事件接管，DOM 上没有任何监听器要挂）。
+ * 保留这个形状只是为了让六个页面的 `<div {...dropProps}>` 一个字都不用改 ——
+ * 展开一个空对象是无害的。`dragging` 才是要用的那个值。
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface DropProps {}
 
 /**
- * 拖放手势。**只管把 `File` 交出去**，不碰 `onPaths` —— 需要本机路径的用
- * `useFilePick`，只需要 `File` 本身的（音轨分离要直接 multipart 上传）用这个。
+ * 监听「文件被拖进窗口」。`onPaths` 拿到的是**真路径**。
  *
- * ⚠️ `dragenter` / `dragleave` 是**冒泡且成对**的：鼠标在页面上从子元素滑到子元素
- * 会先 `leave` 再 `enter`。用布尔量记状态的话，滑过任意一层就会闪一下
- * （提示条一明一暗）。所以用一个**计数器**：进出配平，归零才算真的离开。
+ * ⚠️ 订阅是**窗口级**的，所以每个挂着的钩子都会收到同一次拖放的路径 ——
+ * 一页只挂一个（`useFilePick` 内部挂的也是它）。
  */
-export function useFileDrop(onFiles: (files: File[]) => void): {
+export function useNativeDrop(onPaths: (paths: string[]) => void): {
   dropProps: DropProps
   dragging: boolean
 } {
   const [dragging, setDragging] = useState(false)
-  const depth = useRef(0)
-  const cb = useRef(onFiles)
-  cb.current = onFiles
+  const cb = useRef(onPaths)
+  cb.current = onPaths
 
-  /** 拖到窗口外面松手时 `dragleave` 可能收不到 —— 补一个全局收尾，免得提示条一直亮着 */
   useEffect(() => {
-    const end = () => {
-      depth.current = 0
-      setDragging(false)
-    }
-    window.addEventListener('dragend', end)
-    window.addEventListener('drop', end)
+    let alive = true
+    let un: (() => void) | null = null
+    void subscribeDrop({
+      onActive: (a) => {
+        if (alive) setDragging(a)
+      },
+      onDrop: (paths) => cb.current(paths),
+    })
+      .then((fn) => {
+        if (alive) un = fn
+        else fn()
+      })
+      .catch((e: unknown) => {
+        /* 拿不到 webview（理论上不会）时不该把整页拖垮：拖放这条路没了，对话框还在 */
+        console.warn('[FilePick] 拖放订阅失败：', e)
+      })
     return () => {
-      window.removeEventListener('dragend', end)
-      window.removeEventListener('drop', end)
+      alive = false
+      setDragging(false)
+      un?.()
     }
   }, [])
 
-  const onDragEnter = useCallback((e: DragEvent<HTMLElement>) => {
-    if (!e.dataTransfer?.types.includes('Files')) return
-    depth.current += 1
-    setDragging(true)
-  }, [])
-
-  const onDragOver = useCallback((e: DragEvent<HTMLElement>) => {
-    /* ⚠️ **必须 preventDefault**：不阻止默认行为的话浏览器会「打开这个文件」，
-       WebView 会直接跳走，而且 `drop` 事件根本不会派发到我们头上。 */
-    if (!e.dataTransfer?.types.includes('Files')) return
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'copy'
-  }, [])
-
-  const onDragLeave = useCallback((e: DragEvent<HTMLElement>) => {
-    if (!e.dataTransfer?.types.includes('Files')) return
-    depth.current = Math.max(0, depth.current - 1)
-    if (depth.current === 0) setDragging(false)
-  }, [])
-
-  const onDrop = useCallback(
-    (e: DragEvent<HTMLElement>) => {
-      const files = Array.from(e.dataTransfer?.files ?? [])
-      if (!files.length) return
-      e.preventDefault()
-      depth.current = 0
-      setDragging(false)
-      cb.current(files)
-    },
-    [],
-  )
-
-  return { dropProps: { onDragEnter, onDragOver, onDragLeave, onDrop }, dragging }
+  return { dropProps: {}, dragging }
 }
 
 export interface FilePickOptions {
@@ -122,12 +101,15 @@ function allowed(name: string, exts: string[]): boolean {
   return exts.some((x) => x.replace(/^\./, '').toLowerCase() === name.slice(dot + 1).toLowerCase())
 }
 
+/** 路径的最后一段（拖进来的东西要做扩展名过滤） */
+const baseName = (p: string) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? p
+
 export function useFilePick(opts: FilePickOptions): {
-  /** 弹系统「打开」对话框。**不抛异常**：失败已经 toast 出去了，调用方 `void pick()` 即可 */
+  /** 弹系统对话框。**不抛异常**：失败已经 toast 出去了，调用方 `void pick()` 即可 */
   pick: () => Promise<void>
   dropProps: DropProps
   dragging: boolean
-  /** 正在忙（对话框挂着，或拖进来的文件正在上传）。用来给按钮上转圈 */
+  /** 正在忙（对话框挂着）。给按钮上转圈用 */
   busy: boolean
 } {
   const [busy, setBusy] = useState(false)
@@ -149,8 +131,6 @@ export function useFilePick(opts: FilePickOptions): {
     const { exts, label, title, dir, multi, onPaths, onToast } = o.current
     setBusy(true)
     try {
-      /* ⚠️ `exts` 一律传数组（可以是空的）。后端只在参数**缺失**时才不筛，
-         传空数组和不传是两回事，别为了「好看」把它省掉。 */
       const r = await api.fsPick({
         exts: exts?.length ? exts : undefined,
         label,
@@ -168,40 +148,26 @@ export function useFilePick(opts: FilePickOptions): {
     }
   }, [])
 
-  /** 拖进来的文件：过滤 → 逐个上传换路径 → 一次性交给 `onPaths` */
-  const handleFiles = useCallback(async (files: File[]) => {
+  /** 拖进来的文件：**已经是真路径**，过滤一下格式就能直接交给 `onPaths` */
+  const handlePaths = useCallback((paths: string[]) => {
     const { exts, onPaths, onToast } = o.current
-    const ok = files.filter((f) => allowed(f.name, exts ?? []))
-    const skipped = files.length - ok.length
+    const ok = paths.filter((p) => allowed(baseName(p), exts ?? []))
+    const skipped = paths.length - ok.length
     if (!ok.length) {
       onToast?.(`只认这些格式：${(exts ?? []).map((x) => '.' + x).join(' / ')}`, 'warn')
       return
     }
-    setBusy(true)
-    try {
-      const paths: string[] = []
-      for (const f of ok) {
-        const up = await api.fsUpload(f)
-        paths.push(up.path)
-      }
-      onPaths(paths)
-      if (skipped) {
-        onToast?.(`有 ${skipped} 个文件格式不对，已经跳过`, 'warn')
-      }
-    } catch (e) {
-      onToast?.(e instanceof Error ? e.message : String(e), 'err')
-    } finally {
-      if (alive.current) setBusy(false)
-    }
+    onPaths(ok)
+    if (skipped) onToast?.(`有 ${skipped} 个文件格式不对，已经跳过`, 'warn')
   }, [])
 
-  const { dropProps, dragging } = useFileDrop((files) => void handleFiles(files))
+  const { dropProps, dragging } = useNativeDrop(handlePaths)
 
   return { pick, dropProps, dragging, busy }
 }
 
 /**
- * 「也可以拖进来」那一句话。**不是落点** —— 落点是页面根元素（`dropProps`），
+ * 「也可以拖进来」那一句话。**不是落点** —— 落点是整个窗口（Tauri 的拖放事件），
  * 这条只是告诉用户「可以拖」，拖到窗口上时亮成强调色。
  */
 export function DropHint({

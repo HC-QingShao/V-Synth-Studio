@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GlassSegmentedControl } from '@ttqtt/liquid-glass-react'
 import {
   api,
-  midiFileUrl,
   MIDI_LANGUAGES,
   type MidiDeviceMode,
   type MidiNote,
   type MidiStatus,
 } from '@/lib/api'
+import { getConfig, saveConfig } from '@/lib/config'
+import { fileUrl, joinPath } from '@/lib/ipc'
 import { Button } from '@/components/Button'
 import { DropHint, useFilePick } from '@/components/FilePick'
 import { Chip, Finding, Panel, PanelHead, Stat } from '@/components/Panel'
@@ -90,7 +91,8 @@ const DEVICE_LABEL: Record<MidiDeviceMode, string> = { auto: '自动', gpu: 'GPU
 /** 输入的音频扩展名（后端 ffmpeg 能解的都能给，这里只是文件选择器的过滤） */
 const AUDIO_EXTS = ['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg', 'opus', 'wma', 'aiff', 'ape']
 
-const OUT_DIR_KEY = 'qingmu.midi.outDir'
+/** 输出目录的配置键（旧键 `qingmu.midi.outDir`） */
+const OUT_DIR_KEY = 'midiOutDir'
 
 /* ══════════════════════════════════════════════════════════ 小工具 ══ */
 
@@ -192,13 +194,8 @@ export function Midi({ onToast, onNavigate }: PageProps) {
   const [statusErr, setStatusErr] = useState<string | null>(null)
 
   const [input, setInput] = useState('')
-  const [outDir, setOutDir] = useState(() => {
-    try {
-      return localStorage.getItem(OUT_DIR_KEY) ?? ''
-    } catch {
-      return ''
-    }
-  })
+  /* 输出目录存在 `config.json` 的 `midiOutDir` 里（旧键 `qingmu.midi.outDir`）。 */
+  const [outDir, setOutDir] = useState(() => String(getConfig()[OUT_DIR_KEY] ?? ''))
   const [steps, setSteps] = useState(8)
   const [language, setLanguage] = useState(4)
   const [threads, setThreads] = useState(4)
@@ -212,8 +209,8 @@ export function Midi({ onToast, onNavigate }: PageProps) {
   const [duration, setDuration] = useState(0)
 
   /* 选文件：系统对话框 + 把文件直接拖进这个窗口，两条入口都回**本机路径**
-     （拖进来的那个先由后端落成临时文件换回路径，见 `components/FilePick.tsx`）。
-     这一页一次只扒一个文件，所以多给了也只取第一个。 */
+     （拖进来的是 Tauri 给的**真路径**，不再是「`File` 对象 + 上传换路径」，
+     见 `components/FilePick.tsx`）。这一页一次只扒一个文件，所以多给了也只取第一个。 */
   const { pick, dropProps, dragging, busy: dropping } = useFilePick({
     exts: AUDIO_EXTS,
     label: '音频文件',
@@ -274,11 +271,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
 
   const rememberOutDir = (v: string) => {
     setOutDir(v)
-    try {
-      localStorage.setItem(OUT_DIR_KEY, v)
-    } catch {
-      /* 隐私模式 */
-    }
+    saveConfig({ [OUT_DIR_KEY]: v })
   }
 
   /* ── 探测输入时长（只用来估时）─────────────────────────── */
@@ -483,6 +476,20 @@ export function Midi({ onToast, onNavigate }: PageProps) {
     | null
 
   const dlPct = dl && dl.total > 0 ? Math.min(100, (dl.done / dl.total) * 100) : 0
+
+  /**
+   * 把输出目录放行给 **asset 协议**。
+   *
+   * ⚠️ 不能省：输出目录是用户任选的，不在「刚选过的东西」那一批里（`pick_paths`
+   * 只放行用户当下选中的）；漏了的话结果文件那几个下载链接会**静默**失效
+   * （控制台一条 403，页面看不出哪里不对）。
+   */
+  useEffect(() => {
+    if (!result?.dir) return
+    void api.allowPath(result.dir).catch(() => {
+      /* 放行失败不打断这一页 */
+    })
+  }, [result?.dir])
 
   /* ── 渲染 ─────────────────────────────────────────────── */
   return (
@@ -965,10 +972,19 @@ export function Midi({ onToast, onNavigate }: PageProps) {
                 <p className="hint">还有 {result.preview.length - 40} 个在结果文件里。</p>
               )}
             </div>
-            {taskId && (result.files?.length ?? 0) > 0 && (
+            {taskId && result?.dir && (result.files?.length ?? 0) > 0 && (
               <div className="btn-row">
                 {(result.files ?? []).map((f) => (
-                  <a key={f} className="btn btn-sm" href={midiFileUrl(taskId, f)} download={f}>
+                  /* ⚠️ 输出目录是**用户任选的**（不是固定的 `<数据目录>/outputs/<id>`），
+                     所以地址要用任务 `result.dir` 拼 —— 后端 `midi_open_output` 的注释
+                     也说了同一件事。旧 HTTP 那条按任务取文件的路由
+                     已经随 HTTP 层删掉，改走 asset 协议（`fileUrl`）。 */
+                  <a
+                    key={f}
+                    className="btn btn-sm"
+                    href={fileUrl(joinPath(result.dir!, f))}
+                    download={f}
+                  >
                     {f}
                   </a>
                 ))}

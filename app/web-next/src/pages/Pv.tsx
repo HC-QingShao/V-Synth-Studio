@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '@/lib/api'
+import { getConfig, saveConfig } from '@/lib/config'
 import { Button } from '@/components/Button'
 import { DropHint, useFilePick } from '@/components/FilePick'
 import { Panel } from '@/components/Panel'
@@ -17,9 +18,13 @@ import './Pv.css'
  *
  * 四件事必须照旧（都是踩出来的）：
  *
- *   1. **歌词走 `localStorage` 交接**（键 `qingmu.pv.lyrics`）：歌词页写、这里读。
- *      填完把同一份写进 `qingmu.pv.sent`，同一份不再重复填 —— 用户手动清空后再切回来，
+ *   1. **歌词走配置交接**（`config.json` 的 `pvPendingLyrics`）：歌词页写、这里读。
+ *      填完把同一份写进 `pvSentLyrics`，同一份不再重复填 —— 用户手动清空后再切回来，
  *      不该又被塞回去。
+ *      ⚠️ 2026-10-04 之前这两样在浏览器存储里（旧键 `qingmu.pv.lyrics` / `qingmu.pv.sent`）。
+ *      换成配置的理由不是洁癖：那种存储**按 origin 隔离**，而这一刻的窗口是
+ *      `http://tauri.localhost` —— 只要将来加载方式再变一次，两页之间的交接就断了，
+ *      而且断得毫无提示（读到一个空串）。
  *   2. **改它的歌词框必须同时派发冒泡的 `input` 事件**：它的 `bind()` 挂了
  *      `input` 监听（`S.project.lyrics = e.target.value; replanSoon()`），
  *      光改 `value` 它内部状态不变、预览不重排、自动保存也不触发。见 `writeLyrics()`。
@@ -30,28 +35,28 @@ import './Pv.css'
  *      改成轮询到「读回值一致」，并且读到「内容在、但不是我们写的」= 它的 boot 跑完了，
  *      补一次再等 600ms 收工。见 `fill()`。
  *   4. **导出 MP4 的保存路径由父页面接管**：它的所有保存都过 `J.saveFile(name, blob)`
- *      （MP4、PNG 序列 ZIP、附带的 WAV），换成「弹目录选择 → 分块 POST `/api/pv/save`」就够了，
+ *      （MP4、PNG 序列 ZIP、附带的 WAV），换成「弹目录选择 → 分块 `pv_save_chunk`」就够了，
  *      不用去 hook `URL.createObjectURL` 或 `<a>` 的 click —— 那些路径会误伤别的东西。
  *      返回 `'saved'` 是为了不让它再走一遍浏览器下载（否则会偷偷又存一份到系统下载目录）。
  *
  * 与旧实现**故意不同**的一处：旧页面还能吃 `ctx.params.lyrics`（歌词页导航时带过来的参数），
  * 新前端的 `PageProps` 里没有 params 这条路；而且 params 只在这一次导航里有效、按 F5 就没了。
- * 所以只留 `localStorage` 那一条 —— 新歌词页「用这段歌词做文字 PV」写的也正是它。
+ * 所以只留配置那一条 —— 新歌词页「用这段歌词做文字 PV」写的也正是它。
  */
 
 /* ══════════════════════════════════════════════════════════════ 常量 ══ */
 
-/** 与歌词页约定的交接键：两边都要用，改名字要一起改（`pages/Lyrics.tsx` 的 `LS_PV_LYRICS`） */
-const LS_LYRICS = 'qingmu.pv.lyrics'
-/** 同上：这份歌词已经填过一次了，别重复填 */
-const LS_SENT = 'qingmu.pv.sent'
+/** 歌词页把歌词写进这里，这一页读（`pages/Lyrics.tsx` 的 `saveConfig`） */
+const CFG_LYRICS = 'pvPendingLyrics'
+/** 这份歌词已经填过一次了，别重复填 */
+const CFG_SENT = 'pvSentLyrics'
 /** 歌词页「用这段歌词做文字 PV」会在这条后面补一句双语说明，导入本地文件时保持一致 */
 const BILINGUAL_NOTE =
   '# 上面第一段是原文、第二段是译文。请把译文放到「注釈」的位置：原文|译文（同一行用竖线分开），别当成两句歌词。'
 
 const SRC = '/vendor/jizura/index.html'
 
-/** 一次传多大。后端 `/api/pv/save` 的单块上限是 16MB，留一倍余量。 */
+/** 一次传多大。后端 `pv_save_chunk` 的单块上限是 16MB，留一倍余量。 */
 const CHUNK = 8 * 1024 * 1024
 
 /** 填歌词最多等多久（按读回值收敛，不是时间表 —— 见 `fill()`） */
@@ -60,23 +65,6 @@ const FILL_TIMEOUT = 15000
 const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms))
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
-
-/** localStorage 只存字符串，能坏也就能抛（隐私模式下 setItem 会直接抛） */
-function lsGet(key: string): string {
-  try {
-    return localStorage.getItem(key) ?? ''
-  } catch {
-    return ''
-  }
-}
-
-function lsSet(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value)
-  } catch {
-    /* 存不下就不存：正文里的流程不依赖它 */
-  }
-}
 
 /**
  * JIZURA 挂在它自己 window 上的那几个东西（只声明用得到的，别照它的源码抄一遍）。
@@ -227,14 +215,13 @@ async function fill(
  * 属于它的既有行为，与这次搬家无关。
  */
 
-/** `POST /api/pv/save` 回的形状（`simple.rs::pv_save`） */
+/** `pv_save_chunk` 回的形状（`ipc/pv.rs`） */
 interface PvSaveRes {
-  ok?: boolean
-  error?: string
   path?: string
   name?: string
   size?: number
   part?: number
+  done?: boolean
 }
 
 /**
@@ -248,11 +235,10 @@ const isBlob = (v: unknown): v is Blob =>
   typeof v === 'object' && v !== null && Object.prototype.toString.call(v) === '[object Blob]'
 
 /**
- * 把一块字节写进用户选的目录（分块 POST）。
+ * 把一块字节写进用户选的目录（分块走 `pv_save_chunk`）。
  *
- * ⚠️ 这里**故意直接用 `fetch`**，没走 `lib/api.ts`：那条路（`request()`）只会
- * `JSON.stringify(body)`，而这条路由要的是**裸字节**（body 就是这一块本身），
- * 表达不了。分块的意义也在这里：峰值内存只有一块（8MB），与成片大小无关。
+ * 分块的意义：峰值内存只有一块（8MB），与成片大小无关。
+ * ⚠️ **别为了「IPC 方便」改成一次传完** —— 那等于把几百 MB 同时按在 WebView 和 Rust 两边。
  */
 async function saveChunks(
   dir: string,
@@ -264,10 +250,8 @@ async function saveChunks(
   let last: PvSaveRes | null = null
   for (let part = 0; part < total; part++) {
     const slice = blob.slice(part * CHUNK, Math.min((part + 1) * CHUNK, blob.size))
-    const qs = new URLSearchParams({ dir, name, part: String(part) })
-    const res = await fetch(`/api/pv/save?${qs}`, { method: 'POST', body: slice })
-    const data = (await res.json().catch(() => ({}))) as PvSaveRes
-    if (!res.ok || data.ok === false) throw new Error(data.error || `写入失败（HTTP ${res.status}）`)
+    const bytes = new Uint8Array(await slice.arrayBuffer())
+    const data = await api.pvSaveChunk(dir, name, part, total, bytes)
     last = data
     if (total > 1) onProgress(Math.round(((part + 1) / total) * 100))
   }
@@ -433,21 +417,21 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
         onToast('没能接管导出的保存路径（JIZURA 的 saveFile 一直没出现），导出会落到系统下载目录', 'err')
       }
 
-      // 歌词从歌词页留在 localStorage 的那份来
-      const text = lsGet(LS_LYRICS)
+      // 歌词从歌词页留在配置里的那份来（`config.json` 的 `pvPendingLyrics`）
+      const text = String(getConfig()[CFG_LYRICS] ?? '')
       if (!text.trim()) {
         setStatus('编辑器已就绪。想带歌词进来的话，去「歌词」页点「用这段歌词做文字 PV」。')
         return
       }
       // 同一份歌词只自动填一次：用户手动清空后再切回来，不该又被塞回去
-      if (lsGet(LS_SENT) === text) {
+      if (String(getConfig()[CFG_SENT] ?? '') === text) {
         setStatus('编辑器已就绪（歌词已经带过来了，没有重复填写）。')
         return
       }
 
       const res = await fill(win, text, isAlive)
       if (!isAlive()) return
-      lsSet(LS_SENT, text)
+      saveConfig({ [CFG_SENT]: text })
       if (res.ok) {
         setStatus(`已把歌词填进编辑器（${text.split('\n').length} 行）。`)
       } else {
@@ -468,7 +452,7 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
   /**
    * 读文件 → 填进 JIZURA。
    *
-   * 复用后端 `/api/lyrics/import`（它已经处理好 GBK 探测与译文拆分），拿回来的
+   * 复用后端 `lyrics_import`（它已经处理好 GBK 探测与译文拆分），拿回来的
    * `lyric` / `trans` 走的是**和「歌词页带过来」完全相同的 `fill()`**。
    *
    * ⚠️ **接口字段名是 `lyric` / `trans`，不是 `lrc` / `tlyric`**。旧前端早先读的是
@@ -496,8 +480,7 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
 
       const r = await fill(win, text, () => alive.current)
       // 记成和歌词页同一种「带过来」的形态，切走再回来不会被重复填一遍
-      lsSet(LS_LYRICS, text)
-      lsSet(LS_SENT, text)
+      saveConfig({ [CFG_LYRICS]: text, [CFG_SENT]: text })
       if (r.ok) {
         const note = res.encoding === 'gbk' ? '（按 GBK 读取）' : ''
         setStatus(`已导入「${res.song?.name ?? '歌词'}」${note}，共 ${text.split('\n').length} 行。`)
@@ -554,7 +537,7 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
           「设置 → 关于」了（见 `Settings.tsx` 的 `About()`）。
 
           导出 MP4 / PNG 时的「存到哪里」走系统「选择文件夹」对话框
-          （`askDirectory` 里直接调 `/api/fs/pick`），页面上不再有自画的目录树。 */}
+          （`askDirectory` 里直接调 `pick_paths`），页面上不再有自画的目录树。 */}
     </div>
   )
 }

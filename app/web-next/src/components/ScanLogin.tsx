@@ -8,8 +8,8 @@ import { api } from '@/lib/api'
  * B 站扫码登录。
  *
  * 两段式，和 B 站官方的扫码流程一一对应：
- *   1. `POST /api/bili/qr/generate` → `{ url, qrcodeKey }`，把 `url` 画成二维码；
- *   2. `POST /api/bili/qr/poll` 带 `qrcodeKey` 轮询，直到后端说成了。
+ *   1. `bili_qr_generate` → `{ url, qrcodeKey }`，把 `url` 画成二维码；
+ *   2. `bili_qr_poll` 带 `qrcodeKey` 轮询，直到后端说成了。
  *
  * ⚠️ **Cookie 永远不回前端**（`server/bili.rs` 只回 `{code, message, loggedIn}`）：
  * 拿到 `SESSDATA` 之后是**后端自己**写进配置文件的，这里连它的影子都看不到。

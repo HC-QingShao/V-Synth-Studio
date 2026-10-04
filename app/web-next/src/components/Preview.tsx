@@ -15,9 +15,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
  * —— 用户看到的是「视频在动、声音零零碎碎」。所以这里只用 ref 操作同一批元素，
  * 靠 `video` 上的 play / pause / seeked / ratechange 事件把 audio 拉回同步。
  *
- * 直链一律是**本机代理**（`/api/media/proxy`）的地址 —— 浏览器直连 B 站 CDN
- * 会因为缺 `Referer` 被 403，这一点在页面那边（`mediaProxyUrl`）就处理好了，
- * 这里只管播。
+ * 两条地址都是**本机文件**的 asset 地址（`fileUrl(path)` → `http://asset.localhost/…`）。
+ * 远端直链不能直接塞进来：B 站 CDN 看 `Referer`，浏览器直连在部分节点上回 403；
+ * 所以页面那边先用 `api.previewFetch` 把流缓存到本机，这里只管播。
+ * （2026-10-04 之前这一层是本机 HTTP 反代 `/api/media/proxy`，那条路由已随 HTTP 层删除。）
  */
 export function VideoPreview({
   videoUrl,
@@ -65,8 +66,8 @@ export function VideoPreview({
         <video
           ref={videoRef}
           className="preview-video"
-          /* ⚠️ `crossOrigin` **不能加**：本机代理不带 CORS 头，加了浏览器会直接拒绝加载。
-             不加就是普通的同源取流（代理是我们自己后端发的）。 */
+          /* ⚠️ `crossOrigin` **不能加**：不加就是普通的跨源取流（媒体元素不需要 CORS 头
+             也能播），加了反而要求 asset 协议回一堆我们不需要的头。 */
           src={videoUrl}
           poster={poster || undefined}
           controls

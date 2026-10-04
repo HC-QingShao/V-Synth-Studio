@@ -1,7 +1,7 @@
 /**
  * 揭开启动画面（`index.html` 里那段静态遮罩 `#boot`）。
  *
- * 什么时候调：**App 首次 `/api/state` 落定之后**（成功失败都要调），或者等它超过
+ * 什么时候调：**App 首次 `get_state` 落定之后**（成功失败都要调），或者等它超过
  * 1.2 秒就先揭（`App.tsx` 里那条 useEffect 有超时兜底）——
  * 后端要挨个探测 ffmpeg / yt-dlp / python，会真的 spawn 进程，机器忙时要 4~8 秒，
  * 不设超时的话这段时间屏幕上只有它。失败也要揭：那样用户看到的是「连不上本地服务」
@@ -31,7 +31,7 @@ export function hideBoot() {
   const wait = Math.max(0, MIN_VISIBLE_MS - (performance.now() - evaluatedAt))
   window.setTimeout(() => {
     /**
-     * ⚠️ **界面早就在遮罩底下画好了**（React 在拿到 /api/state 之前就挂载了），
+     * ⚠️ **界面早就在遮罩底下画好了**（React 在拿到 get_state 之前就挂载了），
      * 所以只把遮罩淡出 = 「一降不透明度，整块界面已经在那儿」——看着没有过渡。
      * 这个标记让 CSS 在**同一帧**给侧栏和内容区各来一段入场（见 index.css 的 `app-enter`），
      * 两边交叉才像一次交接。

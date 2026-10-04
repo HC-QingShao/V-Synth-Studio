@@ -29,32 +29,19 @@ import { createContext, useContext, type ReactNode } from 'react'
 export type GlassMaterial = 'frosted' | 'liquid'
 
 /**
- * 默认毛玻璃，不是液态玻璃。
+ * 材质 → 库的参数的映射。这是「两种材质」的唯一定义处。
  *
- * 设计系统第 3 节把两者的用处分得很清：`regular`（毛玻璃）是**默认**，「栏、侧边栏、
- * 菜单、文字较多的表面」都用它；`clear`（这里的液态玻璃）**只用于媒体内容之上、
- * 且上层内容本身明亮醒目**的场合。
+ * ⚠️ **默认是毛玻璃，不是液态玻璃。** 设计系统第 3 节把两者的用处分得很清：
+ * `regular`（毛玻璃）是默认，「栏、侧边栏、菜单、文字较多的表面」都用它；
+ * `clear`（液态玻璃）**只用于媒体内容之上、且上层内容本身明亮醒目**的场合。
  *
  * 实测过默认给 `clear` 的后果（明亮模式，`tone=light`）：库会叠一层
  * `.lg-tint = rgba(0,0,0,.35)` 的 35% 黑压，而 `clear/small` 的模糊只有 1.5px
- * （开折射后再减半，0.75px）—— 于是顶栏和侧栏变成两块**纯灰板**，
- * 既没有模糊也看不出折射。液态玻璃留着当可选项，但它不是这个界面的默认。
+ * （开折射后再减半，0.75px）—— 于是顶栏和侧栏变成两块**纯灰板**。
+ *
+ * ⚠️ 用户在界面上选的是**玻璃等级 1~4**（`lib/useGlass.ts`），材质由那一档派生 ——
+ * 这里不再自己读存储（那个键已经并进 `config.json` 的 `glassLevel`）。
  */
-export const DEFAULT_MATERIAL: GlassMaterial = 'frosted'
-
-const STORAGE_KEY = 'qingmu.glass'
-
-export function readMaterial(): GlassMaterial {
-  try {
-    const v = localStorage.getItem(STORAGE_KEY)
-    if (v === 'frosted' || v === 'liquid') return v
-  } catch {
-    /* 隐私模式：用默认值 */
-  }
-  return DEFAULT_MATERIAL
-}
-
-/** 材质 → 库的参数的映射。这是「两种材质」的唯一定义处。 */
 export function materialOptions(m: GlassMaterial): GlassSurfaceOptions {
   return m === 'frosted'
     ? { material: 'regular', refraction: 0 }

@@ -5,7 +5,7 @@ import { Credit, Upstream } from '@/components/Credit'
 import { Icon } from '@/components/Icon'
 import { Chip, Finding, Panel, PanelHead, Stat } from '@/components/Panel'
 import { GlassSegmentedControl } from '@ttqtt/liquid-glass-react'
-import { DropHint, useFileDrop } from '@/components/FilePick'
+import { DropHint, useFilePick } from '@/components/FilePick'
 import { formatBytes } from '@/lib/format'
 import type { PageProps } from './types'
 import './Svsep.css'
@@ -32,8 +32,8 @@ import './Svsep.css'
  *
  * ## 两条轮询，不要合并
  *
- * `/api/svsep/status` 每 2 秒（便宜：读几个文件大小 + 一次 socket 探活），
- * `/api/svsep/backend/status` 每 8 秒（贵：它会去查注册表探 GPU）。
+ * `svsep_status` 每 2 秒（便宜：读几个文件大小 + 一次 socket 探活），
+ * `svsep_backend_status` 每 8 秒（贵：它会去查注册表探 GPU）。
  * App 里显示设备那一条就够用了，没必要为了「实时」把注册表查询打成每秒一次。
  *
  * ## ⚠️ 上游的进度是**估的**，不是真进度
@@ -116,12 +116,26 @@ function trackLabel(o: SvsepOutput, i: number): string {
   return STEM_LABEL[stem] || o.download_name || o.filename || `第 ${i + 1} 轨`
 }
 
+/** `H:\音乐\干声.wav` → `干声.wav`（拖进来只有路径，界面上要显示个名字） */
+function baseName(p: string): string {
+  const s = String(p ?? '').replace(/[\\/]+$/, '')
+  const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'))
+  return i >= 0 ? s.slice(i + 1) : s
+}
+
 /* ════════════════════════════════════════════════════════ 主组件 ══ */
 
 export function Svsep({ onNavigate, onToast }: PageProps) {
   const [st, setSt] = useState<SvsepStatus | null>(null)
   const [backend, setBackend] = useState<Record<string, unknown> | null>(null)
-  const [file, setFile] = useState<File | null>(null)
+  /**
+   * 选中的音频 —— **是路径不是 `File`**。
+   *
+   * ⚠️ 2026-10-04 改的：旧实现要前端把音频读成 multipart 传给后端，后端原样转发给
+   * Python；而 Python 服务要的本来就是**一个文件**，那一趟白搬的字节没了。
+   * 现在对话框与拖放都给**真路径**（`pick_paths` / `DragDropEvent::Drop`）。
+   */
+  const [file, setFile] = useState<{ path: string; name: string } | null>(null)
   const [engine, setEngine] = useState<'uvr' | 'roformer'>('roformer')
   const [busy, setBusy] = useState(false)
   /* 推理方式：跟盘上的 `inference_settings.json` 对齐（服务在跑时以 Python 为准） */
@@ -129,7 +143,6 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
   const [task, setTask] = useState<SvsepTask | null>(null)
   /* 「删除全部依赖」的两段式确认：第一下只是把这个立起来，第二下才真删 */
   const [armDelete, setArmDelete] = useState(false)
-  const fileRef = useRef<HTMLInputElement>(null)
 
   /** 拉一次总体状态。失败**不弹 toast**（轮询失败会刷屏），把错误放进 err 显示 */
   const [err, setErr] = useState<string | null>(null)
@@ -272,6 +285,22 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
     ''
 
   const outputs = useMemo(() => task?.outputs ?? [], [task])
+  /** 分离结果的落盘根目录（由后端给）；播放与下载都要用它拼路径 */
+  const outputsDir = st?.outputsDir ?? ''
+
+  /**
+   * 把输出目录放行给 **asset 协议**。
+   *
+   * ⚠️ **这条不能省**：asset 协议的 scope 是空的（用户挑的目录在编译期不可能知道），
+   * 而分离产物不是用户「刚选的那个文件」—— 漏了放行时 `<audio>` 会**静默**不播、
+   * 控制台只留一条 403，看着就像「播放器坏了」。放行是幂等的，重复调无害。
+   */
+  useEffect(() => {
+    if (!outputsDir) return
+    void api.allowPath(outputsDir).catch(() => {
+      /* 放行失败不该打断这一页：真播不出来时那条 403 会露出来 */
+    })
+  }, [outputsDir])
 
   /* ── 动作 ───────────────────────────────────────────── */
 
@@ -356,7 +385,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
         await api.svsepStart()
         await refresh()
       }
-      const res = await api.svsepSeparate(engine, file)
+      const res = await api.svsepSeparate(engine, file.path)
       setTask(res.task ?? null)
       onToast('已提交，开始分离', 'ok')
     } catch (e) {
@@ -380,10 +409,10 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
     if (!task) return
     const el = audioRef.current
     if (!el) return
-    // 按**文件名**取（`task/{id}/file/{name}`）：服务跑完就关了，这条路读磁盘
+    // 按**文件名**取：落盘在 `<outputsDir>/<task_id>/<文件名>`，服务跑完就关了，这条路读磁盘
     const o = (task.outputs ?? [])[i]
-    if (!o?.filename) return
-    const url = svsepFileUrl(task.id, o.filename, true)
+    if (!o?.filename || !outputsDir) return
+    const url = svsepFileUrl(outputsDir, task.id, o.filename)
     setPreviewIdx(i)
     /* 换 source 后要显式 load，不然改了 src 的播放器不会自己重载 */
     el.src = url
@@ -396,17 +425,29 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
   const [previewIdx, setPreviewIdx] = useState<number | null>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
 
-  /*
-   * 拖进来的音频**直接当 `File` 用**：提交时本来就要 multipart 上传（二进制归 Python
-   * 后端收，形状是上游定的），所以不用像别的页那样先落成临时文件换个路径回来 ——
-   * 这里的落点只借用公共的拖放手势（`useFileDrop`），拿到 `File` 就算完事。
+  /**
+   * 选音频：**系统「打开」对话框** + 把文件直接拖进窗口。
+   *
+   * ⚠️ 两条路给的都是**磁盘上的真路径**（拖放那條来自 Tauri 的 `DragDropEvent`，
+   * 不是 HTML5 的 `DataTransfer`）—— 后端要的就是一个路径，不用再搬一遍字节。
    */
-  const { dropProps, dragging } = useFileDrop((files) => {
-    const f = files[0]
-    if (!f) return
-    setFile(f)
-    setTask(null)
-    setPreviewIdx(null)
+  const {
+    pick,
+    dropProps,
+    dragging,
+    busy: picking,
+  } = useFilePick({
+    exts: ['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg', 'opus', 'wma'],
+    label: '音频文件',
+    title: '选一个音频文件',
+    onPaths: (paths) => {
+      const p = paths[0]
+      if (!p) return
+      setFile({ path: p, name: baseName(p) })
+      setTask(null)
+      setPreviewIdx(null)
+    },
+    onToast,
   })
 
   /* ── 渲染 ───────────────────────────────────────────── */
@@ -418,35 +459,23 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
         <Panel>
           <PanelHead
             title="音频素材"
-            desc="选一个本地音频，上传给分离引擎"
+            desc="选一个本地音频，交给分离引擎"
             extra={file ? <Chip tone="ok">已选</Chip> : <Chip>未选</Chip>}
           />
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".mp3,.wav,.flac,.m4a,.aac,.ogg,.wma,audio/*"
-            hidden
-            onChange={(e) => {
-              const f = e.target.files?.[0] ?? null
-              setFile(f)
-              setTask(null)
-              setPreviewIdx(null)
-              e.target.value = ''
-            }}
-          />
           {/*
-            这里是**系统「打开」对话框**（隐藏的 `input[type=file]`），不是自画的框 ——
-            原来那个 `.svsep-drop` 大虚线按钮是自画的皮，现在跟别的页一个长相：
+            系统「打开」对话框（`pick_paths`），不是自画的框 —— 原来那个
+            `.svsep-drop` 大虚线按钮是自画的皮，现在跟别的页一个长相：
             一个「选音频文件」按钮 + 一条「也可以拖进来」的提示。
+            ⚠️ 拖进来的也是**真路径**，不再是「`File` 对象 + 上传换路径」。
           */}
           <div className="btn-row">
-            <Button icon="folder" onClick={() => fileRef.current?.click()}>
+            <Button icon="folder" loading={picking} onClick={() => void pick()}>
               {file ? '换一个音频文件' : '选音频文件'}
             </Button>
           </div>
           <p className="hint">
             {file
-              ? `已选：${file.name}（${formatBytes(file.size)}）`
+              ? `已选：${file.name}`
               : '支持 mp3 / wav / flac / m4a / aac / ogg / wma'}
           </p>
           <DropHint dragging={dragging} text="音频文件也可以直接拖进这个窗口" />
@@ -587,7 +616,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
             <Stat
               label="服务"
               value={running ? '运行中' : '空闲'}
-              sub={running ? `端口 ${st?.port ?? '—'}` : '分离时自动启动'}
+              sub="分离时自动启动，跑完自动关"
             />
             <Stat
               label="运行时"
@@ -866,7 +895,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
                         />
                         <a
                           className="svsep-dl"
-                          href={svsepFileUrl(task.id, o.filename)}
+                          href={svsepFileUrl(outputsDir, task.id, o.filename)}
                           download={o.download_name || o.filename}
                         >
                           <Icon name="download" size={14} />

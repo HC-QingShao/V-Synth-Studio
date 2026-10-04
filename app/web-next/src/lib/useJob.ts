@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
+import { watchJob } from './ipc'
 import type { Job } from './types'
 
 /**
  * 订阅一个后端任务的进度 —— 旧界面的 `watchJob`，改成 React 钩子。
  *
- * 契约**照旧不变**：优先 SSE（`/api/jobs/<id>/stream`，推的是完整快照），
- * 连接断了自动退回 700ms 轮询；`done | error | canceled` 三个状态是终态，
- * 到终态就收订阅、只回调一次。
+ * 契约**照旧不变**：优先 `job_watch`（一条长驻 IPC 命令 + 一个 `Channel`，Rust 每有
+ * 变化就推一份**完整快照**），连接断了自动退回 700ms 轮询；`done | error | canceled`
+ * 三个状态是终态，到终态就收订阅、只回调一次。
+ *
+ * ⚠️ **那条 700ms 轮询兜底不要删。** 它是断线保险，与「IPC 会不会失败」无关：
+ * 通道建不起来（页面切走、后端提前 drop）、或者推流中途断了，都由它接管。
  *
  * ⚠️ **页面卸载时要停订阅**：钩子里在 `useEffect` 的清理函数里做了，
- * 但**手动 `start()` 第二个任务前也要 `stop()`** —— 否则两个 SSE 同时刷同一份 state。
+ * 但**手动 `start()` 第二个任务前也要 `stop()`** —— 否则两个订阅同时刷同一份 state。
  */
 interface JobHandlers {
   onUpdate?: (job: Job) => void
@@ -35,7 +39,6 @@ export function useJob() {
       handlersRef.current = handlers
       setJob(null)
 
-      let source: EventSource | null = null
       let pollTimer: number | null = null
       let stopped = false
       let sawTerminal = false
@@ -72,8 +75,6 @@ export function useJob() {
 
       const stopLocal = () => {
         stopped = true
-        source?.close()
-        source = null
         if (pollTimer !== null) {
           clearInterval(pollTimer)
           pollTimer = null
@@ -81,31 +82,19 @@ export function useJob() {
       }
       stopRef.current = stopLocal
 
-      try {
-        source = new EventSource(`/api/jobs/${jobId}/stream`)
-        source.onmessage = (ev) => {
-          try {
-            handle(JSON.parse(ev.data) as Job)
-          } catch {
-            /* 坏包忽略 */
-          }
-        }
-        source.onerror = () => {
-          if (stopped) return
-          source?.close()
-          source = null
-          startPolling()
-        }
-      } catch {
-        startPolling()
-      }
+      /* `job_watch` 是**长驻**命令：它 await 到任务到终态才返回。所以这条 promise
+         在任务跑完之前一直挂着 —— 正是我们要的「推流」。它抛错（通道建不起来、
+         任务表锁坏了）就退回轮询。 */
+      watchJob(jobId, (j) => handle(j as Job)).catch(() => {
+        if (!stopped) startPolling()
+      })
 
       return stopLocal
     },
     [],
   )
 
-  /* 离开页面时收干净 —— 挂着 SSE 会让后端一直广播给一个没人看的页面 */
+  /* 离开页面时收干净 —— 挂着订阅会让后端一直广播给一个没人看的页面 */
   useEffect(() => () => stopRef.current?.(), [])
 
   return { job, start, stop }

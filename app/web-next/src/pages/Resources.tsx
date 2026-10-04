@@ -21,7 +21,7 @@ import './Resources.css'
 /**
  * 资源库 —— 从旧前端（已退役）搬过来的。
  *
- * 数据只有一份来源：`/api/resources`（读的是 `app/data/resources.json`）。
+ * 数据只有一份来源：`get_resources`（读的是 `app/data/resources.json`）。
  * 结构照 `docs/FRONTEND.md` 第 3.2 节全部换成库的组件：
  * `SearchField` / `Banner` / `List`+`ListSection` / `Card` / `GlassBadge` / `GlassDialog`，
  * 按钮走 `components/Button.tsx`（库的 `GlassButton`）。
@@ -225,14 +225,14 @@ export function Resources({ onToast }: PageProps) {
     setChecking(true)
     setCheckNote('每个站点都会请求一次；403 多为反爬拦截，不代表站点失效。')
     try {
-      const res = await api.checkLinks([])
-      /* ⚠️ 后端 `/api/resources/check` 目前是**占位实现**（返回 `{ results: [], pending: true }`，
+      const res = await api.checkLinks()
+      /* ⚠️ `check_resources` 目前是**占位实现**（返回 `{ results: [], pending: true }`，
          还没有 jobId）。所以这里必须先判有没有 jobId 再订阅 —— 直接 `start(undefined)` 会
          挂一个永远不动的进度条，那正是「静默失败」。等后端接上真实校验，这段不用改。 */
       if (!res?.jobId) {
         setChecking(false)
         setCheckNote('')
-        onToast('后端还没接上链接校验（/api/resources/check 返回待实现），暂时无法检查', 'err')
+        onToast('后端还没接上链接校验（check_resources 返回待实现），暂时无法检查', 'err')
         return
       }
       start(res.jobId, {

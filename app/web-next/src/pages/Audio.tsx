@@ -5,6 +5,8 @@ import {
   Picker,
 } from '@ttqtt/liquid-glass-react'
 import { api } from '@/lib/api'
+import { getConfig, saveConfig } from '@/lib/config'
+import { fileUrl, readFileBytes } from '@/lib/ipc'
 import { Button, IconButton } from '@/components/Button'
 import { Credit, Upstream } from '@/components/Credit'
 import { DirectoryInput } from '@/components/DirPicker'
@@ -46,8 +48,11 @@ import './Audio.css'
 
 /* ══════════════════════════════════════════════════════════ 常量与设置 ══ */
 
-/** 设置持久化的键 —— **沿用旧界面的键**，用户之前选过的参数不丢 */
-const LS_KEY = 'fandiao.audio.settings'
+/**
+ * 设置持久化 —— 存在 **`config.json` 的 `audio`** 里（旧键 `fandiao.audio.settings`，键名沿用旧的是为了让
+ * 老用户那份能由 `migrate_legacy_settings` 搬过来）。
+ */
+const CFG_KEY = 'audio'
 
 const OPS: { id: string; name: string; desc: string; icon: IconName }[] = [
   { id: 'convert', name: '格式转换', desc: '导出 WAV / FLAC / MP3…', icon: 'swap' },
@@ -91,7 +96,7 @@ const LUFS_DESC: Record<string, string> = {
   '-23': '广播标准（EBU R128）',
 }
 
-/** 存进 localStorage 的那部分设置（不含分段 —— 分段由波形编辑器按当前素材重建） */
+/** 存进配置的那部分设置（不含分段 —— 分段由波形编辑器按当前素材重建） */
 interface Settings {
   action: string
   input: string
@@ -129,13 +134,11 @@ const DEFAULTS: Settings = {
 }
 
 function loadSettings(): Settings {
-  try {
-    const raw = localStorage.getItem(LS_KEY)
-    if (!raw) return { ...DEFAULTS }
-    return { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) }
-  } catch {
-    return { ...DEFAULTS }
+  const saved = getConfig()[CFG_KEY]
+  if (saved && typeof saved === 'object') {
+    return { ...DEFAULTS, ...(saved as Partial<Settings>) }
   }
+  return { ...DEFAULTS }
 }
 
 /* ══════════════════════════════════════════════════════════ 数据形状 ══ */
@@ -314,12 +317,9 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
 
   /* ── 持久化 ─────────────────────────────────────────────── */
 
+  /* 设置存进 `config.json` 的 `audio` 里（旧键 `fandiao.audio.settings`）。`saveConfig` 内部已经防抖合并，这里不用再攒。 */
   useEffect(() => {
-    try {
-      localStorage.setItem(LS_KEY, JSON.stringify(settings))
-    } catch {
-      /* 存不了不影响使用（隐私模式） */
-    }
+    saveConfig({ audio: settings as unknown as Record<string, unknown> })
   }, [settings])
 
   /* ── 探测 ───────────────────────────────────────────────── */
@@ -1213,24 +1213,23 @@ const UNDO_MAX = 20
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
-/** 波形包的读取地址（后端 `/api/fs/raw`，支持 Range） */
-const rawUrl = (path: string) => `/api/fs/raw?path=${encodeURIComponent(path)}`
-
 /**
  * 取回文件并算出波形包络（`[min0,max0,min1,max1,…]`，每桶 2ms）。
+ *
+ * 字节走 **asset 协议**（`readFileBytes` → `convertFileSrc` + XHR）—— 2026-10-04 之前
+ * 是 `GET /api/fs/raw`，那条路由随 HTTP 层一起删了。**别改成浏览器的网络请求 API**：
+ * 验收判据是前端 `grep` 那个调用为 0（见 `lib/ipc.ts` 的 `readFileBytes`）。
  *
  * ponytail: 解码是同步的 O(n)，而且 `decodeAudioData` 先把整段 PCM 解到内存
  * （20 分钟立体声 44.1kHz ≈ 423MB Float32），所以超过 `MAX_DECODE_SEC` 直接不画，
  * 其余功能（选段、分段、导出）照常可用。真要支持更长的文件，让后端加一条
- * 「ffmpeg 输出 8kHz 单声道 WAV」的路由，前端只解码那个小文件。
+ * 「ffmpeg 输出 8kHz 单声道 WAV」的命令，前端只解码那个小文件。
  */
-async function loadPeaks(url: string, durationSec: number): Promise<Float32Array> {
+async function loadPeaks(path: string, durationSec: number): Promise<Float32Array> {
   if (durationSec > MAX_DECODE_SEC) {
     throw new Error(`文件超过 ${MAX_DECODE_SEC / 60} 分钟，为省内存不画波形`)
   }
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`读不到音频数据（HTTP ${res.status}）`)
-  const raw = await res.arrayBuffer()
+  const raw = await readFileBytes(path)
   const Ctx = window.AudioContext
   if (!Ctx) throw new Error('这个环境不提供音频解码')
   const ac = new Ctx()
@@ -1345,7 +1344,10 @@ function WaveEditor({
   /** 已经试过解码的素材：失败的不要每次 `onChange` 都重试一遍 */
   const loaded = useRef('')
 
-  const url = usable && path ? rawUrl(path) : ''
+  /* 素材地址：`<audio src>` 与波形都认它一个（asset 协议，Range 是内置的）。
+     ⚠️ 它是 `http://asset.localhost/...`，**只在那个文件被放行过之后**才读得到 ——
+     用户是走系统对话框 / 拖放选进来的，`pick_paths` 已经顺手放行了。 */
+  const url = usable && path ? fileUrl(path) : ''
   const sg = segments[selected] ?? { start: 0, end: 0 }
 
   /* 回调放进 ref：父组件每次渲染都会给新函数，直接进依赖会导致反复解码 */
@@ -1359,7 +1361,7 @@ function WaveEditor({
     let alive = true
     setDecoding(true)
     setNote('')
-    void loadPeaks(url, duration)
+    void loadPeaks(path, duration)
       .then((p) => {
         if (alive) setPeaks(p)
       })

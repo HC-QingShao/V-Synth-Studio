@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react'
-import { readMaterial, type GlassMaterial } from '@/components/Glass'
+import { type GlassMaterial } from '@/components/Glass'
+import { getConfig, saveConfig } from '@/lib/config'
 
 /**
  * **玻璃等级 1~4** —— 一个滑块管住原来三个开关：
@@ -17,7 +18,10 @@ import { readMaterial, type GlassMaterial } from '@/components/Glass'
  *
  * ⚠️ **必须用 `useSyncExternalStore`，不能用 `useState`。**
  * 踩过：钩子里用 `useState`、再被两个组件各调一次，两个组件各拿一份独立 state ——
- * localStorage 改了、DOM 没变，看着就是「改了没有任何用」。
+ * 值改了、DOM 没变，看着就是「改了没有任何用」。
+ *
+ * ⚠️ 存的地方是 **`config.json` 的 `glassLevel`**（旧键 `qingmu.glassLevel`，
+ * 由 `lib/config.ts` 的迁移搬过来）。所以 `set()` 写的是后端，不是浏览器存储。
  */
 export type GlassLevel = 1 | 2 | 3 | 4
 
@@ -55,26 +59,24 @@ function levelGlobalGlass(level: GlassLevel): boolean {
   return level >= 4
 }
 
-const LEVEL_KEY = 'qingmu.glassLevel'
+const DEFAULT_LEVEL: GlassLevel = 2
 const listeners = new Set<() => void>()
 let current: GlassLevel | null = null
 
+/**
+ * 从**配置**读玻璃等级（键 `glassLevel`，旧键是 `qingmu.glassLevel`）。
+ *
+ * ⚠️ **不要给 3 档时代的旧值做映射。** 第一版把老 3 级（液态 + 面板玻璃）映射成新的
+ * 4 级，结果每次读都把新选的 3 级顶成 4 级 —— 用户根本选不中 3 级（实测：写 3、读出来是 4）。
+ * 3 档只存在过一个 commit，直接按新语义读就行。
+ *
+ * （老用户那两个更早的键 `qingmu.globalGlass` + `qingmu.glass` 由启动时那次
+ * `migrate_legacy_settings` 处理，见 `lib/config.ts` —— 这里不再认识它们。）
+ */
 function readLevel(): GlassLevel {
-  try {
-    const raw = localStorage.getItem(LEVEL_KEY)
-    /* ⚠️ **不要给 3 档时代的旧值做映射。**
-       我第一版把老 3 级（液态 + 面板玻璃）映射成新的 4 级，结果 readLevel 每次读
-       都把新选的 3 级顶成 4 级 —— 用户根本选不中 3 级（实测：写 3、读出来是 4）。
-       3 档只存在过一个 commit，直接按新语义读就行。 */
-    if (raw === '1' || raw === '2' || raw === '3' || raw === '4') return Number(raw) as GlassLevel
-    /* 更早的版本把这件事拆成两个键（`qingmu.globalGlass` + `qingmu.glass`），
-       老用户已经选过的不要丢。 */
-    const liquid = readMaterial() === 'liquid'
-    if (localStorage.getItem('qingmu.globalGlass') === 'off') return liquid ? 3 : 2
-    return liquid ? 4 : 2
-  } catch {
-    return 2 /* 隐私模式：用默认档 */
-  }
+  const raw = Number(getConfig().glassLevel)
+  if (raw === 1 || raw === 2 || raw === 3 || raw === 4) return raw as GlassLevel
+  return DEFAULT_LEVEL
 }
 
 function get(): GlassLevel {
@@ -82,14 +84,18 @@ function get(): GlassLevel {
   return current
 }
 
+/** 配置换了（启动时那一次 `get_config` 落定，或别处改了）就重读一遍。 */
+export function syncGlassLevel() {
+  const next = readLevel()
+  if (current === next) return
+  current = next
+  for (const l of listeners) l()
+}
+
 function set(level: GlassLevel) {
   if (current === level) return
   current = level
-  try {
-    localStorage.setItem(LEVEL_KEY, String(level))
-  } catch {
-    /* 隐私模式：本次会话仍然生效 */
-  }
+  saveConfig({ glassLevel: level })
   for (const l of listeners) l()
 }
 

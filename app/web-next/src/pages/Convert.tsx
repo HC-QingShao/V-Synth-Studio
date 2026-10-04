@@ -6,6 +6,7 @@ import {
   Picker,
 } from '@ttqtt/liquid-glass-react'
 import { api, type Finding as ApiFinding } from '@/lib/api'
+import { getConfig, saveConfig } from '@/lib/config'
 import { Button, IconButton } from '@/components/Button'
 import { Credit, Upstream } from '@/components/Credit'
 import { DirectoryInput } from '@/components/DirPicker'
@@ -14,7 +15,6 @@ import { useFilePick } from '@/components/FilePick'
 import { Icon } from '@/components/Icon'
 import { JobProgress } from '@/components/Job'
 import { Chip, Finding, Panel, PanelHead } from '@/components/Panel'
-import { formatBytes } from '@/lib/format'
 import { useJob } from '@/lib/useJob'
 import type { FormatInfo, Job } from '@/lib/types'
 import type { PageProps } from './types'
@@ -23,23 +23,19 @@ import './Convert.css'
 /**
  * 工程格式互转（40 种）—— 从旧前端（已退役）搬过来的。
  *
- * ## 加文件只有两种操作
+ * ## 加文件只有两种操作，而且**两种都给本机路径**
  *
  * | 操作 | 拿到什么 | 提交去哪 |
  * |---|---|---|
- * | **拖进来** | `File`，**没有本机路径**（浏览器不给） | `run-upload`（读成 base64 上传） |
- * | **选择文件** | 本机路径（系统文件对话框，按扩展名过滤、可多选） | `run`（后端直接读盘） |
+ * | **拖进来** | **真路径**（Tauri 的 `DragDropEvent` 载荷里直接带 `paths`） | `convert_run`（后端直接读盘） |
+ * | **选择文件** | 本机路径（系统对话框，按扩展名过滤、可多选） | 同上 |
  *
- * 两种可以混在一个列表里。**转换时按来源分批、串行提交**：`useJob()` 的 `start()` 一次只盯
- * 一个任务，所以一批跑到终态（done / error / canceled）才起下一批；进度条显示的永远是当前那批。
- * 「从目录批量收集」那一整块已经删掉（用户要的就是上面两种操作）。
+ * ⚠️ **2026-10-04 之前不是这样**：那时拖进来的只有 `File` 对象（浏览器不给路径），
+ * 转换要读成 base64 走一对 `run-upload` / `preview-upload`。现在对话框与拖放都给路径，
+ * 而 LibreSVIP 要的本来就是路径 —— 那一圈 base64（+33% 体积、WebView 与 Rust 两边
+ * 各存一份、还有 96MB 的 body 上限）**整个删了，别再把它加回来**。
  *
- * ## 上传版接口直接 fetch，没进 `lib/api.ts`
- *
- * 上传版（`/api/convert/run-upload`、`/api/convert/preview-upload`）是 JSON + base64
- * （`{ files: [{ name, base64 }] }`，不是 multipart）。`lib/api.ts` 里只包了路径版，
- * 这里就地发一次 —— 为一个页面改公共库不值得。传的是字节，所以拖入的工程比路径版慢，
- * 而且受后端 96MB 的 body 上限约束（见下 `UPLOAD_LIMIT`）。
+ * 于是列表里只有一个来源类型，转换也只有一批。
  *
  * ## 预检是手动的
  *
@@ -77,15 +73,14 @@ export function Convert({ state, onToast }: PageProps) {
   const [options, setOptions] = useState<ConvertOptions>(loadOptions)
   /** 上次从哪个目录挑的工程 —— 只当系统对话框的起点，下次接着从那儿开 */
   const [pickDir, setPickDir] = useState('')
-  const [dragOver, setDragOver] = useState(false)
   const [reports, setReports] = useState<PreviewReport[]>([])
   const [previewing, setPreviewing] = useState(false)
-  /** 整队都在忙：批次之间（读 base64、等下一批）没有 job，光看 job 状态会漏 */
+  /** 整队都在忙：批次之间没有 job，光看 job 状态会漏 */
   const [submitting, setSubmitting] = useState(false)
   const [batchLabel, setBatchLabel] = useState('')
   const { job, start, stop } = useJob()
 
-  /* 首屏那次 /api/state 到了之后灌一次默认值（只灌一次，之后归用户） */
+  /* 首屏那次 get_state 到了之后灌一次默认值（只灌一次，之后归用户） */
   const seeded = useRef(false)
   useEffect(() => {
     if (seeded.current || !state) return
@@ -105,25 +100,10 @@ export function Convert({ state, onToast }: PageProps) {
     })
   }, [writable, cfgTarget])
 
-  /* 转换选项记住（键沿用旧界面的，字段挪进 `options`；老数据没有它就整份用默认值） */
+  /* 转换选项记住 —— 存在 `config.json` 的 `convert` 里（旧键 `fandiao.convert.settings`）。`saveConfig` 内部已经防抖合并，这里不用再攒。 */
   useEffect(() => {
-    try {
-      localStorage.setItem(LS_KEY, JSON.stringify({ options }))
-    } catch {
-      /* 隐私模式写不进去 —— 不该因此影响这次转换 */
-    }
+    saveConfig({ convert: { options } as unknown as Record<string, unknown> })
   }, [options])
-
-  /* 拖歪了掉在拖放区外面时，浏览器默认会直接把那个文件打开（整页被替换、当前选择全丢）—— 拦掉 */
-  useEffect(() => {
-    const block = (e: DragEvent) => e.preventDefault()
-    window.addEventListener('dragover', block)
-    window.addEventListener('drop', block)
-    return () => {
-      window.removeEventListener('dragover', block)
-      window.removeEventListener('drop', block)
-    }
-  }, [])
 
   const effectiveOutDir = outDir.trim() || defaultOutDir
   const targetName = formats.find((f) => f.id === target)?.name ?? target
@@ -131,27 +111,9 @@ export function Convert({ state, onToast }: PageProps) {
 
   /* ── 来源 ─────────────────────────────────────────────── */
 
-  /** 拖入：拿不到路径，只留 `File`（转换时读成 base64 上传） */
-  const addFiles = (files: FileList | null) => {
-    const incoming = [...(files ?? [])].map<DropSource>((f) => ({
-      key: `f:${f.name}:${f.size}:${f.lastModified}`,
-      name: f.name,
-      ext: extOf(f.name),
-      size: f.size,
-      file: f,
-    }))
-    const fresh = incoming.filter((s) => !sources.some((x) => x.key === s.key))
-    if (!fresh.length) {
-      if (incoming.length) onToast('这些文件已经在列表里了', 'warn')
-      return
-    }
-    setSources([...sources, ...fresh])
-    onToast(`已加入 ${fresh.length} 个拖入的文件`, 'ok')
-  }
-
-  /** 选择文件：走系统对话框（后端弹 `GetOpenFileNameW`），拿到的是本机路径，可多选 */
+  /** 加入一批本机路径（对话框与拖放都走这里 —— **两条路给的都是真路径**） */
   const addPaths = (paths: string[]) => {
-    const incoming = paths.map<PathSource>((path) => ({
+    const incoming = paths.map<Source>((path) => ({
       key: `p:${path}`,
       name: baseName(path),
       ext: extOf(path),
@@ -167,10 +129,11 @@ export function Convert({ state, onToast }: PageProps) {
   }
 
   /**
-   * 「选择文件」走系统文件对话框（后端 `platform.rs::pick_files` + `/api/fs/pick`）。
-   * 工程文件一次挑好几个是常事，所以给 `multi`；挑完记住那个目录，下次从那儿开。
+   * 「选择文件」走系统文件对话框（`pick_paths`）。工程文件一次挑好几个是常事，
+   * 所以给 `multi`；挑完记住那个目录，下次从那儿开。拖放也由它挂上
+   * （`dropProps` 现在是空对象，拖放走 Tauri 的窗口事件，见 `components/FilePick.tsx`）。
    */
-  const { pick, busy: picking } = useFilePick({
+  const { pick, dropProps, dragging, busy: picking } = useFilePick({
     exts: projectExts,
     label: '工程文件',
     title: '选择工程文件',
@@ -212,32 +175,17 @@ export function Convert({ state, onToast }: PageProps) {
     try {
       for (const s of list) {
         try {
-          if (isDrop(s)) {
-            /* 拖入的走上传版预检：后端一次只分析第一个文件，所以一个文件一发 */
-            const pre = await postUpload<UploadPreview>('/api/convert/preview-upload', {
-              files: [{ name: s.name, base64: await toBase64(s.file) }],
-              toFormat: target,
-            })
-            out.push({
-              key: s.key,
-              name: s.name,
-              tracks: pre.input?.trackCount ?? undefined,
-              notes: pre.input?.noteCount ?? undefined,
-              findings: pre.findings ?? [],
-            })
-          } else {
-            const [info, pre] = await Promise.all([
-              api.inspect({ inputPath: s.path }),
-              api.preview({ inputs: [s.path], toFormat: target }),
-            ])
-            out.push({
-              key: s.key,
-              name: s.name,
-              tracks: info.stats?.trackCount,
-              notes: info.stats?.noteCount,
-              findings: pre.findings ?? [],
-            })
-          }
+          const [info, pre] = await Promise.all([
+            api.inspect({ inputPath: s.path }),
+            api.preview({ inputs: [s.path], toFormat: target }),
+          ])
+          out.push({
+            key: s.key,
+            name: s.name,
+            tracks: info.stats?.trackCount,
+            notes: info.stats?.noteCount,
+            findings: pre.findings ?? [],
+          })
         } catch (e) {
           /* 单个文件读不了不该让整批预检断掉 —— 记在它自己那一行上 */
           out.push({ key: s.key, name: s.name, findings: [], error: errText(e) })
@@ -254,10 +202,10 @@ export function Convert({ state, onToast }: PageProps) {
     }
   }
 
-  /* ── 执行（按来源分批、串行）────────────────────────────── */
+  /* ── 执行（一批提交，串行盯到终态）──────────────────────── */
 
   /**
-   * 提交一批并盯着它跑到终态。提交失败也算「这批没成」，**不打断后面的批次**。
+   * 提交一批并盯着它跑到终态。提交失败也算「没成」。
    * 取消是唯一会停掉整队的情况 —— 用户按了取消，多半就是不想再转了。
    */
   const runBatch = async (
@@ -302,16 +250,6 @@ export function Convert({ state, onToast }: PageProps) {
       onToast('请选择输出目录', 'warn')
       return
     }
-    const paths = sources.filter((s): s is PathSource => !isDrop(s))
-    const drops = sources.filter(isDrop)
-    const dropBytes = drops.reduce((n, s) => n + s.size, 0)
-    if (dropBytes > UPLOAD_LIMIT) {
-      onToast(
-        `拖入的文件一共 ${formatBytes(dropBytes)}，超过上传上限 ${formatBytes(UPLOAD_LIMIT)}；请改用「选择文件」按路径转`,
-        'err',
-      )
-      return
-    }
 
     const common = {
       toFormat: target,
@@ -324,32 +262,13 @@ export function Convert({ state, onToast }: PageProps) {
     }
 
     setSubmitting(true)
-    const results: string[] = []
-    /* 路径批：后端直接读本机文件 */
-    if (paths.length) {
-      results.push(
-        await runBatch('本机文件', async () => {
-          const { jobId } = await api.convert({ inputs: paths.map((s) => s.path), ...common })
-          return jobId
-        }),
-      )
-    }
-    /* 拖入批：没有路径，读成 base64 走上传版 */
-    if (drops.length && !results.includes('canceled')) {
-      results.push(
-        await runBatch('拖入文件', async () => {
-          const files: { name: string; base64: string }[] = []
-          for (const s of drops) files.push({ name: s.name, base64: await toBase64(s.file) })
-          const { jobId } = await postUpload<{ jobId: string }>('/api/convert/run-upload', { files, ...common })
-          return jobId
-        }),
-      )
-    }
+    /* ⚠️ `inputs` 全是**本机路径** —— 后端直接读盘，不再有 base64 那条路 */
+    const result = await runBatch('工程转换', async () => {
+      const { jobId } = await api.convert({ inputs: sources.map((s) => s.path), ...common })
+      return jobId
+    })
     setSubmitting(false)
-    if (results.length > 1) {
-      const ok = results.filter((r) => r === 'ok').length
-      onToast(`全部跑完：${ok} / ${results.length} 批成功`, ok === results.length ? 'ok' : 'warn')
-    }
+    if (result === 'ok') onToast(`全部完成：${sources.length} 个文件`, 'ok')
   }
 
   const reveal = (path: string, select: boolean) =>
@@ -371,36 +290,24 @@ export function Convert({ state, onToast }: PageProps) {
   }, [formats])
 
   return (
-    <div className="convert-layout">
+    <div className="convert-layout" {...dropProps}>
       {/* ══════════════════════ 左：来源 + 目标 ══════════════════════ */}
       <div className="convert-col">
         <Panel>
           <PanelHead
             title="来源工程"
-            desc="把工程文件拖进来，或点「选择文件」按路径挑；两种可以混着加。工程只发给本机后端（127.0.0.1），不出这台机器"
+            desc="把工程文件拖进来，或点「选择文件」按路径挑；两条路拿到的都是本机路径，工程只在本机处理、不出这台机器"
             extra={<Chip>{availableCount} 种格式可用</Chip>}
           />
           <div className="stack">
-            <div
-              className="convert-drop"
-              data-over={dragOver ? 'true' : undefined}
-              onDragOver={(e) => {
-                e.preventDefault()
-                setDragOver(true)
-              }}
-              onDragLeave={(e) => {
-                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false)
-              }}
-              onDrop={(e) => {
-                e.preventDefault()
-                setDragOver(false)
-                addFiles(e.dataTransfer.files)
-              }}
-            >
+            {/* 拖放由 Tauri 的窗口事件接管（`components/FilePick.tsx`），所以这里
+                **没有** DOM 上的 onDragOver / onDrop —— 写在这里的 HTML5 拖放事件
+                根本不会触发（Tauri 默认把拖放截走了）。`data-over` 跟着拖放状态亮。 */}
+            <div className="convert-drop" data-over={dragging ? 'true' : undefined}>
               <Icon name="upload" size={22} />
               <span className="convert-drop-title">把工程文件拖到这里</span>
               <span className="convert-drop-note">
-                拖入的文件浏览器不给路径，转换时按上传通道走；按路径挑的不受影响
+                拖到窗口任意位置都算数；松手后直接拿到磁盘上的真路径，转换时后端自己读
               </span>
             </div>
 
@@ -420,24 +327,17 @@ export function Convert({ state, onToast }: PageProps) {
                 sources.map((s) => (
                   <div className="convert-source" key={s.key}>
                     <Icon name="file" size={14} />
-                    <span className="convert-source-name" title={isDrop(s) ? s.name : s.path}>
+                    <span className="convert-source-name" title={s.path}>
                       {s.name}
                     </span>
                     <span className="convert-source-ext">{s.ext || '?'}</span>
-                    <span className="convert-source-src">{isDrop(s) ? '拖入' : '路径'}</span>
-                    {isDrop(s) ? (
-                      <span className="convert-source-size">{formatBytes(s.size)}</span>
-                    ) : null}
-                    {/* 拖入的没有本机路径，没有可定位的东西 */}
-                    {isDrop(s) ? null : (
-                      <IconButton
-                        label={`在资源管理器中显示 ${s.name}`}
-                        icon="folder"
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => void reveal(s.path, true)}
-                      />
-                    )}
+                    <IconButton
+                      label={`在资源管理器中显示 ${s.name}`}
+                      icon="folder"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void reveal(s.path, true)}
+                    />
                     <IconButton
                       label={`从列表移除 ${s.name}`}
                       icon="x"
@@ -747,9 +647,7 @@ export function Convert({ state, onToast }: PageProps) {
               </Button>
             </div>
             <p className="hint convert-note">
-              {sources.some(isDrop)
-                ? '拖入的文件按上传通道转（字节发给本机后端），按路径挑的直接读盘；两种混着加时会分批提交'
-                : '全部处理在本机完成，不联网、不出这台机器'}
+              全部处理在本机完成：工程文件只交给本机的 Rust 后端读盘，不联网、不出这台机器
             </p>
           </div>
 
@@ -859,8 +757,8 @@ const DEFAULTS: ConvertOptions = {
   '默认语言': '4',
 }
 
-/** 沿用旧界面的键（老数据里是另一套平铺字段、没有 `options`，那就整份用默认值） */
-const LS_KEY = 'fandiao.convert.settings'
+/** 转换选项的配置键（旧键 `fandiao.convert.settings`） */
+const CFG_KEY = 'convert'
 
 const IMPORT_SWITCHES: [KeyOf<boolean>, string, string][] = [
   ['导入音量包络', '音量包络', '音量 / 表情曲线（VEL）'],
@@ -913,15 +811,11 @@ const LANGUAGES = [
 /** 读存档：**按默认值的键和类型逐个取**，缺的 / 类型不对的一律用默认值 */
 function loadOptions(): ConvertOptions {
   const out = { ...DEFAULTS }
-  try {
-    const raw = JSON.parse(localStorage.getItem(LS_KEY) ?? '{}') as { options?: unknown }
-    const saved = raw?.options as Record<string, unknown> | undefined
-    if (!saved) return out
-    for (const key of Object.keys(DEFAULTS) as OptionKey[]) {
-      if (typeof saved[key] === typeof DEFAULTS[key]) out[key] = saved[key] as never
-    }
-  } catch {
-    /* 存档坏了当没存过 */
+  const raw = getConfig()[CFG_KEY] as { options?: unknown } | undefined
+  const saved = raw?.options as Record<string, unknown> | undefined
+  if (!saved) return out
+  for (const key of Object.keys(DEFAULTS) as OptionKey[]) {
+    if (typeof saved[key] === typeof DEFAULTS[key]) out[key] = saved[key] as never
   }
   return out
 }
@@ -951,48 +845,29 @@ function SwitchRow({
 
 /* ══════════════════════════════════════════════════════════════ 小工具 ══ */
 
-/** 有本机路径的来源：走 `run`，后端直接读盘 */
-interface PathSource {
+/**
+ * 列表里的一个来源。**只有这一种** —— 对话框与拖放都给本机路径
+ * （拖放那条来自 Tauri 的 `DragDropEvent`，载荷里直接带 `paths`）。
+ */
+interface Source {
   key: string
   name: string
   ext: string
   path: string
 }
 
-/** 拖入的来源：**没有路径**（浏览器不给），只能把字节发上去 —— 走 `run-upload` */
-interface DropSource {
-  key: string
-  name: string
-  ext: string
-  size: number
-  file: File
-}
-
-type Source = PathSource | DropSource
-
-const isDrop = (s: Source): s is DropSource => 'file' in s
-
 interface PreviewReport {
   key: string
   name: string
-  /** `api.inspect` / 上传版预检给的概览（读不出来时没有） */
+  /** `api.inspect` 给的概览（读不出来时没有） */
   tracks?: number
   notes?: number
   findings: ApiFinding[]
   error?: string
 }
 
-/** 上传版预检的回包（`{ findings, input: { name, trackCount, noteCount } }`） */
-interface UploadPreview {
-  findings?: ApiFinding[]
-  input?: { name?: string; trackCount?: number; noteCount?: number }
-}
-
 /** 预检最多看几个文件 —— 每个文件要跑一次 LibreSVIP 读工程，慢 */
 const PREVIEW_LIMIT = 12
-
-/** 后端的 body 上限（`simple::CONVERT_UPLOAD_LIMIT`，96MB）—— 拖入的整批超了就提前拦下来 */
-const UPLOAD_LIMIT = 96 * 1024 * 1024
 
 const baseName = (p: string) => p.split(/[\\/]/).pop() || p
 
@@ -1023,38 +898,4 @@ function sourceNameOf(formats: FormatInfo[], name: string): string {
     (f.exts ?? []).some((e) => String(e).replace(/^\./, '').toLowerCase() === ext),
   )
   return hit?.name ?? (ext ? `.${ext}` : '未知格式')
-}
-
-/** File → base64（去掉 data URL 前缀）。拖入的文件没有路径，只能把字节发上去 */
-const toBase64 = (file: File) =>
-  new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onerror = () => reject(new Error(`读取 ${file.name} 失败`))
-    reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '')
-    reader.readAsDataURL(file)
-  })
-
-/**
- * 上传版接口直接 `fetch`（`/api/convert/run-upload`、`/api/convert/preview-upload`）。
- *
- * `lib/api.ts` 里没有包这两条，本轮也不动公共库 —— 上传版就是 JSON + base64，
- * 就地发一次比为一个页面改公共库省事。拼的是绝对路径 `/api/...`。
- */
-async function postUpload<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const text = await res.text()
-  let data: (T & { ok?: boolean; error?: string }) | null
-  try {
-    data = text ? JSON.parse(text) : ({} as T)
-  } catch {
-    throw new Error(`服务端返回异常内容（HTTP ${res.status}）`)
-  }
-  if (!res.ok || data?.ok === false) {
-    throw new Error(data?.error || `请求失败（HTTP ${res.status}）`)
-  }
-  return data as T
 }

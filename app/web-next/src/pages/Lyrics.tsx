@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { GlassSegmentedControl, GlassSwitch } from '@ttqtt/liquid-glass-react'
 import { api } from '@/lib/api'
+import { saveConfig } from '@/lib/config'
 import { Button } from '@/components/Button'
 import { Credit, Upstream } from '@/components/Credit'
 import { DirectoryInput } from '@/components/DirPicker'
@@ -34,9 +35,6 @@ import './Lyrics.css'
 
 /** 后端对已保存的 Cookie 只回显这个占位串（真实值不出后端） */
 const MASK = '已设置'
-
-/** 「用这段歌词做文字 PV」把 LRC 交给文字 PV 页用的 localStorage 键（**必须和 pv.js 一致**） */
-const LS_PV_LYRICS = 'qingmu.pv.lyrics'
 
 /** 导入文件时后端读到的编码 → 界面上给用户看的说法 */
 const ENC_LABEL: Record<string, string> = {
@@ -339,7 +337,8 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
   }
 
   /**
-   * 选本地 .lrc：**系统「打开」对话框**（`/api/fs/pick`）或把文件直接拖进这一页。
+   * 选本地 .lrc：**系统「打开」对话框**（`pick_paths`）或把文件直接拖进这一页
+   * （拖进来的东西由 Tauri 给**真路径**，见 `components/FilePick.tsx`）。
    *
    * 这里原来挂的是 `DirectoryInput` —— 一个**目录**选择器被拿去选文件，用户看到的
    * 是自己画的那个目录树，还得先在树里逛到文件所在的文件夹、再手打文件名。
@@ -464,8 +463,10 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
   }
 
   /* ── 一键带去「文字 PV」─────────────────────────────────────
-     交接方式：写 localStorage（同源，两边都读得到），再导航过去。
-     不用 params 传：params 只在这次导航里存在，用户在 PV 页按一下 F5 就没了。
+     交接方式：写进**配置**（`config.json` 的 `pvPendingLyrics`，文字 PV 页读它），
+     再导航过去。不用 params 传：params 只在这次导航里存在，用户在 PV 页按一下 F5 就没了。
+     ⚠️ 2026-10-04 之前写的是浏览器存储（旧键 `qingmu.pv.lyrics`）—— 那种存储
+     按 origin 隔离，窗口加载方式再变一次这条交接就会**静默**断掉（读到空串）。
      带的是**原文 LRC 原文**，不自己拼双语 —— JIZURA 认 LRC 时间戳，也认
      `歌词|注音` 这种一行两段的写法，把两段 LRC 和格式说明一起交给它，
      比在这里猜它的语法稳妥（时间戳归它解析，自己不重复实现一遍）。 */
@@ -482,13 +483,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
     if (parts.length > 1) {
       parts.push('# 上面第一段是原文、第二段是译文。请把译文放到「注釈」的位置：原文|译文（同一行用竖线分开），别当成两句歌词。')
     }
-    try {
-      localStorage.setItem(LS_PV_LYRICS, parts.join('\n'))
-    } catch (e) {
-      // 存不下（隐私模式 / 配额满）就别硬跳 —— 跳过去是空的，用户只会以为功能坏了
-      onToast(`歌词存不进浏览器缓存，没法带过去：${errText(e)}`, 'err')
-      return
-    }
+    saveConfig({ pvPendingLyrics: parts.join('\n') })
     onNavigate('pv')
   }
 

@@ -101,7 +101,13 @@ const LEGACY_KEYS: &[(&str, &str)] = &[
     ("fandiao.audio.settings", "audio"),
     ("fandiao.video.settings", "video"),
     ("fandiao.convert.options", "convert"),
+    /* 新版 React 页面把这条写成 `fandiao.convert.settings`（`.options` 是 Node 时代
+       的名字）。两条都收下：哪条在就搬哪条，两条都在时后一条赢 —— 与「已有的键优先」
+       一样，迁移只可能发生一次。 */
+    ("fandiao.convert.settings", "convert"),
     ("qingmu.pv.lyrics", "pvPendingLyrics"),
+    ("qingmu.pv.sent", "pvSentLyrics"),
+    ("qingmu.midi.outDir", "midiOutDir"),
 ];
 
 /// localStorage 里存的是字符串，但有的本来就是 JSON（`{"options":{…}}`）。

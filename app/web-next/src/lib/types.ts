@@ -1,7 +1,12 @@
 /**
- * 后端数据结构 —— 照着 `tests/contract/fixtures/state.json` 的真实抓包定义。
+ * 后端数据结构 —— **手写**，照 `ipc/state.rs::get_state` 那个 `json!({...})` 的真实形状。
  *
- * ⚠️ 夹具是**永久基准**：字段对不上时先看夹具，别照着界面猜。
+ * ⚠️ **不引 `ts-rs` 之类的构建期类型生成**（用户已拍板）：那几个类型就这么点，
+ * 生成器带来的构建负担比省下的手写更大。改后端回包时**两处一起改**。
+ *
+ * ⚠️ 已经没有那条 health 路由了（`HealthInfo` 随之删掉）：`pid` / `uptimeSec` 是
+ * 「跑在一个 HTTP 端口上」才需要的信息，IPC 下前端与 Rust 同进程同生命周期 ——
+ * 版本号、运行环境、安装形态都在 `get_state` 里。
  */
 
 /** 一种工程格式（40 种） */
@@ -40,7 +45,7 @@ interface ToolsMap {
 
 export interface AppState {
   formats: FormatInfo[]
-  /** 只剩 UVR 一项 —— 声库/编辑器探测已删，不要再写「编辑器列表」 */
+  /** 编辑器探测的候选表（`tools.rs` 的候选已经清空，正常是空数组） */
   editors: unknown[]
   tools: ToolsMap
   transformOps: unknown[]
@@ -48,26 +53,21 @@ export interface AppState {
   config: Record<string, unknown>
   paths: { root?: string; outputDir?: string; downloadDir?: string; toolsDir?: string }
   pinyin: Record<string, unknown>
+  /** `win32` / `darwin` 这种（Node 命名，跨平台代码沿用了） */
   platform: string
+  /** 给人看的一行，如 `Windows (x86_64)` */
+  platformDesc?: string
   version: string
+  /** 作者署名 */
+  author?: string
+  /** 安装版（Program Files）还是绿色版（解压即用） */
   installed?: boolean
 }
 
-export interface HealthInfo {
-  name: string
-  version: string
-  /** 「关于」里那行运行环境，如 `Windows (x86_64)` */
-  node: string
-  author: string
-  pid: number
-  startedAt: number
-  uptimeSec: number
-}
-
 /**
- * 后端任务（`/api/jobs/*`）。
+ * 后端任务（`ipc/jobs.rs`）。
  *
- * 形状照后端 `server/convert.rs` 里建任务时那个 `json!({...})`：
+ * 形状照建任务时那个 `json!({...})`：
  * `{ id, type, title, status, percent, message, logs, createdAt }`，失败时多一个 `error`。
  * **`percent` 是 0~100**（不是 0~1）—— `GlassProgress` 要 `value`/`total`，直接给 100 当 total。
  */
@@ -83,4 +83,3 @@ export interface Job {
   createdAt?: number
   [k: string]: unknown
 }
-

@@ -76,9 +76,9 @@ function computeChecks(state: AppState | null): Check[] {
 /**
  * 两个「扩展包」的安装状态：`null` = 还没问出来后端。
  *
- * ⚠️ 刻意**不看** `/api/state`：它是冻结的契约夹具（`tests/contract/fixtures/state.json`），
- * 往里加键会让 `verify.mjs` 变红。所以直接问各自的状态接口，判据是后端自己的话：
- * 音轨分离 `runtimeReady && models.ok`、人声转 MIDI `runtime.ready && models.ready`。
+ * ⚠️ 刻意**不问 `get_state`** 里的这两样：它们是各自功能的私有状态，判据以后端自己的话
+ * 为准 —— 音轨分离 `runtimeReady && models.ok`、人声转 MIDI `runtime.ready && models.ready`。
+ * 所以直接调各自的状态命令，两条互不依赖。
  */
 interface Packs {
   svsep: boolean | null
@@ -118,17 +118,22 @@ export function Dashboard({
 
   useEffect(() => {
     void loadPacks()
-    // 只在进页面时问一次：`/api/midi/status` 会触发一次 ORT/CUDA 探测（没 N 卡时要 1 秒多）
+    // 只在进页面时问一次：`midi_status` 会触发一次 ORT/CUDA 探测（没 N 卡时要 1 秒多）
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const redetect = async () => {
     setChecking(true)
     try {
-      const data = await api.detect(true)
+      /* `tools_detect` 回的是 `{tools, editors, formats, summary}`；「几个可用」在
+         `summary` 里（ffmpeg / ytdlp / python 三个布尔）—— 旧 HTTP 那条回的是
+         `installedCount`，IPC 这一版没有这个字段。 */
+      const data = await api.detect()
+      const s = (data.summary ?? {}) as { ffmpeg?: boolean; ytdlp?: boolean; python?: boolean }
+      const n = [s.ffmpeg, s.ytdlp, s.python].filter(Boolean).length
       await onRefreshState()
       await loadPacks()
-      onToast(`检测完成：${data.installedCount} 个程序可用`, 'ok')
+      onToast(`检测完成：${n} 个外部程序可用`, 'ok')
     } catch (e) {
       onToast(`检测失败：${e instanceof Error ? e.message : String(e)}`, 'err')
     } finally {

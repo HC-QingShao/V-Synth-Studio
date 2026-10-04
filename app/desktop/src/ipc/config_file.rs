@@ -57,8 +57,22 @@ pub fn default_config() -> Value {
         "bilibiliCookie": "",
         "neteaseCookie": "",
         "proxy": "",
-        // 界面上「跟随系统 / 明亮 / 黑暗」三档之外的东西都归前端自己管，
-        // 这里只放**后端也读得到**的那几项。
+        /* ── 下面这几项后端不读，但**必须在这儿列出来** ──────────────────────
+         *
+         * 它们原来是前端 `localStorage` 里的页面设置（2026-10-04 搬进来）。
+         * 为什么不列不行：`load_config` 只认**默认值里有的键**（见上面那条注释），
+         * 所以没列出来的键就算 `set_config` 写进了盘，下次启动也会被过滤掉 ——
+         * 表现是「设置改了、重启就没了」，而且不报任何错。
+         *
+         * 也就是说：**前端每多存一项设置，这里就要多一个键。** */
+        "audio": {},
+        "video": {},
+        "convert": {},
+        // 歌词页 → 文字 PV 页的交接（原 `qingmu.pv.lyrics` / `qingmu.pv.sent`）
+        "pvPendingLyrics": "",
+        "pvSentLyrics": "",
+        // 人声转 MIDI 的输出目录（原 `qingmu.midi.outDir`）
+        "midiOutDir": "",
     })
 }
 

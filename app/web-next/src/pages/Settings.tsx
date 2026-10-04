@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '@/lib/api'
-import type { AppState, HealthInfo } from '@/lib/types'
+import type { AppState } from '@/lib/types'
 import { Button } from '@/components/Button'
 import { Field, TextInput } from '@/components/Field'
 import { Chip, GlassPanel, Panel, PanelHead, Stat } from '@/components/Panel'
@@ -56,8 +56,15 @@ export function Settings({
   const lensRef = useRef<HTMLSpanElement>(null)
   useNavLens(navRef, lensRef, section)
   const [cfg, setCfg] = useState<Record<string, unknown>>({})
-  const [health, setHealth] = useState<HealthInfo | null>(null)
 
+  /**
+   * 重新读一遍配置。
+   *
+   * ⚠️ 2026-10-04 起**没有 health 那条路由了**：它连同 HTTP 层一起删了，而它回的
+   * `pid` / `uptimeSec` 是「跑在一个端口上」才需要的信息（哪个进程、活了多久）——
+   * 现在前端和 Rust 在同一个进程里、同一个生命周期，问这些没有意义。
+   * 版本号与运行环境本来就在 `get_state` 里（`version` / `platformDesc` / `installed`）。
+   */
   const reload = useCallback(async () => {
     try {
       const s = await api.state()
@@ -69,7 +76,6 @@ export function Settings({
 
   useEffect(() => {
     void reload()
-    api.health().then(setHealth).catch(() => {})
   }, [reload])
 
   const save = useCallback(
@@ -125,13 +131,7 @@ export function Settings({
           <Tools state={state} onRefreshState={onRefreshState} onToast={onToast} />
         )}
         {section === 'about' && (
-          <About
-            state={state}
-            health={health}
-            onRefresh={reload}
-            onNavigate={onNavigate}
-            onToast={onToast}
-          />
+          <About state={state} onRefresh={reload} onNavigate={onNavigate} onToast={onToast} />
         )}
       </div>
     </div>
@@ -526,13 +526,11 @@ const LICENSES: { feature: string; upstream: string; href?: string; license: str
 
 function About({
   state,
-  health,
   onRefresh,
   onNavigate,
   onToast,
 }: {
   state: AppState | null
-  health: HealthInfo | null
   onRefresh: () => Promise<void>
   onNavigate: (id: string) => void
   onToast: (m: string, t?: string) => void
@@ -561,12 +559,15 @@ function About({
       <Panel>
         <PanelHead title="关于 V-Synth-Studio" />
         <div className="stats-row">
-          <Stat label="程序版本" value={health?.version ?? state?.version ?? '—'} />
-          <Stat label="运行环境" value={health?.node ?? state?.platform ?? '—'} />
+          <Stat label="程序版本" value={state?.version ?? '—'} />
+          <Stat label="运行环境" value={state?.platformDesc ?? state?.platform ?? '—'} />
+          {/* 这一格原来是「进程（PID / 已运行多久）」—— 那是 HTTP 服务时代的信息，
+              IPC 下前端和后端同进程同生命周期，问它没有意义（见 `ipc/state.rs` 的说明）。
+              换成用户真需要知道的一件事：配置与产物落在哪一侧。 */}
           <Stat
-            label="进程"
-            value={health?.pid ? `PID ${health.pid}` : '—'}
-            sub={health?.uptimeSec ? `已运行 ${Math.floor(health.uptimeSec / 60)} 分钟` : undefined}
+            label="配置形态"
+            value={state?.installed ? '安装版' : '绿色版'}
+            sub={state?.installed ? '配置在 %APPDATA%' : '配置在程序目录'}
           />
           <Stat
             label="外部工具"
