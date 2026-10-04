@@ -94,8 +94,8 @@ fn utf8_to_gbk(s: &str) -> Vec<u8> {
 
 /// 提示里的中文关键词 → 前端传上来的选项键。
 ///
-/// ⚠️ 这张表是**实测出来的**（把 LibreSVIP 问过的每一题都记下来了，见
-/// `docs/FEATURES.md` 的转换一节）。它的题库会随输入/输出格式变，
+/// ⚠️ 这张表是**实测出来的**：把 LibreSVIP 问过的每一题都记下来了。
+/// 它的题库会随输入/输出格式变，
 /// 认不出来的题一律照抄括号里的默认值 —— 所以表不全也不会转失败。
 struct PromptRule {
     key: &'static str,
@@ -103,7 +103,7 @@ struct PromptRule {
 }
 
 /// ⚠️ **这些键名现在是 LibreSVIP 的官方选项名**（不再是自造的）
-/// 来源：`libresvip-cli.exe plugin detail svp/vsqx` 的输出（整理成表见 docs/FEATURES.md §3.1）
+/// 来源：`libresvip-cli.exe plugin detail svp/vsqx` 的输出
 /// 版本：LibreSVIP 2.9.0
 const RULES: &[PromptRule] = &[
     /* 导入（svp 插件 1.11.2 的官方选项名） */

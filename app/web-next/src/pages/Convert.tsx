@@ -699,7 +699,7 @@ export function Convert({ state, onToast }: PageProps) {
 /**
  * 选项默认值 —— **键名必须逐字对上后端 `libresvip::RULES`**
  * **键名现在是 LibreSVIP 的官方选项名**（中文）。
- * 来源：`libresvip-cli.exe plugin detail svp/vsqx`（整理的选项表见 `docs/FEATURES.md` §3.1），
+ * 来源：`libresvip-cli.exe plugin detail svp/vsqx`（选项表就是后端 `libresvip.rs` 的 `RULES`），
  * LibreSVIP 2.9.0。后端的 `libresvip.rs` 按这些官方名称直接装配答案给 CLI。
  *
  * ⚠️ 默认值一律**跟随官方默认**，包括下面这条 —— `音高信息输入模式: 'plain'`

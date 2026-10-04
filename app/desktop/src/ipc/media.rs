@@ -18,12 +18,11 @@
 //! ⚠️ **别把这条改成「直接给远端 URL」**：B 站 CDN 会 403，yt-dlp 的 YouTube 直链
 //! 还带 `n` 参数、不经过签名变换会限速。
 //!
-//! ## 还剩一处转发
+//! ## 下载编排就在本文件里
 //!
-//! `video_download` 仍是薄壳，转给 `server/media.rs::video_download` —— 那个函数后面
-//! 挂着 600 多行下载编排（`run_download` / `download_bilibili` / `download_ytdlp` /
-//! 分P与番剧的挑流、进度、取消收尾）。**它是这次搬迁的最后一块**，搬法见
-//! `docs/TAURI-IPC-PLAN.md` 第 7 节。搬完 `server/` 就能整个删掉。
+//! `video_download` 只是入口，后面挂着 600 多行编排（`run_download` /
+//! `download_bilibili` / `download_ytdlp` / 分P与番剧的挑流、进度、取消收尾）——
+//! 它随「剔除 axum」那次一起从 `server/media.rs` 搬了过来，`server/` 已经整个删掉。
 //!
 //! 删掉的一条：`GET /api/media/proxy`（上面那段说的旧代理，整个不要了）。
 

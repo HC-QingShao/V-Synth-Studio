@@ -414,8 +414,7 @@ fn error_log_hint() -> String {
 }
 
 fn show_error(app: &tauri::AppHandle, message: &str) {
-    // 日志路径由这里统一附在提示后面 —— `dist/index.html` 只负责渲染，
-    // 它不知道路径（绿色版与安装版不同），所以那边不要写死。
+    // 日志路径由这里统一附在提示后面（绿色版与安装版不同，页面那边别写死）。
     let message = format!("{message}\n详细信息见：{}", error_log_hint());
     let message = message.as_str();
     // 写日志
@@ -433,7 +432,14 @@ fn show_error(app: &tauri::AppHandle, message: &str) {
     }
     note!("错误：{message}");
 
-    // 开一个窗口把原因显示出来（走内嵌的起始页，原因通过 hash 传过去）。
+    // 开一个窗口把原因显示出来（原因通过 hash 传过去）。
+    // ⚠️ 窗口加载的是**主界面**（`app/web/index.html`），而主界面不认识这个 hash
+    //    （它只路由 `#/<页名>`）—— 所以用户实际看到的是界面本身，真正的原因在
+    //    上面写进日志的那一行里。原来这儿挂着一个专用错误页
+    //    （`app/desktop/dist/index.html`，从 hash 里读原因渲染），随「同进程内嵌
+    //    HTTP 服务」那个时代一起废了：没有任何地方再加载它，安装包里也不含它，
+    //    已经连同那个空目录一起删掉。要恢复「失败时给一页说明」得先在
+    //    `frontendDist` 里放一个能渲染 hash 的静态页。
     // `build()` 失败时不 panic —— 那时候真正的原因已经写进日志了。
     if let Ok(w) = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title(WINDOW_TITLE)

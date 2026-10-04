@@ -22,7 +22,7 @@ import './Resources.css'
  * 资源库 —— 从旧前端（已退役）搬过来的。
  *
  * 数据只有一份来源：`get_resources`（读的是 `app/data/resources.json`）。
- * 结构照 `docs/FRONTEND.md` 第 3.2 节全部换成库的组件：
+ * 控件全部用库的组件：
  * `SearchField` / `Banner` / `List`+`ListSection` / `Card` / `GlassBadge` / `GlassDialog`，
  * 按钮走 `components/Button.tsx`（库的 `GlassButton`）。
  *

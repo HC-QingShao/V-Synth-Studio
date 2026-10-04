@@ -1,140 +1,112 @@
-# ═══════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 #  V-Synth-Studio —— 忽略规则
 #
-#  原则：**仓库只放源码**（约 7 MB）。凡是不属于源码、但编译/打包时
-#  需要的大二进制，都由 app\desktop\fetch-tools.ps1 在编译前补齐，
-#  一律不入库。下面每一条大件忽略规则都写清了补齐方式。
-# ═══════════════════════════════════════════════════════════
+#  原则：**仓库只放源码**（约 7 MB）。凡是大二进制、构建产物、本机状态，
+#  一律不入库；其中「编译/打包要用」的那几样由脚本在构建前补齐：
+#
+#    tools/ 与 app/web/vendor/jizura/  →  app\desktop\fetch-tools.ps1（联网 288 MB + 54 MB）
+#    app/web/assets/                   →  build.ps1 第一步的 `npm run build`
+#
+#  ⚠️ 判断标准是「**干净 clone 之后，build.ps1 能不能自己把它弄回来**」：
+#     能 → 可以忽略；不能 → 必须入库，否则新机器既跑不起来也打不出包。
+# ════════════════════════════════════════════════════════════════════════════
 
-# ── 上传 Release 用的大存档（本地产物，不入库）──────────────
-# 由 tools\zip-assets.ps1 打出来，内容是 tools\ 与 app\web\vendor\jizura\。
-# 传上 GitHub Release 后，fetch-tools.ps1 就能在干净机器上把两块补齐。
+# ── 上传 Release 用的大存档（本地打包产物）──────────────────────────────────
+# tools\zip-assets.ps1 打出来放这儿，再由 tools\upload-assets.ps1 传到
+# tag 为 `assets-v1` 的 Release（fetch-tools.ps1 就是从那个 Release 取）。
 /资料归档/
 
-# ── 运行时数据 ──────────────────────────────────────────────
-# 注意前面的斜杠：data/ 会匹配任意层级的 data 目录，那样会连
-# app/data/（资源库、拼音词典）一起排除掉，程序会缺功能。
-# 这几个目录只在仓库根目录，所以必须用 / 锚定。
+# ── 仓库根目录的运行期数据 ─────────────────────────────────────────────────
+# ⚠️ 前面的斜杠**不能省**：`data/` 会匹配任意层级的 data 目录，那样会连
+#    app/data/（资源库、拼音词典，必须入库）一起排除掉。
 /data/
 /downloads/
 
-# ── 外部工具（体积大，编译前补齐，不进仓库）─────────────────
-# tools/ 里是 ffmpeg（约 200MB）、yt-dlp、LibreSVIP CLI（约 70MB），合计约 288MB。
-# 补齐方式：powershell -ExecutionPolicy Bypass -File app\desktop\fetch-tools.ps1
-# 仓库只放源码 —— 这几样是官方二进制，放进 git 只会让每次 clone 都拖几百 MB。
-#
-# ⚠️ 这三行必须**按这个顺序**写，别合并成一句 /tools/：
-#     git 不会进入被排除的目录，所以「排除 tools\ 再单独放行里面的脚本」是无效的
-#     （!/tools/*.ps1 永远匹配不上，因为 git 压根没往里走）。
-#     正确写法是先让 tools/ 本身不被排除，再逐层排除里面的东西。
-#     效果：仓库里只有 tools\*.ps1 这几个脚本，下面的二进制全都不进。
+# ── 外部工具：ffmpeg / yt-dlp / LibreSVIP CLI（约 288 MB）──────────────────
+# ⚠️ 这三行**必须按这个顺序**写，别合并成一句 `/tools/`：
+#    git 不会进入被排除的目录，所以「排除 tools/ 再放行里面的脚本」是无效的
+#    （!/tools/*.ps1 永远匹配不上，因为 git 压根没往里走）。
+#    正确写法是先让 tools/ 本身不被排除，再逐层排除里面的二进制。
 /tools/*
 !/tools/*.ps1
 
-# ── 本机配置 ────────────────────────────────────────────────
-# 含个人路径（输出目录、下载目录）。程序首次运行会自动按默认值生成。
+# ── JIZURA 文字 PV（构建产物 2.3 MB + 2335 个 woff2 字体，合计约 54 MB）────
+# PV 页的 iframe 指向 /vendor/jizura/index.html，离线可用靠的就是它，
+# 所以不能只留在网盘上 —— 由 fetch-tools.ps1 补进 app\web\vendor\jizura\。
+# ⚠️ 只忽略 jizura 这一层，别写成 app/web/vendor/（以后往里加别的东西不被连坐）。
+app/web/vendor/jizura/
+
+# ── 本机状态（app/data/ 本身不在忽略之列，只排除下面几个子项）─────────────
+# 配置：含个人路径与登录 Cookie，程序首次运行会按默认值自己生成。
+# ⚠️ 它同时是「用户偏好」的唯一真相（前端那份 localStorage 已整体退役）。
 app/data/config.json
-
-# ── 音轨分离引擎（8.6 GB，绝不可能入库）─────────────────────
-# app/data/svsep/ 是内嵌的离线分离引擎：runtime/ 是 Python 3.10 + torch
-# + CUDA 运行库（7.5 GB），models/ 是两个模型（730 MB），backend/ 是后端源码。
-# **前后端都靠它**（Rust 的 svsep.rs 从这里拉进程），但它不是源码：
-#   * 运行时与模型都由 tools/svsep-pack.ps1 打包分发，用户按需下载；
-#   * 注意 app/data/ 本身**不在**忽略之列（pinyin.json / resources.json 要入库），
-#     所以必须点名忽略这个子目录，不能只靠上面那条 config.json。
+app/data/app.log
+# 音轨分离引擎：Python + torch + CUDA 运行库（解压 7.4 GB）与两个模型（730 MB）。
+# 引擎与模型都不随包分发，由分离页按需下载，不进仓库。
 app/data/svsep/
-
-# ── 人声转 MIDI 的模型（376 MB，且许可不允许随包分发）───────
-# app/data/game/models/ 里是 GAME 的三个 ONNX 图（encoder / segmenter / estimator，
-# 合计 376 MB）。两个理由不入库：
-#   ① 体积（和 svsep 一样，属于「按需下载」的大件）；
-#   ② **许可是 CC BY-NC-SA 4.0（非商业）**，与源码的授权不是一回事 ——
-#      进仓库就等于随源码分发，见 docs/THIRD-PARTY-NOTICES.md。
-# 由扒谱页的「下载模型」按钮取（`midi_transcribe.rs` 的 MODEL_URL）——
-# 那是我们自己托管的一份（123 云盘 CDN），内容与官方 release 里那个 zip 一致，
-# 打包脚本见 `tools/game-pack.ps1`。境内直连 GitHub release 资产会握手失败。
-# 注意 app/data/ 本身不在忽略之列（pinyin.json / resources.json 要入库），
-# 所以要像 svsep 那样点名这个子目录。
+# 人声转 MIDI 的模型（376 MB）—— 许可是 CC BY-NC-SA 4.0（非商业），
+# 进仓库等于随源码分发，除体积之外**许可本身也不允许**。
 app/data/game/
-
-# ── 人声转 MIDI 的可写数据（设置 + 下载物 + 任务中间文件）──────
-# app/data/midi/ 就是 `midi_transcribe::data_dir()`：
-#   * midi_settings.json —— 用户选的推理方式（`{"device":"auto|cpu|gpu"}`），
-#     每台机器不一样，和 config.json 同理属于「本机状态」；
-#   * 下下来的那份 onnxruntime.dll（官方 ORT 包 78 MB 里解出来的那个）；
-#   * work/ —— 每个任务的临时目录。
-# 与 app/data/svsep/ 同类：纯运行时产物，一个都不该进仓库。
+# 人声转 MIDI 的可写数据：推理方式设置、下下来的 onnxruntime.dll、任务临时目录。
 app/data/midi/
 
-# ── 依赖与构建产物 ──────────────────────────────────────────
+# ── 前端构建 ───────────────────────────────────────────────────────────────
+# ⚠️ `app/web/assets/` **不入库**：里面是带内容哈希的文件名，而 vite.config.ts 的
+#    `emptyOutDir: false` 让每次构建都往里加新文件、旧的也不自动删 ——
+#    入库的话每构建一次就多几个永不被引用的文件，历史里越堆越多。
+#    产物由 build.ps1 第一步重新生成。
+# ⚠️ 但 `app/web/index.html` **必须入库**：它既是 Vite 的入口，也是
+#    `resolve_paths()` 判定程序根目录的哨兵（`app/web/index.html`）。
+# ⚠️ `app/web/img/`（logo 与两张背景图）是**随包静态资源、不是产物**，同样入库。
+app/web/assets/
+app/web-next/node_modules/
+# 这条是通用的：现在只有 app/web-next 一个前端，但哪天再起一个包也不会漏。
 node_modules/
+*.tsbuildinfo
+
+# ── Rust / Tauri 构建产物 ──────────────────────────────────────────────────
+app/desktop/target/
+# gen/ 是 tauri-build 每次编译重写的 schema（capabilities / ACL / windows 三份），
+# 一个字节都不是手写的；以前误当源码入过库，于是每次编译都制造一堆假改动。
+app/desktop/gen/
+# 可执行程序的锁文件**应当入库**（锁定依赖版本、保证可复现构建）。
+# 这一行本身不排除任何东西，写在这儿是提醒别哪天顺手把它 ignore 掉。
+!app/desktop/Cargo.lock
+
+# ── 探针输出（tests/manual/*.mjs 写的截图与 JSON）──────────────────────────
+tests/manual/out/
+
+# ── 真实工程样本（版权原因不入库）──────────────────────────────────────────
+# 真实歌曲工程与用户自己的 OpenUtau 备份。合成出来的 sample-* 夹具仍然入库。
+tests/samples/real-sample-*
+tests/samples/openutau-*
+
+# ── 智能体说明书（本地留着，不推送到 GitHub）───────────────────────────────
+# 给 AI 编码智能体看的「看代码看不出来的东西」，也是本工作区的指令文件。
+# ⚠️ 它**仍然在磁盘上**（删掉它，以后的智能体会丢掉全部项目规矩），
+#    只是不进版本库 —— 见 README 的「给接手的人」一节。
+/AGENTS.md
+
+# ── 临时与调试文件 ─────────────────────────────────────────────────────────
+# ⚠️ 写 `tmp-*`（不带斜杠）而不是 `tmp-*/`：后者只匹配目录，
+#    根目录下随手留一个 `tmp-commit-msg.txt` 就会被 `git add -A` 带进提交。
+/tmp-*
+/_tmp-*
+/_diag-*
+*.part
+*.tmp
+*.orig
+*.rej
+*.bak
+*.log
+
+# ── 二进制（防手滑；正常路径下它们都在上面被忽略的目录里）──────────────────
 *.exe
 *.dll
 *.pdb
 *.obj
 
-# ── Rust / Tauri 构建产物 ───────────────────────────────────
-# target/ 是编译中间产物，轻松上 GB，绝对不进仓库。
-# 源码在 app/desktop/{Cargo.toml,tauri.conf.json,build.rs,src/,icons/,dist/}。
-# 图标（icons/）和起始页（dist/）是源码的一部分，要入库 —— 所以只忽略 target。
-app/desktop/target/
-# gen/ 是 tauri-build 每次编译重写的 schema（capabilities / ACL / windows 三份），
-# 一个字节都不是手写的。以前误当源码入了库，于是每次编译都制造一堆假改动。
-app/desktop/gen/
-# Cargo.lock 对可执行程序应当入库，锁定依赖版本以保证可复现构建
-!app/desktop/Cargo.lock
-
-# ── 真实工程样本（版权原因不入库）───────────────────────────
-# tests/samples/ 下这些是真实歌曲工程（白石溪、呐呐呐等）与用户自己的
-# OpenUtau 备份，属于有版权的作品数据，不要随源码分发。
-# 合成出来的 sample-* 夹具仍然入库。
-tests/samples/real-sample-*
-tests/samples/openutau-*
-
-# ── 前端构建（app/web-next）────────────────────────────────
-# ⚠️ **2026-10-05 起 `app/web/assets/` 不入库**（规则见本段末尾）—— 下面这段原本写的是
-# 「产物要入库，否则 fresh clone 打开就是白屏」，**那个说法已经作废**，别再照它 `git add -f`。
-#
-# 现在的规矩：**前端产物由 `build.ps1` 重新生成**，所以不必入库。
-#   * `build.ps1`（不加 `-SkipWeb`）第一步就是 `cd app/web-next && npm ci && npm run build`，
-#     产物直接落在 `app\web\`，`assets/` 会被补齐；
-#   * ⚠️ **只有加了 `-SkipWeb` 才需要自己先跑一次前端构建**（那个开关只为「只改 Rust
-#     省几秒」而存在），否则 `index.html` 会指向不存在的哈希文件名 → **窗口白屏**；
-#   * `index.html` 本身**要入库**：它既是 Vite 的入口，也是 `resolve_paths()` 判定
-#     程序根目录的哨兵（`app/web/index.html`）。
-#
-# 为什么不入 assets/：里面是**带内容哈希**的文件名，而 `emptyOutDir: false` 让每次构建
-# 都往里加新文件、旧的也不自动删（磁盘上现在就是两套）。入库的话每构建一次就多两个
-# 永不被引用的文件，且「旧版本」会在历史里越堆越多。
-#
-# ⚠️ 但依赖与增量编译缓存同样不进库：
-app/web-next/node_modules/
-*.tsbuildinfo
-app/web/assets/
-
-# ── JIZURA 字体（同上：大二进制，编译前补齐）────────────────
-# app/web/vendor/jizura/ 是 JIZURA 文字 PV 的构建产物（index.html 2.3MB）+ 2335 个
-# woff2 字体（49.4MB）+ fonts.css（2.5MB），合计约 54MB。PV 页的 iframe 指向
-# /vendor/jizura/index.html，离线可用靠的就是它，所以**不能只留在网盘上**：
-# 同样由 fetch-tools.ps1 在编译前补进 app\web\vendor\jizura\。
-# ⚠️ 只忽略 jizura 这一层，别写成 app/web/vendor/ —— 以后要往里加别的东西时
-# 不会被这条规则连坐。目录本身不在库里，fetch-tools.ps1 会自己建。
-app/web/vendor/jizura/
-
-# ── 探针输出（tests/manual/*.mjs 写的截图与 JSON）────────────
-# 只是给人看的中间产物，不是夹具，不入库。
-tests/manual/out/
-
-# ── 临时与调试文件 ──────────────────────────────────────────
-tmp-*/
-_tmp-*
-_diag-*
-*.part
-*.tmp
-*.bak
-*.log
-
-# ── 编辑器 / 系统 ───────────────────────────────────────────
+# ── 编辑器 / 系统 ──────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
