@@ -1169,8 +1169,6 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
           </div>
         </Panel>
 
-        <TipsCard onNavigate={onNavigate} />
-
         {/* 许可与出处：这一页的活全是随包的 ffmpeg 干的 */}
         <Credit
           desc="这一页的处理全部交给随包的 ffmpeg，许可与出处写在这里"
@@ -1922,42 +1920,7 @@ function tickStep(viewSpan: number, width: number): number {
   return 3600
 }
 
-/* ══════════════════════════════════════════════════════ 顺手流程 ══ */
-
-/**
- * 分离搬到独立页了（侧栏「音轨分离」）—— 右栏不再摆入口卡，
- * 需要去那儿的用户在「顺手流程」里点内链。
- *
- * 为什么搬走：分离已经不是一个「顺带在这里做一下」的功能了。
- * 它现在有在线（MVSEP）与离线（内嵌引擎，要下 730 MB 模型、跑几十分钟、
- * 占 5 GB 内存）两条差异极大的路，状态也多（服务起没起、模型下没下、
- * 任务跑到哪一轨）。塞在音频页右栏一张卡里，用户根本看不出该点哪个。
- */
-function TipsCard({ onNavigate }: { onNavigate: (id: string) => void }) {
-  return (
-    <Panel>
-      <PanelHead title="顺手流程" desc="从 MV 到能干活的伴奏" />
-      <div className="stack">
-        <pre className="job-log">{[
-          '1. 视频解析 → 下载 MV（或只下音频）',
-          '2. 这里「提取音频」→ 导出 WAV',
-          '3. 音轨分离 → 离线引擎拆出人声 / 伴奏',
-          '4. 「变调」把伴奏对到你的音域',
-          '5. 「响度标准化」让两边音量接近',
-          '6. 导出 WAV，拿去编辑器里继续做',
-        ].join('\n')}</pre>
-        <p className="hint">
-          顺序只是建议：先分离、再变调，通常比先变调再分离更干净（模型对原调更敏感）。
-          分离在
-          <button type="button" className="audio-inline-link" onClick={() => onNavigate('svsep')}>
-            音轨分离
-          </button>
-          页。
-        </p>
-      </div>
-    </Panel>
-  )
-}
+/* ══════════════════════════════════════════════════════ 与旧实现的差异 ══ */
 
 /*
  * ── 与旧实现有意不同的几点 ──────────────────────────────────────────────
