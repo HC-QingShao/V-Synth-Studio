@@ -42,6 +42,15 @@
   color: var(--lg-label-secondary);
 }
 
+/* 拖入提示（`components/FilePick.tsx` 的 `DropHint`）：挤在工具条里那一行小字。
+   这一页的高度全给编辑器，所以它不做成虚线框（那要多吃 30px），
+   只把外框和内边距收到最小；拖进来的时候靠高亮说话。 */
+.pv-drop {
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* ── iframe ────────────────────────────────────────────────────────────
    圆角 + 一条分隔边，和这一页外面的面板同形；`overflow: hidden` 是为了让
    圆角真的裁到 iframe（不然四个角还是方的）。

@@ -359,6 +359,274 @@ pub fn move_to_trash(target: &Path) -> std::io::Result<()> {
     }
 }
 
+/* ══════════════════════════════ 系统文件对话框 ══════════════════════════════════ */
+
+/// 系统「打开」对话框要的几个参数。
+pub struct PickOptions {
+    /// 过滤器那一行的名字，例如「音频文件」。给了才加这一行。
+    pub label: Option<String>,
+    /// 过滤器里的扩展名（不带点、小写）。空 = 只有「所有文件」。
+    pub exts: Vec<String>,
+    pub title: Option<String>,
+    /// 打开时停在哪个目录。不传 = 系统自己的记忆。
+    pub dir: Option<String>,
+    /// 允许多选
+    pub multi: bool,
+}
+
+/// 对话框的 owner 句柄：**只认本进程的前台窗口**，被别的程序抢了焦点就当没有 owner。
+///
+/// 对话框要弹在**我们自己窗口**前面。`GetForegroundWindow()` 未必是我们 ——
+/// 请求来自页面，发请求的那一刻用户人在窗口里，但被别的程序抢了焦点就会弹到
+/// 别人后面去。所以拿到句柄先核 PID：不是本进程就退回无 owner
+/// （宁可非模态，也别把对话框挂到别人的窗口上）。
+#[cfg(windows)]
+fn owner_hwnd() -> windows_sys::Win32::Foundation::HWND {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    unsafe {
+        let h = GetForegroundWindow();
+        if h.is_null() {
+            return std::ptr::null_mut();
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, &mut pid);
+        if pid == std::process::id() {
+            h
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// 弹一次系统「打开」对话框，回选中的**绝对路径**（取消 → 空数组）。
+///
+/// 为什么值得走这一步：网页的 `<input type="file">` **拿不到本机路径**，
+/// 只给一个 `File` 对象，于是文件必须先整个上传到后端才能用。而这几个页面
+/// （音频处理、人声转 MIDI、导入歌词）后面全是「吃路径」的活 —— ffmpeg、
+/// 试听（`/api/fs/raw`）、试转 MIDI 都直接读本机文件。走系统对话框等于把
+/// 路径直接要过来：不复制字节、不占内存，还能继续「在资源管理器里定位」。
+///
+/// 拖入那条路没有路径可用，由 `server::simple::fs_upload` 落盘换回一个路径，
+/// 两条入口最后都汇成「一串绝对路径」。
+///
+/// ⚠️ **`OFN_NOCHANGEDIR` 不能省**：进程 cwd 是 `main.rs::resolve_paths()`
+/// 的兜底依据（资源目录找不到时按 cwd 往上找），而这套对话框的默认行为是
+/// 把调用进程的 cwd 改成用户最后逛到的目录 —— 那之后所有相对路径就全歪了。
+///
+/// 调用方必须放进 `spawn_blocking`：它一直阻塞到用户点下确定。
+#[cfg(windows)]
+pub fn pick_files(opts: &PickOptions) -> Result<Vec<String>, String> {
+    use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        CommDlgExtendedError, GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER,
+        OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+
+    let hwnd = owner_hwnd();
+
+    /*
+     * COM：这套对话框不初始化 COM 也能跑，但 shell 那几个扩展点（左侧导航、
+     * 快速访问、右键菜单）在没起的线程上会静默失灵 —— 表现就是「对话框能开，
+     * 但左边那一栏是空的」。`spawn_blocking` 给的是干净线程，正常回 S_OK；
+     * 万一线程已经是 MTA（`RPC_E_CHANGED_MODE`，负数）就**别**配对去
+     * `CoUninitialize` —— 那会拆掉别人的 COM。
+     */
+    // `COINIT_APARTMENTTHREADED` 在 windows-sys 里是 `i32`，而 `CoInitializeEx`
+    // 要 `u32`（同一个标志，两套头文件写法），所以这里得转一下。
+    let com_ok =
+        unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) } >= 0;
+
+    // 过滤器是**双 NUL 结尾**的一串：`标题\0模式\0…\0\0`。
+    let mut filter: Vec<u16> = Vec::new();
+    if let Some(label) = opts.label.as_deref().filter(|l| !l.is_empty()) {
+        filter.extend(label.encode_utf16());
+        filter.push(0);
+        let pats: Vec<String> = opts.exts.iter().map(|e| format!("*.{e}")).collect();
+        filter.extend(
+            if pats.is_empty() { "*.*".to_string() } else { pats.join(";") }.encode_utf16(),
+        );
+        filter.push(0);
+    }
+    // 「所有文件」永远留一项：扩展名猜错时（有的 .lrc 被存成 .txt）也得能选到，
+    // 否则用户面对的是一个「文件明明在、却点不动」的对话框。
+    filter.extend("所有文件".encode_utf16());
+    filter.push(0);
+    filter.extend("*.*".encode_utf16());
+    filter.push(0);
+    filter.push(0);
+
+    let title = to_wide(opts.title.as_deref().unwrap_or("选择文件"));
+    let initial = opts.dir.as_deref().filter(|d| !d.is_empty()).map(to_wide);
+
+    /*
+     * 缓冲区给 32K 个 UTF-16 码元（64 KB）。多选时这里装的是
+     * `目录\0文件1\0文件2\0…\0\0`，**几千个文件就可能撑爆** —— Win32 的规矩是
+     * 装不下就截断并且返回成功，所以我们拿到的总是「能装下的那部分」，
+     * 不会报错。32K 对「拖一批歌进来」这个量级绰绰有余。
+     */
+    let mut buf = vec![0u16; 32768];
+
+    let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+    ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = filter.as_ptr();
+    ofn.nFilterIndex = 1;
+    ofn.lpstrFile = buf.as_mut_ptr();
+    ofn.nMaxFile = buf.len() as u32;
+    ofn.lpstrTitle = title.as_ptr();
+    if let Some(dir) = initial.as_ref() {
+        ofn.lpstrInitialDir = dir.as_ptr();
+    }
+    let mut flags = OFN_EXPLORER
+        | OFN_FILEMUSTEXIST
+        | OFN_PATHMUSTEXIST
+        | OFN_HIDEREADONLY
+        | OFN_NOCHANGEDIR;
+    if opts.multi {
+        flags |= OFN_ALLOWMULTISELECT;
+    }
+    ofn.Flags = flags;
+
+    let picked = unsafe { GetOpenFileNameW(&mut ofn) };
+    if com_ok {
+        unsafe { CoUninitialize() };
+    }
+
+    if picked == 0 {
+        /*
+         * 返回 0 有两种意思：用户点了取消，或者真出错了。区分它们的唯一办法是
+         * `CommDlgExtendedError()` —— 取消时它回 0。混在一起的话，「对话框打不开」
+         * 在界面上会表现成「点了没反应」，那种 bug 没法查。
+         */
+        let code = unsafe { CommDlgExtendedError() };
+        if code != 0 {
+            return Err(format!("系统文件对话框出错（错误码 {code:#x}）"));
+        }
+        return Ok(Vec::new());
+    }
+
+    // 缓冲区里的第一个字符串：多选时是**目录**，只选一个时是**整条路径**
+    // （Win32 就这么定的，不是我们能选的）。
+    let first_end = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    let first = String::from_utf16_lossy(&buf[..first_end]);
+
+    let mut names: Vec<String> = Vec::new();
+    let mut i = first_end + 1;
+    while i < buf.len() && buf[i] != 0 {
+        let len = buf[i..].iter().position(|&c| c == 0).unwrap_or(0);
+        names.push(String::from_utf16_lossy(&buf[i..i + len]));
+        i += len + 1;
+    }
+
+    if names.is_empty() {
+        return Ok(vec![clean_path(Path::new(&first))]);
+    }
+    let dir = PathBuf::from(&first);
+    Ok(names.iter().map(|n| clean_path(&dir.join(n))).collect())
+}
+
+/// 非 Windows：还没有系统对话框那一层。让用户手填路径，别假装能用。
+#[cfg(not(windows))]
+pub fn pick_files(_opts: &PickOptions) -> Result<Vec<String>, String> {
+    Err("这个平台还没有系统文件对话框，请直接把路径填进输入框".into())
+}
+
+/// 弹一次系统「选择文件夹」对话框，回选中的**目录**（取消 → 空数组）。
+///
+/// 目录选择以前是**自己画**的（`components/DirPicker.tsx`：面包屑 + 自己列目录 +
+/// 新建文件夹 + 就选这里），六个页面各挂一份。系统本来就有这个对话框，还白送
+/// 「新建文件夹」「此电脑」「网络位置」和用户自己收藏的快捷方式 —— 用户对自己的
+/// 文件管理器比对我们那个列表熟得多。
+///
+/// 用的是 `SHBrowseForFolderW`（shell32 的老 API，但**确实是系统对话框**）。
+/// 没走 `IFileOpenDialog`：那套 COM 接口在 windows-sys 里要自己搬 vtable 调用，
+/// 换来的只是新一点的皮；这里真正要解决的是「别自己画一个文件管理器」。
+///
+/// ⚠️ `BIF_NEWDIALOGSTYLE` 是最要紧的一个 flag：**没有它就没有「新建文件夹」**，
+/// 拿到的是又小又旧、不能改大小的那个框。
+///
+/// 调用方必须放进 `spawn_blocking`：它一直阻塞到用户点下确定。
+#[cfg(windows)]
+pub fn pick_folder(opts: &PickOptions) -> Result<Vec<String>, String> {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        SHBrowseForFolderW, SHGetPathFromIDListW, BFFM_INITIALIZED, BFFM_SETSELECTIONW, BIF_EDITBOX,
+        BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+    /// `SHBrowseForFolderW` 的回调。`BIF_NEWDIALOGSTYLE` 下它必须是个**真函数**
+    /// （新式对话框也是从老接口长出来的），我们只借 `BFFM_INITIALIZED` 那一刻
+    /// 把初始目录塞进去，其余一概不管、照常返回 0。
+    unsafe extern "system" fn browse_cb(hwnd: HWND, msg: u32, _lp: LPARAM, data: LPARAM) -> i32 {
+        if msg == BFFM_INITIALIZED && data != 0 {
+            // `wParam = TRUE` 表示「lParam 是一个字符串指针」（FALSE 才是 pidl）
+            SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, data);
+        }
+        0
+    }
+
+    let com_ok = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) } >= 0;
+
+    let title = to_wide(opts.title.as_deref().unwrap_or("选择文件夹"));
+    /*
+     * 初始目录：宽串的指针要当 `lParam` 交给回调，所以**必须活到对话框结束** ——
+     * 绑在函数作用域的变量上，不能是临时值（回调是在对话框里面跑的）。
+     */
+    let initial = opts.dir.as_deref().filter(|d| !d.is_empty()).map(to_wide);
+
+    // pszDisplayName：系统往里写当前选中项的名字，得给它一块真缓冲区
+    let mut shown = vec![0u16; 260];
+    let mut bi: BROWSEINFOW = unsafe { std::mem::zeroed() };
+    bi.hwndOwner = owner_hwnd();
+    bi.pszDisplayName = shown.as_mut_ptr();
+    bi.lpszTitle = title.as_ptr();
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
+    if let Some(dir) = initial.as_ref() {
+        bi.lpfn = Some(browse_cb);
+        bi.lParam = dir.as_ptr() as LPARAM;
+    }
+
+    let pidl = unsafe { SHBrowseForFolderW(&bi) };
+    let picked = if pidl.is_null() {
+        // NULL = 用户取消。这个接口**没有**扩展错误码可查，取消和失败长得一样，
+        // 所以一律当「什么都没选」，别把它变成界面上的报错。
+        None
+    } else {
+        let mut buf = vec![0u16; 32768];
+        let ok = unsafe { SHGetPathFromIDListW(pidl, buf.as_mut_ptr()) };
+        // pidl 是 shell 分配的，必须还回去
+        unsafe { CoTaskMemFree(pidl as *const core::ffi::c_void) };
+        if ok == 0 {
+            // 选中了拿不到文件系统路径的虚拟项（「网络」「此电脑」本身）
+            None
+        } else {
+            let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            Some(String::from_utf16_lossy(&buf[..end]))
+        }
+    };
+    if com_ok {
+        unsafe { CoUninitialize() };
+    }
+
+    match picked {
+        Some(p) if !p.is_empty() => Ok(vec![clean_path(Path::new(&p))]),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// 非 Windows：同 `pick_files`，让用户手填。
+#[cfg(not(windows))]
+pub fn pick_folder(_opts: &PickOptions) -> Result<Vec<String>, String> {
+    Err("这个平台还没有系统文件夹对话框，请直接把路径填进输入框".into())
+}
+
 /* ══════════════════════════════════ 可执行文件查找 ══════════════════════════════════ */
 
 /// 在 PATH 和给定目录里找一个可执行文件

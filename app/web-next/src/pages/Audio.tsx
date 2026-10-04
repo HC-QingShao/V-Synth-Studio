@@ -1,17 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  GlassDialog,
   GlassSegmentedControl,
   GlassStepper,
-  List,
-  ListRow,
-  ListSection,
-  PathBar,
   Picker,
 } from '@ttqtt/liquid-glass-react'
-import { api, type FsEntry } from '@/lib/api'
+import { api } from '@/lib/api'
 import { Button, IconButton } from '@/components/Button'
+import { Credit, Upstream } from '@/components/Credit'
 import { DirectoryInput } from '@/components/DirPicker'
+import { DropHint, useFilePick } from '@/components/FilePick'
 import { Field, TextInput } from '@/components/Field'
 import { Icon, type IconName } from '@/components/Icon'
 import { JobProgress } from '@/components/Job'
@@ -275,7 +272,6 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
   const [probe, setProbe] = useState<ProbeInfo | null>(null)
   const [probeErr, setProbeErr] = useState('')
   const [probing, setProbing] = useState(false)
-  const [picking, setPicking] = useState(false)
   const [result, setResult] = useState<{ action: string; output: string } | null>(null)
   const [runErr, setRunErr] = useState('')
   /** 提交前的参数问题（要留在字段上，不能只弹个 toast 就没了） */
@@ -382,6 +378,24 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
     setFieldErr('')
     void probeFile(path, false, true)
   }
+
+  /* 选素材：系统对话框 + 直接拖进窗口，两条入口都回**本机路径**
+     （见 `components/FilePick.tsx`）。这里既能给音频也能给视频 —— 提取音轨、
+     转格式都要用到视频，所以过滤器给 `MEDIA_EXTS`。 */
+  const { pick, dropProps, dragging, busy: dropping } = useFilePick({
+    exts: [...MEDIA_EXTS],
+    label: '音频 / 视频文件',
+    title: '选一个素材',
+    dir: settings.lastDir || defaultOutDir,
+    onPaths: (paths) => {
+      setInput(paths[0])
+      onToast(
+        paths.length > 1 ? `一次处理一个，用了 ${baseName(paths[0])}` : `已选：${baseName(paths[0])}`,
+        'ok',
+      )
+    },
+    onToast,
+  })
 
   /* 首屏：设置里存着路径就直接探一次（探测本身是只读的） */
   const booted = useRef(false)
@@ -613,7 +627,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
   /* ── 渲染 ───────────────────────────────────────────────── */
 
   return (
-    <div className="audio-layout">
+    <div className="audio-layout" {...dropProps}>
       {/* ══════════════════════ 左：素材 / 操作 / 输出 ══════════════════════ */}
       <div className="audio-col">
         {/* ffmpeg 缺失：整块说明「怎么恢复」，不引导下载 */}
@@ -668,7 +682,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
                     setInput(next)
                   }}
                 />
-                <Button icon="folder" onClick={() => setPicking(true)}>
+                <Button icon="folder" onClick={() => void pick()}>
                   浏览
                 </Button>
                 <Button
@@ -681,6 +695,8 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
                 </Button>
               </div>
             </Field>
+
+            <DropHint dragging={dragging} busy={dropping} text="音频 / 视频文件也可以直接拖进这个窗口" />
 
             {/* 探测结果 */}
             {!input ? (
@@ -979,71 +995,9 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
             </div>
           </div>
         </Panel>
-
-        {/* ── 输出 ── */}
-        <Panel>
-          <PanelHead
-            title="输出"
-            desc="不改的话写到系统下载目录"
-            extra={
-              <Button
-                size="sm"
-                variant="ghost"
-                icon="refresh"
-                onClick={() => {
-                  const d = dirName(settings.input)
-                  if (!d) {
-                    onToast('还没选输入文件', 'warn')
-                    return
-                  }
-                  patch({ outDir: d, outDirTouched: true })
-                }}
-              >
-                与输入同目录
-              </Button>
-            }
-          />
-          <div className="stack">
-            <Field
-              label="输出目录"
-              hint={
-                settings.outDirTouched && settings.outDir
-                  ? `已改过；清空后回到默认目录：${defaultOutDir || '（未读取到）'}`
-                  : `留空 = 写到这里（设置页可改）：${defaultOutDir || '（未读取到）'}`
-              }
-            >
-              <DirectoryInput
-                value={settings.outDir}
-                placeholder="留空 = 写到系统下载目录…"
-                onChange={(v) => patch({ outDir: v, outDirTouched: !!v })}
-              />
-            </Field>
-
-            <Field
-              label="输出文件名"
-              hint="按当前操作自动推断（例如 xxx.wav、xxx_+3半音.wav、xxx_x1.25.wav）；手动改过之后就不再自动覆盖，换操作会重新推断。"
-            >
-              <TextInput
-                value={settings.outName}
-                spellCheck={false}
-                placeholder="自动按操作推断，例如 xxx_+3半音.wav"
-                onChange={(e) => patch({ outName: e.target.value, nameEdited: true })}
-              />
-            </Field>
-
-            <div className="audio-out-path">
-              <span className="audio-out-path-label">将写入：</span>
-              <span className={sameAsInput ? 'audio-out-same' : ''}>{output || '（还没确定）'}</span>
-              {sameAsInput && <Chip tone="err">不能覆盖输入文件</Chip>}
-            </div>
-
-            <p className="muted">当前操作：{opName}</p>
-            {fieldErr && <Finding level="warn" title="参数还不完整">{fieldErr}</Finding>}
-          </div>
-        </Panel>
       </div>
 
-      {/* ══════════════════════ 右：执行 / 结果 / 人声分离 ══════════════════════ */}
+      {/* ══════════════════════ 右：执行 / 结果 / 输出 ══════════════════════ */}
       <div className="audio-col">
         <Panel>
           <div className="audio-run">
@@ -1151,17 +1105,86 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
           )}
         </Panel>
 
-        <SeparationLinkCard onNavigate={onNavigate} />
-        <TipsCard onNavigate={onNavigate} />
-      </div>
+        {/* ── 输出（含改输出目录）── */}
+        <Panel>
+          <PanelHead
+            title="输出"
+            desc="不改的话写到系统下载目录"
+            extra={
+              <Button
+                size="sm"
+                variant="ghost"
+                icon="refresh"
+                onClick={() => {
+                  const d = dirName(settings.input)
+                  if (!d) {
+                    onToast('还没选输入文件', 'warn')
+                    return
+                  }
+                  patch({ outDir: d, outDirTouched: true })
+                }}
+              >
+                与输入同目录
+              </Button>
+            }
+          />
+          <div className="stack">
+            <Field
+              label="输出目录"
+              hint={
+                settings.outDirTouched && settings.outDir
+                  ? `已改过；清空后回到默认目录：${defaultOutDir || '（未读取到）'}`
+                  : `留空 = 写到这里（设置页可改）：${defaultOutDir || '（未读取到）'}`
+              }
+            >
+              <DirectoryInput
+                value={settings.outDir}
+                placeholder="留空 = 写到系统下载目录…"
+                title="选输出目录"
+                onToast={onToast}
+                onChange={(v) => patch({ outDir: v, outDirTouched: !!v })}
+              />
+            </Field>
 
-      {/* ── 本机文件选择器（选文件，不是选目录）── */}
-      <MediaPicker
-        open={picking}
-        onOpenChange={setPicking}
-        initialDir={dirName(settings.input) || settings.lastDir || defaultOutDir}
-        onPick={setInput}
-      />
+            <Field
+              label="输出文件名"
+              hint="按当前操作自动推断（例如 xxx.wav、xxx_+3半音.wav、xxx_x1.25.wav）；手动改过之后就不再自动覆盖，换操作会重新推断。"
+            >
+              <TextInput
+                value={settings.outName}
+                spellCheck={false}
+                placeholder="自动按操作推断，例如 xxx_+3半音.wav"
+                onChange={(e) => patch({ outName: e.target.value, nameEdited: true })}
+              />
+            </Field>
+
+            <div className="audio-out-path">
+              <span className="audio-out-path-label">将写入：</span>
+              <span className={sameAsInput ? 'audio-out-same' : ''}>{output || '（还没确定）'}</span>
+              {sameAsInput && <Chip tone="err">不能覆盖输入文件</Chip>}
+            </div>
+
+            <p className="muted">当前操作：{opName}</p>
+            {fieldErr && <Finding level="warn" title="参数还不完整">{fieldErr}</Finding>}
+          </div>
+        </Panel>
+
+        <TipsCard onNavigate={onNavigate} />
+
+        {/* 许可与出处：这一页的活全是随包的 ffmpeg 干的 */}
+        <Credit
+          desc="这一页的处理全部交给随包的 ffmpeg，许可与出处写在这里"
+          items={[
+            { label: '代码', value: 'GPL v3', sub: 'FFmpeg 9.0.2（gyan.dev essentials）' },
+            { label: '用法', value: '独立进程', sub: '不链接、不修改它的代码' },
+          ]}
+        >
+          转格式、变调变速、裁剪、响度与试听波形都交给随包的{' '}
+          <Upstream href="https://ffmpeg.org/">ffmpeg</Upstream>
+          ，本程序只负责拼参数、读它的输出。它是 GPL v3 的构建（gyan.dev essentials）：分发本程序时按 GPL v3 附上许可全文并给出源码地址 ——
+          源码在 ffmpeg.org/download.html，构建脚本在 gyan.dev/ffmpeg/builds。
+        </Credit>
+      </div>
     </div>
   )
 }
@@ -1897,37 +1920,17 @@ function tickStep(viewSpan: number, width: number): number {
   return 3600
 }
 
-/* ══════════════════════════════════════════════════════ 音轨分离入口 / 流程 ══ */
+/* ══════════════════════════════════════════════════════ 顺手流程 ══ */
 
 /**
- * 分离搬到独立页了（侧栏「音轨分离」）—— 这里只留一条去那儿的入口。
+ * 分离搬到独立页了（侧栏「音轨分离」）—— 右栏不再摆入口卡，
+ * 需要去那儿的用户在「顺手流程」里点内链。
  *
  * 为什么搬走：分离已经不是一个「顺带在这里做一下」的功能了。
  * 它现在有在线（MVSEP）与离线（内嵌引擎，要下 730 MB 模型、跑几十分钟、
  * 占 5 GB 内存）两条差异极大的路，状态也多（服务起没起、模型下没下、
  * 任务跑到哪一轨）。塞在音频页右栏一张卡里，用户根本看不出该点哪个。
  */
-function SeparationLinkCard({ onNavigate }: { onNavigate: (id: string) => void }) {
-  return (
-    <Panel>
-      <PanelHead
-        title="音轨分离"
-        desc="已独立成一页：在线 MVSEP 与离线内嵌引擎"
-        extra={<Chip tone="accent">已搬家</Chip>}
-      />
-      <p className="hint">
-        把人声、伴奏、鼓、贝斯等拆开，现在都在「音轨分离」页：离线那条会拿本机的
-        CPU / 显卡跑，音频不出本机；在线那条指 MVSEP，要上传文件但效果更好。
-      </p>
-      <div className="btn-row">
-        <Button variant="primary" icon="layers" onClick={() => onNavigate('svsep')}>
-          去音轨分离
-        </Button>
-      </div>
-    </Panel>
-  )
-}
-
 function TipsCard({ onNavigate }: { onNavigate: (id: string) => void }) {
   return (
     <Panel>
@@ -1951,138 +1954,6 @@ function TipsCard({ onNavigate }: { onNavigate: (id: string) => void }) {
         </p>
       </div>
     </Panel>
-  )
-}
-
-/* ══════════════════════════════════════════════════════ 本机文件选择器 ══ */
-
-/**
- * 挑一个音频 / 视频文件 —— 旧页面的 `pickDirectory({ mode: 'file', exts })`。
- *
- * `components/DirPicker.tsx` 只选目录（后端 `files=0`），所以这里用同一套库组件
- * （`GlassDialog` + `PathBar` + `List`）再拼一个选文件的：`api.fsList(dir, { files: true, exts })`。
- * 样式复用 `index.css` 里那组 `.dir-*`（目录选择器已经在用的类），不再另写一套
- * —— 和 `pages/Convert.tsx` 的 `FilePicker` 是同一个做法。
- */
-function MediaPicker({
-  open,
-  onOpenChange,
-  onPick,
-  initialDir,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onPick: (path: string) => void
-  initialDir: string
-}) {
-  const [cwd, setCwd] = useState('')
-  const [entries, setEntries] = useState<FsEntry[]>([])
-  const [roots, setRoots] = useState<{ name: string; path: string }[]>([])
-  const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  const load = async (path: string) => {
-    setBusy(true)
-    setErr(null)
-    try {
-      const data = await api.fsList(path, { files: true, exts: [...MEDIA_EXTS] })
-      setCwd(data.path)
-      setEntries(data.entries)
-    } catch (e) {
-      setErr(errText(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const started = useRef(false)
-  useEffect(() => {
-    if (!open) {
-      started.current = false
-      return
-    }
-    if (started.current) return
-    started.current = true
-    api
-      .fsRoots()
-      .then((d) => {
-        setRoots(d.roots)
-        void load(initialDir)
-      })
-      .catch((e: unknown) => setErr(errText(e)))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
-
-  const segments = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean)
-  const dirs = entries.filter((e) => e.dir)
-  const files = entries.filter((e) => !e.dir)
-
-  return (
-    <GlassDialog
-      open={open}
-      onOpenChange={onOpenChange}
-      title="选择音频 / 视频文件"
-      description="点进子目录，然后点一个音频或视频文件"
-      className="dir-dialog"
-    >
-      <div className="dir-body">
-        <PathBar
-          aria-label="所在路径"
-          items={[
-            { key: 'root', label: '此电脑', onSelect: () => void load('') },
-            ...segments.map((seg, i) => ({
-              key: seg + i,
-              label: seg,
-              /* 最后一级不给 onSelect —— 当前项不是链接（和 DirPicker 同一条规矩） */
-              onSelect: i === segments.length - 1 ? undefined : () => void load(segments.slice(0, i + 1).join('\\')),
-            })),
-          ]}
-        />
-
-        {roots.length > 0 && (
-          <List className="dir-roots">
-            {roots.map((r) => (
-              <ListRow key={r.path} label={r.name} secondaryLabel={r.path} onSelect={() => void load(r.path)} />
-            ))}
-          </List>
-        )}
-
-        <List>
-          <ListSection header={busy ? '读取中…' : `${dirs.length} 个子目录`}>
-            {dirs.map((e) => (
-              <ListRow key={e.path} label={e.name} disclosure onSelect={() => void load(e.path)} />
-            ))}
-            {!busy && dirs.length === 0 && <ListRow label="（没有子目录）" disabled />}
-          </ListSection>
-          <ListSection header={`${files.length} 个音频 / 视频文件`}>
-            {files.map((e) => (
-              <ListRow
-                key={e.path}
-                label={e.name}
-                secondaryLabel={e.size ? formatBytes(e.size) : undefined}
-                onSelect={() => {
-                  onPick(e.path)
-                  onOpenChange(false)
-                }}
-              />
-            ))}
-            {!busy && files.length === 0 && (
-              <ListRow label="（这个目录里没有音频 / 视频文件）" disabled />
-            )}
-          </ListSection>
-        </List>
-
-        {err && <p className="finding-text">{err}</p>}
-        <p className="dir-note">当前：{cwd || '（未选择）'}</p>
-      </div>
-
-      <div className="dir-actions">
-        <span className="spacer" />
-        <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>
-          取消
-        </Button>
-      </div>
-    </GlassDialog>
   )
 }
 

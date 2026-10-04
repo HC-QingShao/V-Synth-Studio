@@ -103,6 +103,40 @@ async function postForm<T>(path: string, form: FormData, timeout = 300000): Prom
   }
 }
 
+/**
+ * 发一段**裸字节**（就是一个 `File` / `Blob`），回 JSON。
+ *
+ * 和 `postForm` 是一对孪生兄弟，只是壳更薄：拖进来的文件要原样交给后端
+ * （`/api/fs/upload` 只搬字节，不看格式），套 multipart 只是白加一层解析。
+ * 同样**不要手工设 `Content-Type`**，浏览器会按 `File` 自己的类型写好。
+ */
+async function postBinary<T>(path: string, file: File | Blob, timeout = 600000): Promise<T> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout)
+  try {
+    const res = await fetch(path, { method: 'POST', body: file, signal: controller.signal })
+    const text = await res.text()
+    let data: (T & { ok?: boolean; error?: string; code?: string }) | null
+    try {
+      data = text ? JSON.parse(text) : ({} as T)
+    } catch {
+      throw new Error(`服务端返回异常内容（HTTP ${res.status}）`)
+    }
+    if (!res.ok || data?.ok === false) {
+      const err = new Error(data?.error || `请求失败（HTTP ${res.status}）`) as ApiError
+      err.code = data?.code
+      err.status = res.status
+      throw err
+    }
+    return data as T
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw new Error('传送超时，文件可能太大或服务没响应')
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export const api = {
   /* ── 基础 ─────────────────────────────────────────────── */
   health: () => request<HealthInfo>('/api/health', { timeout: 5000 }),
@@ -286,7 +320,12 @@ export const api = {
    *
    * ⚠️ 字段是 **`name`**（不是 `label`）—— 冻结夹具 `fs-roots.json` 里就是
    * `{ name, path, type, parent? }`。第一版照旧界面的叫法写成 `label`，
-   * 结果目录选择器的「常用位置」一片空白（`undefined` 渲染成空字符串，不报错）。
+   * 结果「常用位置」一片空白（`undefined` 渲染成空字符串，不报错）。
+   *
+   * 界面从「自己画目录树」改成系统对话框之后，`fsRoots` / `fsList` / `fsMkdir`
+   * 三个已经**没有调用方**了（选目录走 `/api/fs/pick`，系统对话框里自带常用位置
+   * 与「新建文件夹」）。后端接口照旧留着（冻结夹具与对照测试还打它们），
+   * 所以这三个封装也留着 —— 哪天要在页面里列目录，别再重画一遍树。
    */
   fsRoots: () => request<{ roots: { name: string; path: string; type?: string; parent?: string }[] }>('/api/fs/roots'),
   /**
@@ -294,8 +333,8 @@ export const api = {
    *
    * ⚠️ 后端回的是 **`{ dirs: [...], files: [...] }`**（旧界面读的就是这两个
    * 字段，冻结夹具 `fs-list-c.json` 也是这个形状），这里归一成 `entries`（靠 `FsEntry.dir` 区分）。
-   * **不做这一步 `components/DirPicker.tsx` 就永远是空列表** —— 它读的是 `data.entries`，
-   * 后端从来不发这个字段，于是目录选择器只显示「（没有子目录）」。
+   * 少这一步读到的就是空列表：老目录树读的是 `data.entries`，
+   * 而后端从来不发这个字段，于是只显示「（没有子目录）」。
    */
   fsList: (path: string, opts: { exts?: string[]; files?: boolean } = {}) =>
     get<FsListRaw>('/api/fs/list', {
@@ -308,6 +347,34 @@ export const api = {
   fsMkdir: (path: string) => post<{ path: string }>('/api/fs/mkdir', { path }),
   fsReveal: (path: string, select = true) => post<{ ok: true }>('/api/fs/reveal', { path, select }),
   fsOpen: (payload: { path?: string; url?: string }) => post<{ ok: true }>('/api/fs/open', payload),
+  /**
+   * 弹**系统**的「打开」文件对话框，回选中的绝对路径。
+   *
+   * ⚠️ 这个请求会**一直挂着**，直到用户在对话框上点下确定或取消（后端在
+   * `spawn_blocking` 里等窗口消息），所以超时给到 10 分钟 —— 别用默认的 120 秒：
+   * 用户在对话框里翻了半天目录，回来只会看到一句「请求超时」。
+   *
+   * 取消**不是错误**：回的是 `files: []`。
+   */
+  fsPick: (opts: { exts?: string[]; label?: string; title?: string; dir?: string; multi?: boolean; folder?: boolean } = {}) =>
+    post<{ files: string[] }>('/api/fs/pick', opts, 600000),
+  /**
+   * 把**拖进来的文件原文**交上去，换回一个本机路径（后端落到临时目录）。
+   *
+   * 为什么不是 `FormData`：这里只搬一个文件，`fetch` 的 body 直接给 `File`
+   * 就是最省事的一条路 —— 不设 `Content-Type`（浏览器会带上正确的类型），
+   * 不套 multipart 的壳，后端也就不用解 multipart（它读的是裸 body 流）。
+   * 和 `postForm` 一样**不能**手工设 `Content-Type`：设成
+   * `application/octet-stream` 会把自己 `File` 的类型信息盖掉，而设成别的
+   * 更糟 —— 后端只看字节。
+   *
+   * 超时给得比 `postForm` 还宽：拖进来一个几百 MB 的 wav 是常事，慢的是磁盘。
+   */
+  fsUpload: (file: File, timeout = 600000) => postBinary<{ path: string; name: string; bytes: number }>(
+    `/api/fs/upload?name=${encodeURIComponent(file.name)}`,
+    file,
+    timeout,
+  ),
 
   /* ── 工程转换 ─────────────────────────────────────────── */
   /**
@@ -340,6 +407,13 @@ export const api = {
   parseVideo: (payload: { url: string; cookie?: string }) =>
     post<VideoParse>('/api/video/parse', payload, 180000),
   downloadVideo: (payload: Record<string, unknown>) => post<{ jobId: string }>('/api/video/download', payload),
+
+  /* ── B 站扫码登录（Cookie 后端落盘，回包里永远没有 Cookie）── */
+  biliQrGenerate: () =>
+    post<{ url: string; qrcodeKey: string }>('/api/bili/qr/generate', {}, 30000),
+  biliQrPoll: (qrcodeKey: string) =>
+    post<{ code: number; message: string; loggedIn: boolean }>('/api/bili/qr/poll', { qrcodeKey }, 30000),
+  biliLogout: () => post<{ loggedOut: boolean }>('/api/bili/logout', {}),
 
   /* ── 音频 ─────────────────────────────────────────────── */
   audioProbe: (input: string) => post<AudioProbe>('/api/audio/probe', { input }),
@@ -571,6 +645,11 @@ export interface VideoFormat {
   acodec?: string
   filesize?: number
   isVideo?: boolean
+  /**
+   * 直链。**只给预览用**（页面里的 `<video>` 要它），下载一律走后端、不用这个 URL。
+   * B 站那条路（dash/durl）的直链在 `streams.video[] / streams.audio[] / streams.streams[]` 里。
+   */
+  url?: string
 }
 interface AudioProbe {
   ok: true
@@ -961,6 +1040,17 @@ export interface MidiStatus {
  */
 export const midiFileUrl = (taskId: string, filename: string) =>
   `/api/midi/task/${encodeURIComponent(taskId)}/file/${encodeURIComponent(filename)}`
+
+/**
+ * 预览用的媒体代理地址。
+ *
+ * 为什么不直接把 CDN 直链塞进 `<video src>`：B 站 CDN 看 `Referer`，
+ * 浏览器直连在部分节点上回 403（顺带还有 CORS）；走后端代下来就没有这两个问题。
+ * 后端只放白名单域名（见 `app/desktop/src/server/media.rs` 的 `PROXY_HOSTS`），
+ * 并且原样转发 `Range`，所以拖进度条照样能用。
+ */
+export const mediaProxyUrl = (url: string, src: 'bilibili' | 'ytdlp' = 'bilibili') =>
+  `/api/media/proxy?src=${src}&u=${encodeURIComponent(url)}`
 
 /**
  * 语言 id。**照官方 `config.json` 的 `languages` 映射**，不是自己编的

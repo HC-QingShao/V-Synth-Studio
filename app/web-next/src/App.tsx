@@ -128,9 +128,20 @@ export default function App() {
   }, [refreshState])
 
   /* 首次 /api/state 落定（成功或失败）就揭开启动画面 —— 失败也要揭，
-     否则用户看到的是一个永远转圈的遮罩，而不是「连不上本地服务」那块提示。 */
+     否则用户看到的是一个永远转圈的遮罩，而不是「连不上本地服务」那块提示。
+
+     ⚠️ **但不能死等它**：`/api/state` 要在后端探测外部工具（真的去 spawn
+     `yt-dlp --version` / `python --version` + 逐段扫 PATH），机器一忙实测能拖到
+     4~8 秒（连跑还会越来越慢），遮罩就一直停在「正在载入工作台…」——用户看到的就是
+     「卡死」。所以 1.2 秒还没回来就先揭壳：页面先出来，数据到了再填进去
+     （每个页面自己都有 `refreshing && !state` 的占位分支，不会白屏）。 */
   useEffect(() => {
-    if (!refreshing) hideBoot()
+    if (!refreshing) {
+      hideBoot()
+      return
+    }
+    const t = window.setTimeout(hideBoot, 1200)
+    return () => window.clearTimeout(t)
   }, [refreshing])
 
   const navigate = useCallback((id: string) => {

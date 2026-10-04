@@ -40,6 +40,10 @@
   display: flex;
   align-items: center;
   gap: var(--lg-space-3);
+  /* `<button>` 的 UA 默认就是 border-box，这行是写明意图：与 index.css 的 `.input` 同一个
+     坑 —— 玻璃档 1~3 的面板不是 `.lg-root`，拿不到库的 `box-sizing: border-box`；
+     哪天这个元素换成 div 就会立刻变宽 26px。 */
+  box-sizing: border-box;
   width: 100%;
   min-height: 46px;
   padding: var(--lg-space-2) var(--lg-space-3);

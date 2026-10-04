@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { GlassDialog, GlassSegmentedControl, List, ListRow, ListSection, PathBar } from '@ttqtt/liquid-glass-react'
+import { GlassSegmentedControl } from '@ttqtt/liquid-glass-react'
 import {
   api,
   midiFileUrl,
   MIDI_LANGUAGES,
-  type FsEntry,
   type MidiDeviceMode,
   type MidiNote,
   type MidiStatus,
 } from '@/lib/api'
 import { Button } from '@/components/Button'
+import { DropHint, useFilePick } from '@/components/FilePick'
 import { Chip, Finding, Panel, PanelHead, Stat } from '@/components/Panel'
 import { Field, TextInput } from '@/components/Field'
 import { DirectoryInput } from '@/components/DirPicker'
@@ -124,146 +124,6 @@ function midiName(n: number): string {
   return `${NAMES[((n % 12) + 12) % 12]}${Math.floor(n / 12) - 1}`
 }
 
-/* ══════════════════════════════════════════════════ 选音频文件 ══ */
-
-/**
- * 挑一个音频文件。
- *
- * `components/DirPicker.tsx` 只选目录（后端 `files=0`），所以这里用同一套库组件
- * （`GlassDialog` + `PathBar` + `List`）再拼一个选文件的 —— 和 `pages/Audio.tsx`
- * 的 `MediaPicker`、`pages/Convert.tsx` 的 `FilePicker` 是同一个做法，
- * 样式复用 `index.css` 里那组 `.dir-*`。
- *
- * 为什么不复用 `Audio.tsx` 里那个：它在文件内部、没有 `export`，导出它会让两个
- * 页面之间多一条没必要的依赖；这段本身只有几十行。
- */
-function AudioPicker({
-  open,
-  onOpenChange,
-  onPick,
-  initialDir,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onPick: (path: string) => void
-  initialDir: string
-}) {
-  const [cwd, setCwd] = useState('')
-  const [entries, setEntries] = useState<FsEntry[]>([])
-  const [roots, setRoots] = useState<{ name: string; path: string }[]>([])
-  const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  const load = useCallback(async (path: string) => {
-    setBusy(true)
-    setErr(null)
-    try {
-      const data = await api.fsList(path, { files: true, exts: AUDIO_EXTS })
-      setCwd(data.path)
-      setEntries(data.entries)
-    } catch (e) {
-      setErr(errText(e))
-    } finally {
-      setBusy(false)
-    }
-  }, [])
-
-  const started = useRef(false)
-  useEffect(() => {
-    if (!open) {
-      started.current = false
-      return
-    }
-    if (started.current) return
-    started.current = true
-    api
-      .fsRoots()
-      .then((d) => {
-        setRoots(d.roots)
-        void load(initialDir)
-      })
-      .catch((e: unknown) => setErr(errText(e)))
-  }, [open, initialDir, load])
-
-  const segments = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean)
-  const dirs = entries.filter((e) => e.dir)
-  const files = entries.filter((e) => !e.dir)
-
-  return (
-    <GlassDialog
-      open={open}
-      onOpenChange={onOpenChange}
-      title="选择音频"
-      description="点进子目录，然后点一个音频文件"
-      className="dir-dialog"
-    >
-      <div className="dir-body">
-        <PathBar
-          aria-label="所在路径"
-          items={[
-            { key: 'root', label: '此电脑', onSelect: () => void load('') },
-            ...segments.map((seg, i) => ({
-              key: seg + i,
-              label: seg,
-              /* 最后一级不给 onSelect —— 当前项不是链接（和 DirPicker 同一条规矩） */
-              onSelect:
-                i === segments.length - 1
-                  ? undefined
-                  : () => void load(segments.slice(0, i + 1).join('\\')),
-            })),
-          ]}
-        />
-
-        {roots.length > 0 && (
-          <List className="dir-roots">
-            {roots.map((r) => (
-              <ListRow
-                key={r.path}
-                label={r.name}
-                secondaryLabel={r.path}
-                onSelect={() => void load(r.path)}
-              />
-            ))}
-          </List>
-        )}
-
-        <List>
-          <ListSection header={busy ? '读取中…' : `${dirs.length} 个子目录`}>
-            {dirs.map((e) => (
-              <ListRow key={e.path} label={e.name} disclosure onSelect={() => void load(e.path)} />
-            ))}
-            {!busy && dirs.length === 0 && <ListRow label="（没有子目录）" disabled />}
-          </ListSection>
-          <ListSection header={`${files.length} 个音频文件`}>
-            {files.map((e) => (
-              <ListRow
-                key={e.path}
-                label={e.name}
-                secondaryLabel={e.size ? formatBytes(e.size) : undefined}
-                onSelect={() => {
-                  onPick(e.path)
-                  onOpenChange(false)
-                }}
-              />
-            ))}
-            {!busy && files.length === 0 && <ListRow label="（这个目录里没有音频文件）" disabled />}
-          </ListSection>
-        </List>
-
-        {err && <p className="finding-text">{err}</p>}
-        <p className="dir-note">当前：{cwd || '（未选择）'}</p>
-      </div>
-
-      <div className="dir-actions">
-        <span className="spacer" />
-        <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>
-          取消
-        </Button>
-      </div>
-    </GlassDialog>
-  )
-}
-
 /* ══════════════════════════════════════════════════ 钢琴卷帘 ══ */
 
 /**
@@ -345,10 +205,28 @@ export function Midi({ onToast, onNavigate }: PageProps) {
   /** 推理方式。真值在盘上（`<可写>/midi/midi_settings.json`），这里只是镜像。 */
   const [device, setDevice] = useState<MidiDeviceMode>('auto')
 
-  const [picker, setPicker] = useState(false)
   const [busy, setBusy] = useState(false)
+  /** 危险区第一下：只立旗标，第二下才真删（与音轨分离页同一套）。 */
+  const [armDelete, setArmDelete] = useState(false)
   /** 输入文件的时长（秒）。拿 `audioProbe` 探；探不到就是 0，那时不给估时。 */
   const [duration, setDuration] = useState(0)
+
+  /* 选文件：系统对话框 + 把文件直接拖进这个窗口，两条入口都回**本机路径**
+     （拖进来的那个先由后端落成临时文件换回路径，见 `components/FilePick.tsx`）。
+     这一页一次只扒一个文件，所以多给了也只取第一个。 */
+  const { pick, dropProps, dragging, busy: dropping } = useFilePick({
+    exts: AUDIO_EXTS,
+    label: '音频文件',
+    title: '选一段干声',
+    dir: input ? dirName(input) : undefined,
+    onPaths: (paths) => {
+      setInput(paths[0])
+      if (paths.length > 1) {
+        onToast(`一次只转一个，用了 ${baseName(paths[0])}`, 'info')
+      }
+    },
+    onToast,
+  })
 
   const { job, start, stop } = useJob()
   /** 正在跑的那次任务 id（提交后记下，用来调 cancel 与拼结果下载地址） */
@@ -486,17 +364,14 @@ export function Midi({ onToast, onNavigate }: PageProps) {
     }
   }
 
+  /**
+   * 删依赖：**两段式**，和音轨分离页（`Svsep.tsx`）用同一套危险区。
+   *
+   * 为什么不用 `window.confirm`：这个操作不可逆、删完要重下几百 MB，
+   * 一个系统弹窗点快了就没了；两段式把「要删什么、删完怎样」写在页面上，
+   * 用户能看清再点第二下。两个页面长得一样，才不会一边一个样。
+   */
   const doDeleteDeps = async () => {
-    // 兜底只在「状态还没拉回来」时用得上，所以不写死体积（写死会过期）。
-    const mb = st ? formatBytes(st.models.zipBytes) : '整个模型包'
-    /* ⚠️ 这份提示只为安装版那种「引擎在用随包那份、删除删不到它」的情况准备。
-       `local`（绿色版两层同一路径）**不能**说这句 —— 那儿删掉就真没了、按钮会回来。
-       判据是 `origin`，别按路径尾巴猜（三种情况的路径都以 `\game\models` 结尾）。 */
-    const warn =
-      st?.models.origin === 'bundled'
-        ? '\n\n注意：现在引擎用的是「随包自带」那份模型，这个按钮只清下载物、\n不会删它，所以删完状态还是「就绪」。'
-        : ''
-    if (!window.confirm(`删掉下好的模型与动态库？下次要用得重新下 ${mb}。${warn}`)) return
     setBusy(true)
     try {
       const r = await api.midiDeleteDeps()
@@ -505,6 +380,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
       // 不会出现 —— 不说清原因，用户看到的就是「点了删除没反应」。
       // （绿色版两层同路径，这句 `note` 是空串，那时删掉就是真没了。）
       onToast(`已删掉 ${r.files} 个文件（${formatBytes(r.bytes)}）。${r.note}`, 'ok')
+      setArmDelete(false)
       void refresh()
     } catch (e) {
       onToast(errText(e), 'err')
@@ -610,7 +486,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
 
   /* ── 渲染 ─────────────────────────────────────────────── */
   return (
-    <div className="page-body midi-layout">
+    <div className="page-body midi-layout" {...dropProps}>
       {/* ══════════════ 左栏：素材 + 参数 ══════════════ */}
       <div className="midi-col">
         <Panel>
@@ -628,7 +504,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
             spellCheck={false}
           />
           <div className="btn-row">
-            <Button icon="folder" onClick={() => setPicker(true)}>
+            <Button icon="folder" onClick={() => void pick()}>
               选音频文件
             </Button>
             {input && (
@@ -637,6 +513,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
               </Button>
             )}
           </div>
+          <DropHint dragging={dragging} busy={dropping} text="音频文件也可以直接拖进这个窗口" />
           {input ? (
             <p className="hint">
               {baseName(input)}
@@ -760,6 +637,8 @@ export function Midi({ onToast, onNavigate }: PageProps) {
             value={outDir}
             onChange={rememberOutDir}
             placeholder="留空 = 音频同目录\midi"
+            title="选 MIDI 写到哪个目录"
+            onToast={onToast}
           />
           <div className="btn-row">
             <Button
@@ -927,6 +806,79 @@ export function Midi({ onToast, onNavigate }: PageProps) {
               嫌慢就把「去噪步数」调小。
             </p>
           )}
+
+          {/* 删依赖：两段式危险区，和音轨分离页（`Svsep.tsx`）同一套长得一样。
+              刻意不做条件渲染 —— 依赖还没下全的时候也该留着这个入口，
+              用户可能想把之前下了一半的东西清掉。 */}
+          <div className="midi-danger">
+            <div className="midi-danger-head">删除全部依赖</div>
+            {/* ⚠️ 这一条只在**安装版**那种「两层是两个不同目录、引擎在用随包那份」
+                的情况下才该出现：那时点删除删不到引擎正在用的模型，状态还是「就绪」、
+                下载按钮不会回来 —— 不说清用户只会以为按钮坏了。
+                ⛔ 判据只能是后端回的 `models.origin`。别在前端按 `dir` 的尾巴猜：
+                三种情况（downloaded / bundled / local）的路径都以 `\game\models` 结尾。
+                `local` = 绿色版两层同一路径，没有第二层可回落，所以那边不用说话。 */}
+            {st?.models.ready && st.models.origin === 'bundled' && (
+              <p className="hint">
+                引擎现在用的是「随包自带」那一层 <code>{st.models.dir}</code>，不是下载来的。
+                下面的删除只清可写目录里的下载物，
+                <strong>不动随包的安装内容</strong>，所以删完状态还是「就绪」、
+                下载按钮也不会出现（要试下载流程得手工把那一层挪走）。
+              </p>
+            )}
+            {armDelete ? (
+              <>
+                <p className="hint">
+                  要删掉：GAME 模型
+                  {st ? `（解压后 ${formatBytes(st.models.extractBytes)}）` : ''}
+                  {st && !st.runtime.borrowed
+                    ? `、ONNX Runtime 动态库（${formatBytes(st.runtime.dllBytes)}）`
+                    : ''}
+                  。删完就扒不了谱了，得重新下
+                  {st
+                    ? ` ${formatBytes(
+                        st.models.zipBytes + (st.runtime.borrowed ? 0 : st.runtime.zipBytes),
+                      )}`
+                    : '几百 MB'}
+                  。已经转出来的 MIDI <strong>不会被删</strong>。
+                </p>
+                <div className="btn-row">
+                  <Button
+                    icon="trash"
+                    disabled={busy || !!dl?.active}
+                    onClick={() => void doDeleteDeps()}
+                  >
+                    确认删除（要重下{st ? formatBytes(st.models.zipBytes) : '几百 MB'}）
+                  </Button>
+                  <Button variant="ghost" onClick={() => setArmDelete(false)}>
+                    算了
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="hint">
+                  下好的模型与动态库占了
+                  {st
+                    ? ` 约 ${formatBytes(
+                        st.models.extractBytes + (st.runtime.borrowed ? 0 : st.runtime.dllBytes),
+                      )}`
+                    : ' 几百 MB'}
+                  。用不上了可以删掉腾地方，什么时候想用再下回来。
+                </p>
+                <div className="btn-row">
+                  <Button
+                    variant="ghost"
+                    icon="trash"
+                    disabled={busy || !!dl?.active}
+                    onClick={() => setArmDelete(true)}
+                  >
+                    删除全部依赖
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
         </Panel>
 
         {(running || job) && (
@@ -1046,49 +998,14 @@ export function Midi({ onToast, onNavigate }: PageProps) {
             ）。推理、解码、切片与 MIDI 写出全部在本进程里用 Rust 实现，没有 Python 子进程。
           </p>
           {st && (
-            <>
-              {/* ⚠️ 这一条只在**安装版**那种「两层是两个不同目录、引擎在用随包那份」
-                  的情况下才该出现：那时点「删掉下好的依赖」删不到引擎正在用的模型，
-                  状态还是「就绪」、下载按钮不会回来 —— 不说清用户只会以为按钮坏了。
-                  ⛔ 判据只能是后端回的 `models.origin`。别在前端按 `dir` 的尾巴猜：
-                  三种情况（downloaded / bundled / local）的路径都以 `\game\models` 结尾。
-                  `local` = 绿色版两层同一路径，没有第二层可回落，所以那边不用说话。 */}
-              {st.models.ready && st.models.origin === 'bundled' && (
-                <p className="hint">
-                  引擎现在用的是「随包自带」那一层 <code>{st.models.dir}</code>，不是下载来的。
-                  「删掉下好的依赖」只清可写目录里的下载物，
-                  <strong>不动随包的安装内容</strong>，所以删完状态还是「就绪」、
-                  下载按钮也不会出现（要试下载流程得手工把那一层挪走）。
-                </p>
-              )}
-              <div className="btn-row">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  icon="trash"
-                  disabled={busy || !!dl?.active}
-                  onClick={() => void doDeleteDeps()}
-                >
-                  删掉下好的依赖
-                </Button>
-                <Button size="sm" variant="ghost" icon="refresh" onClick={() => void refresh()}>
-                  刷新状态
-                </Button>
-              </div>
-            </>
+            <div className="btn-row">
+              <Button size="sm" variant="ghost" icon="refresh" onClick={() => void refresh()}>
+                刷新状态
+              </Button>
+            </div>
           )}
         </Panel>
       </div>
-
-      <AudioPicker
-        open={picker}
-        onOpenChange={setPicker}
-        initialDir={input ? dirName(input) : ''}
-        onPick={(p) => {
-          setInput(p)
-          onToast(`已选：${baseName(p)}`, 'ok')
-        }}
-      />
     </div>
   )
 }

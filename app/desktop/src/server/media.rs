@@ -11,7 +11,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::body::Body;
+use axum::extract::{Query, State};
+use axum::http::{header, HeaderMap};
+use axum::response::Response;
 use axum::Json;
 use serde_json::{json, Map, Value};
 
@@ -213,7 +216,9 @@ pub async fn video_parse(
         }
         out.insert("streams".into(), streams);
         out.insert("hasCookie".into(), json!(client.has_login()));
-        return Ok(Json(ok(Value::Object(out))));
+        let value = Value::Object(out);
+        remember_hosts(&value);
+        return Ok(Json(ok(value)));
     }
 
     // 其它站点交给 yt-dlp
@@ -224,11 +229,13 @@ pub async fn video_parse(
     let info = ytdlp::inspect(&st.tools_dir(), &raw, proxy, None)
         .await
         .map_err(ApiError::internal)?;
-    Ok(Json(ok(json!({
+    let value = json!({
         "source": "ytdlp",
         "kind": "video",
         "info": info,
-    }))))
+    });
+    remember_hosts(&value);
+    Ok(Json(ok(value)))
 }
 
 /* ══════════════════════════════════ POST /api/video/download ══════════════════════════════════ */
@@ -966,6 +973,169 @@ pub async fn audio_probe(
     }
     let info = audio::probe_media(&st.tools_dir(), &input).await;
     Ok(Json(ok(json!({ "info": info }))))
+}
+
+/* ══════════════════════════════════ GET /api/media/proxy ══════════════════════════════════ */
+
+/// 预览代理允许转发的域名后缀（**白名单**，不是黑名单）。
+///
+/// 为什么需要代理：B 站 CDN 看 `Referer`，浏览器直接连它在部分节点上回 403，
+/// 顺带也绕开 CORS。但这个接口是「原样转发」，不设限就等于在本机开了个开放代理
+/// （`u=http://192.168.x.x` 都能被页面探到），所以只放这些音视频 CDN。
+///
+/// 匹配规则：`host == 后缀` 或以 `.后缀` 结尾。
+const PROXY_HOSTS: [&str; 12] = [
+    // B 站：upos-*.bilivideo.com / cn-*.bilivideo.cn / *.mcdn.bilivideo.cn / *.szbdyd.com
+    "bilivideo.com",
+    "bilivideo.cn",
+    "bilivideo.net",
+    "bilivideo.com.cn",
+    "szbdyd.com",
+    "hdslb.com",
+    "bilibili.com",
+    "b23.tv",
+    "akamaized.net",
+    "biliapi.net",
+    // yt-dlp 常见来源：YouTube 视频 CDN 与封面
+    "googlevideo.com",
+    "ytimg.com",
+];
+
+#[derive(serde::Deserialize)]
+pub struct ProxyQuery {
+    /// 要转发的完整直链（前端 `encodeURIComponent` 过）
+    pub u: String,
+    /// `bilibili`（默认）或 `ytdlp` —— 决定补哪个 `Referer`
+    #[serde(default)]
+    pub src: String,
+}
+
+/// 本次运行里「刚解析出来的直链用过的主机」。
+///
+/// 为什么光有 `PROXY_HOSTS` 不够：B 站的直链会落在 PCDN 域名上，每个视频一个
+/// （实测 `*.edge.mountaintoys.cn`），yt-dlp 那边更是任何站点都可能有自己的 CDN ——
+/// 写死后缀永远追不上。而「本程序自己刚解析出来的地址」天然可信：
+/// 只有用户自己解析过的那些主机才会被记进来，别的网页塞一个 `u=` 过来照样被拦。
+static SEEN_HOSTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+/// 记满这么多主机就清空重来（正常用不到，防的是长跑会话里无限攒）
+const SEEN_HOSTS_MAX: usize = 512;
+
+fn seen_hosts() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    SEEN_HOSTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 把一份解析结果里所有 http(s) 字符串的主机记下来。
+///
+/// 递归扫所有字符串、**不按字段名过滤**：直链会出现在 `streams.video[].url`、
+/// `backupUrls[]`、`formats[].url`、`durl.streams[].url` 这些完全不同的位置，
+/// 按字段名挑很容易漏一条。扫到的封面地址之类也无害（同一个 CDN）。
+fn remember_hosts(v: &Value) {
+    let mut found: Vec<String> = Vec::new();
+    collect_hosts(v, &mut found);
+    if found.is_empty() {
+        return;
+    }
+    if let Ok(mut set) = seen_hosts().lock() {
+        if set.len() + found.len() > SEEN_HOSTS_MAX {
+            set.clear();
+        }
+        for h in found {
+            set.insert(h);
+        }
+    }
+}
+
+fn collect_hosts(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => {
+            if let Ok(u) = reqwest::Url::parse(s) {
+                if matches!(u.scheme(), "http" | "https") {
+                    if let Some(h) = u.host_str() {
+                        out.push(h.to_lowercase());
+                    }
+                }
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| collect_hosts(x, out)),
+        Value::Object(m) => m.values().for_each(|x| collect_hosts(x, out)),
+        _ => {}
+    }
+}
+
+/// `GET /api/media/proxy?u=<编码后的直链>&src=bilibili|ytdlp`
+///
+/// 把音视频直链代下来给页面里的 `<video>` / `<audio>` 播：
+/// - 补 `User-Agent`（B 站对空 UA 直接拒）与 `Referer`/`Origin`（CDN 防盗链）；
+/// - **原样转发 `Range`**，上游的 206 / `Content-Range` 也透回去（拖进度条要靠它）；
+/// - 只放白名单域名**或**刚在本进程解析结果里出现过的主机（见 `SEEN_HOSTS`），
+///   且一律 `no-store` —— 直链自带时效签名，缓存下来只会拿到 403。
+///
+/// 上游给什么状态就回什么状态（403/404/416 原样透传），前端的播放器据此报错；
+/// 只有「参数不对 / 域名不在白名单」才用 `ApiError` 走统一错误形状。
+pub async fn proxy(
+    Query(q): Query<ProxyQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let target = q.u.trim();
+    if target.is_empty() {
+        return Err(ApiError::bad_request("缺少 u（要代理的地址）"));
+    }
+    let parsed =
+        reqwest::Url::parse(target).map_err(|_| ApiError::bad_request("u 不是合法 URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ApiError::bad_request("只代理 http/https"));
+    }
+    let host = parsed.host_str().unwrap_or("").to_lowercase();
+    let listed = PROXY_HOSTS
+        .iter()
+        .any(|s| host == *s || host.ends_with(&format!(".{s}")));
+    /* 白名单之外的，只要这个主机刚在本进程的解析结果里出现过就放行（见 SEEN_HOSTS 的注释） */
+    let seen = seen_hosts()
+        .lock()
+        .map(|set| set.contains(&host))
+        .unwrap_or(false);
+    if !listed && !seen {
+        return Err(ApiError::bad_request(format!(
+            "这个域名不在预览白名单里（先解析一次再放这个地址）：{host}"
+        )));
+    }
+
+    let mut req = net::client().get(parsed);
+    if let Some(r) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+        req = req.header(header::RANGE, r);
+    }
+    req = if q.src == "ytdlp" {
+        req.header(header::REFERER, "https://www.youtube.com/")
+    } else {
+        req.header(header::REFERER, "https://www.bilibili.com/")
+            .header(header::ORIGIN, "https://www.bilibili.com")
+    };
+    let res = req
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(format!("上游请求失败：{e}")))?;
+
+    let status = res.status();
+    let up = res.headers().clone();
+    let mut out = Response::builder().status(status);
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_RANGE,
+        header::ETAG,
+        header::LAST_MODIFIED,
+    ] {
+        if let Some(v) = up.get(&name) {
+            out = out.header(name, v);
+        }
+    }
+    out = out
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CACHE_CONTROL, "no-store");
+    out.body(Body::from_stream(res.bytes_stream()))
+        .map_err(|e| ApiError::internal(format!("构造响应失败：{e}")))
 }
 
 #[cfg(test)]

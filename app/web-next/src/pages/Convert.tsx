@@ -1,19 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   DisclosureGroup,
-  GlassDialog,
   GlassStepper,
   GlassSwitch,
-  List,
-  ListRow,
-  ListSection,
-  PathBar,
   Picker,
 } from '@ttqtt/liquid-glass-react'
-import { api, type Finding as ApiFinding, type FsEntry } from '@/lib/api'
+import { api, type Finding as ApiFinding } from '@/lib/api'
 import { Button, IconButton } from '@/components/Button'
+import { Credit, Upstream } from '@/components/Credit'
 import { DirectoryInput } from '@/components/DirPicker'
 import { Field, TextInput } from '@/components/Field'
+import { useFilePick } from '@/components/FilePick'
 import { Icon } from '@/components/Icon'
 import { JobProgress } from '@/components/Job'
 import { Chip, Finding, Panel, PanelHead } from '@/components/Panel'
@@ -31,7 +28,7 @@ import './Convert.css'
  * | 操作 | 拿到什么 | 提交去哪 |
  * |---|---|---|
  * | **拖进来** | `File`，**没有本机路径**（浏览器不给） | `run-upload`（读成 base64 上传） |
- * | **选择文件** | 本机路径（能列目录、按扩展名过滤） | `run`（后端直接读盘） |
+ * | **选择文件** | 本机路径（系统文件对话框，按扩展名过滤、可多选） | `run`（后端直接读盘） |
  *
  * 两种可以混在一个列表里。**转换时按来源分批、串行提交**：`useJob()` 的 `start()` 一次只盯
  * 一个任务，所以一批跑到终态（done / error / canceled）才起下一批；进度条显示的永远是当前那批。
@@ -78,7 +75,8 @@ export function Convert({ state, onToast }: PageProps) {
   const [nameTemplate, setNameTemplate] = useState('{name}_converted')
   const [overwrite, setOverwrite] = useState(false)
   const [options, setOptions] = useState<ConvertOptions>(loadOptions)
-  const [picking, setPicking] = useState(false)
+  /** 上次从哪个目录挑的工程 —— 只当系统对话框的起点，下次接着从那儿开 */
+  const [pickDir, setPickDir] = useState('')
   const [dragOver, setDragOver] = useState(false)
   const [reports, setReports] = useState<PreviewReport[]>([])
   const [previewing, setPreviewing] = useState(false)
@@ -151,16 +149,40 @@ export function Convert({ state, onToast }: PageProps) {
     onToast(`已加入 ${fresh.length} 个拖入的文件`, 'ok')
   }
 
-  /** 选择文件：拿到的是本机路径 */
-  const pickFile = (path: string) => {
-    const key = `p:${path}`
-    if (sources.some((s) => s.key === key)) {
-      onToast('这个文件已经在列表里了', 'warn')
+  /** 选择文件：走系统对话框（后端弹 `GetOpenFileNameW`），拿到的是本机路径，可多选 */
+  const addPaths = (paths: string[]) => {
+    const incoming = paths.map<PathSource>((path) => ({
+      key: `p:${path}`,
+      name: baseName(path),
+      ext: extOf(path),
+      path,
+    }))
+    const fresh = incoming.filter((s) => !sources.some((x) => x.key === s.key))
+    if (!fresh.length) {
+      onToast(incoming.length === 1 ? '这个文件已经在列表里了' : '这些文件已经在列表里了', 'warn')
       return
     }
-    setSources([...sources, { key, name: baseName(path), ext: extOf(path), path }])
-    onToast(`已加入 ${baseName(path)}`, 'ok')
+    setSources([...sources, ...fresh])
+    onToast(`已加入 ${fresh.length === 1 ? fresh[0].name : `${fresh.length} 个文件`}`, 'ok')
   }
+
+  /**
+   * 「选择文件」走系统文件对话框（后端 `platform.rs::pick_files` + `/api/fs/pick`）。
+   * 工程文件一次挑好几个是常事，所以给 `multi`；挑完记住那个目录，下次从那儿开。
+   */
+  const { pick, busy: picking } = useFilePick({
+    exts: projectExts,
+    label: '工程文件',
+    title: '选择工程文件',
+    dir: pickDir || undefined,
+    multi: true,
+    onPaths: (paths) => {
+      addPaths(paths)
+      const dir = paths[0].replace(/[\\/][^\\/]*$/, '')
+      if (dir && dir !== paths[0]) setPickDir(dir)
+    },
+    onToast,
+  })
 
   const remove = (key: string) => {
     setSources((prev) => prev.filter((s) => s.key !== key))
@@ -383,7 +405,7 @@ export function Convert({ state, onToast }: PageProps) {
             </div>
 
             <div className="btn-row">
-              <Button icon="file" onClick={() => setPicking(true)}>
+              <Button icon="file" loading={picking} onClick={() => void pick()}>
                 选择文件
               </Button>
               <Button variant="ghost" icon="trash" disabled={!sources.length} onClick={clear}>
@@ -486,6 +508,8 @@ export function Convert({ state, onToast }: PageProps) {
                 value={outDir}
                 onChange={setOutDir}
                 placeholder="留空 = 用设置里的默认输出目录…"
+                title="选输出目录"
+                onToast={onToast}
               />
             </Field>
             {outDir.trim() && outDir.trim() !== defaultOutDir ? (
@@ -751,14 +775,23 @@ export function Convert({ state, onToast }: PageProps) {
             </div>
           ) : null}
         </Panel>
-      </div>
 
-      <FilePicker
-        open={picking}
-        onOpenChange={setPicking}
-        exts={projectExts}
-        onPick={pickFile}
-      />
+        {/* 许可与出处：四十来种工程格式的读写都是 LibreSVIP 做的 */}
+        <Credit
+          desc="工程格式的读写全部交给第三方的 LibreSVIP，许可与出处写在这里"
+          items={[
+            { label: '代码', value: 'Apache-2.0', sub: 'LibreSVIP 2.9.0' },
+            { label: '用法', value: '独立进程', sub: 'libresvip-cli.exe proj convert' },
+          ]}
+        >
+          转格式这一步是{' '}
+          <Upstream href="https://github.com/SoulMelody/LibreSVIP">LibreSVIP</Upstream>
+          （Apache-2.0）做的：本程序写一个中间文件、调它的命令行、读它的输出，
+          不链接也不修改它的代码，所以四十来种格式的读写都由它负责，本程序只管认扩展名、拼参数。
+          它自己还打包了一份 Python 运行时和一批依赖，各自的许可随它在
+          tools/libresvip/libresvip-cli/_internal/ 下的 *.dist-info/licenses/ 里。
+        </Credit>
+      </div>
     </div>
   )
 }
@@ -913,147 +946,6 @@ function SwitchRow({
       </div>
       <GlassSwitch aria-label={label} checked={checked} onCheckedChange={onChange} />
     </div>
-  )
-}
-
-/* ══════════════════════════════════════════════════════ 本机文件选择器 ══ */
-
-/**
- * 按路径挑工程文件 —— 旧页面的 `pickDirectory({ mode: 'file' })`。
- *
- * `components/DirPicker.tsx` 只选目录（后端 `files=0`），所以这里用同一套库组件
- * （`GlassDialog` + `PathBar` + `List`）再拼一个选文件的：`api.fsList(dir, { files: true, exts })`。
- * 样式复用 `index.css` 里那组 `.dir-*`（目录选择器已经在用的类），不再另写一套。
- */
-function FilePicker({
-  open,
-  onOpenChange,
-  onPick,
-  exts,
-  title = '选择工程文件',
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onPick: (path: string) => void
-  /** 扩展名过滤器（不带点）；空数组 = 不过滤 */
-  exts: string[]
-  title?: string
-}) {
-  const [cwd, setCwd] = useState('')
-  const [entries, setEntries] = useState<FsEntry[]>([])
-  const [roots, setRoots] = useState<{ name: string; path: string }[]>([])
-  const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  const load = useCallback(
-    async (path: string) => {
-      setBusy(true)
-      setErr(null)
-      try {
-        const data = await api.fsList(path, { files: true, exts })
-        setCwd(data.path)
-        setEntries(data.entries)
-      } catch (e) {
-        setErr(errText(e))
-      } finally {
-        setBusy(false)
-      }
-    },
-    [exts],
-  )
-
-  useEffect(() => {
-    if (!open) return
-    api
-      .fsRoots()
-      .then((d) => {
-        setRoots(d.roots)
-        void load('')
-      })
-      .catch((e: unknown) => setErr(errText(e)))
-  }, [open, load])
-
-  const segments = cwd
-    .replace(/[\\/]+$/, '')
-    .split(/[\\/]/)
-    .filter(Boolean)
-  const dirs = entries.filter((e) => e.dir)
-  const files = entries.filter((e) => !e.dir)
-
-  return (
-    <GlassDialog
-      open={open}
-      onOpenChange={onOpenChange}
-      title={title}
-      description="点进子目录，然后点一个工程文件"
-      className="dir-dialog"
-    >
-      <div className="dir-body">
-        <PathBar
-          aria-label="所在路径"
-          items={[
-            { key: 'root', label: '此电脑', onSelect: () => void load('') },
-            ...segments.map((seg, i) => ({
-              key: seg + i,
-              label: seg,
-              /* 最后一级不给 onSelect —— 当前项不是链接（和 DirPicker 同一条规矩） */
-              onSelect:
-                i === segments.length - 1
-                  ? undefined
-                  : () => void load(segments.slice(0, i + 1).join('\\')),
-            })),
-          ]}
-        />
-
-        {roots.length > 0 && (
-          <List className="dir-roots">
-            {roots.map((r) => (
-              <ListRow
-                key={r.path}
-                label={r.name}
-                secondaryLabel={r.path}
-                onSelect={() => void load(r.path)}
-              />
-            ))}
-          </List>
-        )}
-
-        <List>
-          <ListSection header={busy ? '读取中…' : `${dirs.length} 个子目录`}>
-            {dirs.map((e) => (
-              <ListRow key={e.path} label={e.name} disclosure onSelect={() => void load(e.path)} />
-            ))}
-            {!busy && dirs.length === 0 && <ListRow label="（没有子目录）" disabled />}
-          </ListSection>
-          <ListSection header={`${files.length} 个工程文件`}>
-            {files.map((e) => (
-              <ListRow
-                key={e.path}
-                label={e.name}
-                secondaryLabel={e.size ? formatBytes(e.size) : undefined}
-                onSelect={() => {
-                  onPick(e.path)
-                  onOpenChange(false)
-                }}
-              />
-            ))}
-            {!busy && files.length === 0 && (
-              <ListRow label="（这个目录里没有这个扩展名的工程文件）" disabled />
-            )}
-          </ListSection>
-        </List>
-
-        {err && <p className="finding-text">{err}</p>}
-        <p className="dir-note">当前：{cwd || '（未选择）'}</p>
-      </div>
-
-      <div className="dir-actions">
-        <span className="spacer" />
-        <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>
-          取消
-        </Button>
-      </div>
-    </GlassDialog>
   )
 }
 

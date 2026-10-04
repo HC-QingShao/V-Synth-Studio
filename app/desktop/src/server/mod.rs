@@ -15,6 +15,7 @@
 //!   lyrics.rs   歌词：搜索 / 取词 / 存 LRC·SRT / 封面 / 歌曲直链下载 / 短信验证码登录
 //!   svsep.rs    音轨分离：在线 MVSEP 的入口 + 离线分离服务的转发
 
+pub mod bili;
 pub mod convert;
 pub mod lyrics;
 pub mod media;
@@ -52,7 +53,20 @@ pub struct AppState {
     pub jobs: Mutex<crate::server::simple::JobTable>,
     /// 离线音轨分离服务（Python 子进程）。见 `crate::svsep`。
     pub svsep: crate::svsep::Svsep,
+    /// 外部工具 + 声库探测的缓存：`(editors, tools, 算完的时刻)`。
+    ///
+    /// **为什么要缓存**：`detect_tools` 会真的 spawn `yt-dlp --version` /
+    /// `python --version`，还要逐段扫 `PATH`，机器忙时一次 2~7 秒；`/api/state`
+    /// 从前每个请求都现算一遍，而前端首屏就是在等 `/api/state` —— 用户看到的就是
+    /// 「启动卡死/白屏很久」（详见 安全审查.md）。现在启动时在后台线程预热一次，
+    /// 之后的请求直接读缓存。
+    pub probe_cache: Mutex<Option<(Vec<Value>, Value, Instant)>>,
 }
+
+/// 探测结果的缓存时长。工具是随程序打包的，装好之后基本不变；
+/// 用户手动补回 `tools/` 目录后最多等一分钟，或者点界面上的「重新检测」
+/// （`/api/tools/detect` 走 `probe_cached(true)` 绕过缓存）。
+const PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl AppState {
     pub fn new(paths: crate::AppPaths) -> Arc<Self> {
@@ -64,7 +78,7 @@ impl AppState {
             paths.writable.clone(),
             paths.installed,
         );
-        Arc::new(Self {
+        let st = Arc::new(Self {
             root: paths.root,
             writable: paths.writable,
             installed: paths.installed,
@@ -72,7 +86,45 @@ impl AppState {
             started: Instant::now(),
             jobs: Mutex::new(Default::default()),
             svsep,
-        })
+            probe_cache: Mutex::new(None),
+        });
+        // 启动时后台预热一次探测 —— 这正是「启动时白屏很久」的那几秒。
+        // 放线程里而不是在这里同步做：同步做只是把慢从「请求里」挪到「服务起不来」，
+        // 用户看到的还是同一个慢。
+        {
+            let st = Arc::clone(&st);
+            std::thread::spawn(move || {
+                let _ = st.probe_cached(false);
+            });
+        }
+        st
+    }
+
+    /// 外部工具 + 声库探测（带缓存）。
+    ///
+    /// 返回 `(editors, tools)` —— `/api/state` 要这两块，`/api/tools/detect` 用
+    /// [`crate::tools::detect_all_from`] 拼成完整响应。
+    ///
+    /// `force = true` 绕过缓存现算一遍：界面上的「重新检测」必须能反映真实情况，
+    /// 否则用户补回 `tools/` 目录后会被缓存骗一分钟。
+    pub fn probe_cached(&self, force: bool) -> (Vec<Value>, Value) {
+        if !force {
+            if let Ok(guard) = self.probe_cache.lock() {
+                if let Some((editors, tools, at)) = guard.as_ref() {
+                    if at.elapsed() < PROBE_TTL {
+                        return (editors.clone(), tools.clone());
+                    }
+                }
+            }
+        }
+        // 注意：**不持锁**跑探测 —— 它要几秒，持锁会把并发请求全串在身后。
+        // 代价是冷启动时可能有两三个线程同时探一遍，可以接受（结果一样，最后写的赢）。
+        let editors = crate::tools::detect_editors();
+        let tools = crate::tools::detect_tools(&self.root);
+        if let Ok(mut guard) = self.probe_cache.lock() {
+            *guard = Some((editors.clone(), tools.clone(), Instant::now()));
+        }
+        (editors, tools)
     }
 
     pub fn config_snapshot(&self) -> Value {
@@ -114,6 +166,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         // 把本地媒体文件原样吐给前端 —— 浏览器只能吃 URL，不能读本地路径。
         // 音频页的试听和波形都靠它，支持 Range（播放器拖进度条要用）
         .route("/api/fs/raw", get(simple::fs_raw))
+        // 选文件的两条入口（见 `FilePick.tsx`）：弹系统「打开」对话框，以及
+        // 把拖进来的文件落成临时文件换一个路径。**两个都回路径**，
+        // 所以页面上「系统选择器」和「拖入」出来的东西长得一模一样。
+        // `pick` 不用放宽 body 上限（请求体就几个字符串），`upload` 的上限
+        // 自己数（`simple::UPLOAD_LIMIT`）—— 裸 `Body` 流上面挂 `DefaultBodyLimit` 是假的。
+        .route("/api/fs/pick", post(simple::fs_pick))
+        .route("/api/fs/upload", post(simple::fs_upload))
         // 写任意二进制（文字 PV 导出 MP4 用）：JIZURA 的保存被父页面拦下来，
         // 字节分块 POST 到这里落盘。body 上限要放宽，默认 2MB 连一块都不够。
         .route(
@@ -152,6 +211,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/video/download", post(media::video_download))
         .route("/api/audio/probe", post(media::audio_probe))
         .route("/api/audio/run", post(media::audio_run))
+        // 预览代理：把音视频直链代下来给页面里的 <video>/<audio> 播（补 Referer、转发 Range）
+        .route("/api/media/proxy", get(media::proxy))
+        // ── B 站扫码登录（Cookie 只在后端落盘，不回传前端）──
+        .route("/api/bili/qr/generate", post(bili::qr_generate))
+        .route("/api/bili/qr/poll", post(bili::qr_poll))
+        .route("/api/bili/logout", post(bili::logout))
         // ── 歌词（新增的歌词路由，与上面那批非歌词路由分开）──
         .route("/api/lyrics/search", post(lyrics::search))
         .route("/api/lyrics/get", post(lyrics::get))

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, svsepFileUrl, type SvsepOutput, type SvsepStatus, type SvsepTask } from '@/lib/api'
 import { Button, IconButton } from '@/components/Button'
+import { Credit, Upstream } from '@/components/Credit'
 import { Icon } from '@/components/Icon'
 import { Chip, Finding, Panel, PanelHead, Stat } from '@/components/Panel'
 import { GlassSegmentedControl } from '@ttqtt/liquid-glass-react'
+import { DropHint, useFileDrop } from '@/components/FilePick'
 import { formatBytes } from '@/lib/format'
 import type { PageProps } from './types'
 import './Svsep.css'
@@ -394,10 +396,23 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
   const [previewIdx, setPreviewIdx] = useState<number | null>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
 
+  /*
+   * 拖进来的音频**直接当 `File` 用**：提交时本来就要 multipart 上传（二进制归 Python
+   * 后端收，形状是上游定的），所以不用像别的页那样先落成临时文件换个路径回来 ——
+   * 这里的落点只借用公共的拖放手势（`useFileDrop`），拿到 `File` 就算完事。
+   */
+  const { dropProps, dragging } = useFileDrop((files) => {
+    const f = files[0]
+    if (!f) return
+    setFile(f)
+    setTask(null)
+    setPreviewIdx(null)
+  })
+
   /* ── 渲染 ───────────────────────────────────────────── */
 
   return (
-    <div className="page-body svsep-layout">
+    <div className="page-body svsep-layout" {...dropProps}>
       {/* ══════════════ 左栏：素材 + 模式 ══════════════ */}
       <div className="svsep-col">
         <Panel>
@@ -419,18 +434,24 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
               e.target.value = ''
             }}
           />
-          <button type="button" className="svsep-drop" onClick={() => fileRef.current?.click()}>
-            <Icon name="upload" size={22} />
-            <span className="svsep-drop-name">{file ? file.name : '点这里选一个音频文件'}</span>
-            <span className="svsep-drop-meta">
-              {file ? formatBytes(file.size) : 'mp3 / wav / flac / m4a / aac / ogg / wma'}
-            </span>
-          </button>
+          {/*
+            这里是**系统「打开」对话框**（隐藏的 `input[type=file]`），不是自画的框 ——
+            原来那个 `.svsep-drop` 大虚线按钮是自画的皮，现在跟别的页一个长相：
+            一个「选音频文件」按钮 + 一条「也可以拖进来」的提示。
+          */}
+          <div className="btn-row">
+            <Button icon="folder" onClick={() => fileRef.current?.click()}>
+              {file ? '换一个音频文件' : '选音频文件'}
+            </Button>
+          </div>
+          <p className="hint">
+            {file
+              ? `已选：${file.name}（${formatBytes(file.size)}）`
+              : '支持 mp3 / wav / flac / m4a / aac / ogg / wma'}
+          </p>
+          <DropHint dragging={dragging} text="音频文件也可以直接拖进这个窗口" />
           {file && (
             <div className="btn-row">
-              <Button size="sm" variant="ghost" onClick={() => fileRef.current?.click()}>
-                换一个
-              </Button>
               <Button
                 size="sm"
                 variant="ghost"
@@ -908,6 +929,28 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
             </div>
           </Panel>
         )}
+
+        {/* 许可与出处：离线引擎是别人的项目，许可就摆在它旁边 */}
+        <Credit
+          desc="离线分离用的是第三方引擎，许可与出处写在这里"
+          tags={
+            <>
+              <Chip tone="accent">B站炽阳001</Chip>
+              <Chip>UVR5</Chip>
+            </>
+          }
+          items={[
+            { label: '代码', value: 'MIT', sub: 'audio-separator 0.39.1' },
+            { label: '模型', value: 'UVR', sub: 'BS-RoFormer / MDX，@Anjok07 训练' },
+          ]}
+        >
+          本功能为三改（或许吧）。离线引擎是{' '}
+          <Upstream href="https://github.com/nomadkaraoke/python-audio-separator">
+            nomadkaraoke/python-audio-separator
+          </Upstream>
+          （audio-separator，MIT，作者 Andrew Beveridge）：运行时与模型都不随程序打包，第一次用要先下好依赖，
+          本程序只负责调它、读它的输出。它调用的 UVR 系列模型由 @Anjok07 训练，许可见模型自己带的那份说明。
+        </Credit>
       </div>
     </div>
   )

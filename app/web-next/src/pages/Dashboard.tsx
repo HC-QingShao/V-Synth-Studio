@@ -1,7 +1,9 @@
+import { useEffect, useState } from 'react'
+
 import { api } from '@/lib/api'
-import type { AppState, FormatInfo, ToolInfo } from '@/lib/types'
+import type { AppState, ToolInfo } from '@/lib/types'
 import { Button } from '@/components/Button'
-import { Chip, Finding, Panel, PanelHead, Stat } from '@/components/Panel'
+import { Finding, Panel, PanelHead, Stat } from '@/components/Panel'
 
 /**
  * 总览：环境检测与常用入口。
@@ -49,7 +51,6 @@ function computeChecks(state: AppState | null): Check[] {
   if (!state) return []
   const out: Check[] = []
   const tools = state.tools ?? {}
-  const formats = state.formats ?? []
 
   if (!tools.ffmpeg?.available) {
     out.push({
@@ -69,16 +70,24 @@ function computeChecks(state: AppState | null): Check[] {
         'B 站解析是本程序原生实现的，不受影响；但 YouTube 及其它上千个站点需要它才能解析。',
     })
   }
-  const unavailable = formats.filter((f) => !f.available)
-  if (unavailable.length) {
-    out.push({
-      id: 'formats',
-      level: 'info',
-      title: `有 ${unavailable.length} 种格式的转换模块尚未就绪`,
-      detail: `未就绪：${unavailable.map((f) => f.name).join('、')}。`,
-    })
-  }
   return out
+}
+
+/**
+ * 两个「扩展包」的安装状态：`null` = 还没问出来后端。
+ *
+ * ⚠️ 刻意**不看** `/api/state`：它是冻结的契约夹具（`tests/contract/fixtures/state.json`），
+ * 往里加键会让 `verify.mjs` 变红。所以直接问各自的状态接口，判据是后端自己的话：
+ * 音轨分离 `runtimeReady && models.ok`、人声转 MIDI `runtime.ready && models.ready`。
+ */
+interface Packs {
+  svsep: boolean | null
+  midi: boolean | null
+}
+
+function packStat(v: boolean | null, installed: string, missing: string) {
+  if (v === null) return { value: '检测中', sub: '正在读取后端状态…' }
+  return { value: v ? '已安装' : '未安装', sub: v ? installed : missing }
 }
 
 export function Dashboard({
@@ -95,16 +104,35 @@ export function Dashboard({
   onToast: (msg: string, tone?: string) => void
 }) {
   const checks = computeChecks(state)
-  const formats = state?.formats ?? []
-  const available = formats.filter((f) => f.available).length
+  const [packs, setPacks] = useState<Packs>({ svsep: null, midi: null })
+  const [checking, setChecking] = useState(false)
+
+  /** 问两个扩展包在不在本地。两条请求各自独立，一条挂了不影响另一条。 */
+  const loadPacks = async () => {
+    const [sv, md] = await Promise.allSettled([api.svsepStatus(), api.midiStatus()])
+    setPacks({
+      svsep: sv.status === 'fulfilled' ? !!(sv.value.runtimeReady && sv.value.models?.ok) : null,
+      midi: md.status === 'fulfilled' ? !!(md.value.runtime?.ready && md.value.models?.ready) : null,
+    })
+  }
+
+  useEffect(() => {
+    void loadPacks()
+    // 只在进页面时问一次：`/api/midi/status` 会触发一次 ORT/CUDA 探测（没 N 卡时要 1 秒多）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const redetect = async () => {
+    setChecking(true)
     try {
       const data = await api.detect(true)
       await onRefreshState()
+      await loadPacks()
       onToast(`检测完成：${data.installedCount} 个程序可用`, 'ok')
     } catch (e) {
       onToast(`检测失败：${e instanceof Error ? e.message : String(e)}`, 'err')
+    } finally {
+      setChecking(false)
     }
   }
 
@@ -124,7 +152,7 @@ export function Dashboard({
         <div className="stack">
           <PanelHead
             title="欢迎回来"
-            desc="这里本是清沐方便自己调音、顺手用起来的工作台。把翻调流程里最烦的几件事收在一起：工程格式互转（完全离线）、MV 解析下载、音轨分离与音频处理，以及一份随手可查的资源导航。所有转换都在你自己机器上完成，工程不会离开本地。"
+            desc="这里是一款专为P主打造的虚拟歌姬工作站，集合了很多便捷功能，大多数处理都在本地运行不会将任何数据上传云端。"
           />
           <div className="btn-row">
             <Button variant="primary" icon="play" onClick={() => onNavigate('convert')}>
@@ -138,10 +166,28 @@ export function Dashboard({
 
       <Panel>
         <div className="stats-row">
-          <Stat label="可用格式" value={available} sub={`共 ${formats.length} 种`} />
-          <Stat label="外部工具" value={`${['ffmpeg', 'ytdlp'].filter((k) => state?.tools?.[k]?.available).length} / 2`} />
+          <Stat
+            label="音轨分离扩展包"
+            {...packStat(
+              packs.svsep,
+              '离线分离的引擎与模型都在本机',
+              '在「音轨分离」页里下载（约 8 GB）',
+            )}
+          />
+          <Stat
+            label="人声转 MIDI 扩展包"
+            {...packStat(
+              packs.midi,
+              'GAME 模型与动态库都在本机',
+              '在「人声转 MIDI」页里下载',
+            )}
+          />
+          <Stat
+            label="外部工具"
+            value={`${['ffmpeg', 'ytdlp'].filter((k) => state?.tools?.[k]?.available).length} / 2`}
+          />
           <div className="stats-action">
-            <Button size="sm" icon="refresh" onClick={redetect}>
+            <Button size="sm" icon="refresh" loading={checking} onClick={redetect}>
               重新检测
             </Button>
           </div>
@@ -184,8 +230,6 @@ export function Dashboard({
           <ToolRow label="Python" desc="可选：部分脚本与 yt-dlp 的模块模式" info={state?.tools?.python} onToast={onToast} />
         </div>
       </Panel>
-
-      <FormatPanel formats={formats} />
     </>
   )
 }
@@ -224,44 +268,5 @@ function ToolRow({
         </Button>
       )}
     </div>
-  )
-}
-
-function FormatPanel({ formats }: { formats: FormatInfo[] }) {
-  if (!formats.length) {
-    return (
-      <Panel>
-        <p className="muted">还没有拿到格式表。</p>
-      </Panel>
-    )
-  }
-  const groups = new Map<string, FormatInfo[]>()
-  for (const f of formats) {
-    if (!groups.has(f.group)) groups.set(f.group, [])
-    groups.get(f.group)!.push(f)
-  }
-  return (
-    <Panel>
-      <PanelHead title="格式支持" desc="带勾的是已就绪，灰的是模块待补齐" />
-      <div className="stack-lg">
-        {[...groups.entries()].map(([group, list]) => (
-          <div key={group} className="stack">
-            <span className="group-label">{group}</span>
-            <div className="chips">
-              {list.map((f) => (
-                <Chip
-                  key={f.id + f.name}
-                  tone={f.available ? 'ok' : 'default'}
-                  title={f.available ? (f.fidelity?.notes ?? '') : (f.reason ?? '未实现')}
-                >
-                  {f.name}
-                  <span className="chip-ext">{f.exts.join('/')}</span>
-                </Chip>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </Panel>
   )
 }

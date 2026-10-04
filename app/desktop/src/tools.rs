@@ -117,9 +117,14 @@ fn scan_for_exe(dir: &Path, names: &[&str], max_depth: usize) -> Option<PathBuf>
 
 /* ══════════════════════════════════ 外部工具 ══════════════════════════════════ */
 
-/// `detectAll()` 的等价物 —— /api/tools/detect 的完整形状
-pub fn detect_all(root: &Path) -> Value {
-    let editors = detect_editors();
+/// `detectAll()` 的等价物 —— `/api/tools/detect` 的完整形状（用**已经算好**的探测结果拼）。
+///
+/// 分成「探测」与「拼形状」两步是为了缓存：`detect_editors()` 与 `detect_tools()` 都要碰
+/// 磁盘、读注册表，而且 `detect_tools` 会**真的 spawn 进程**（`yt-dlp --version` /
+/// `python --version`）并逐段扫 PATH —— 机器一忙就是 2~7 秒。`/api/state` 从前每个请求
+/// 都现算一遍，而前端首屏就是在等它，用户看到的就是「启动卡死」（详见 安全审查.md）。
+/// 现在由 [`crate::server::AppState::probe_cached`] 负责探测与缓存，这里只负责拼形状。
+pub fn detect_all_from(root: &Path, editors: Vec<Value>, tools: Value) -> Value {
     let installed = editors
         .iter()
         .filter(|e| e.get("installed").and_then(|v| v.as_bool()).unwrap_or(false))
@@ -131,7 +136,7 @@ pub fn detect_all(root: &Path) -> Value {
         "node": crate::server::simple::platform_desc(),
         "root": root.to_string_lossy(),
         "editors": editors,
-        "tools": detect_tools(root),
+        "tools": tools,
         "installedCount": installed,
     })
 }

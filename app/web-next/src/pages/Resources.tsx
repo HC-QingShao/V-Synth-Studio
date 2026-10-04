@@ -365,7 +365,7 @@ export function Resources({ onToast }: PageProps) {
       */}
       <Banner
         tone="warning"
-        title="先看这条：别从网盘下「整合包」"
+        title="Tips："
         message={notice || DEFAULT_NOTICE}
         material={material === 'liquid' ? 'clear' : 'regular'}
       />

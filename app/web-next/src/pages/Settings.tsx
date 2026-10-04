@@ -1,9 +1,10 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '@/lib/api'
 import type { AppState, HealthInfo } from '@/lib/types'
 import { Button } from '@/components/Button'
 import { Field, TextInput } from '@/components/Field'
 import { Chip, GlassPanel, Panel, PanelHead, Stat } from '@/components/Panel'
+import { Upstream } from '@/components/Credit'
 import { GlassSlider } from '@ttqtt/liquid-glass-react'
 import { GLASS_LEVELS, useGlassLevel, type GlassLevel } from '@/lib/useGlass'
 import { useNavLens } from '@/lib/useNavLens'
@@ -382,6 +383,147 @@ function Tools({
 
 /* ══════════════════════════════════════════════════════════════ 关于 ══ */
 
+/** 「关于作者」那一栏的邮箱。点按钮就复制这一串。 */
+const AUTHOR_MAIL = '1813616607@qq.com'
+
+/**
+ * 感谢名单。
+ *
+ * ⚠️ 顺序**不代表排名** —— 面板上那行「排名无先后顺序」就是为这条写的，改名单时别按
+ * 「贡献大小」重排。ID 一律**照抄对方自己写的样子**（大小写、空格、假名、emoji 都别动）。
+ */
+const SPONSORS = [
+  '坎伊bbb',
+  'Desire Control',
+  '浅唱教主',
+  '老钱',
+  '我是len的帽子',
+  '入さん',
+  'ゆりかごから墓場まで',
+  '小偷人机在线逃跑',
+  'WuJinGY',
+  'venom',
+  'LYT',
+  '唠蟹公主',
+  '火橘子',
+  '筱箖',
+  'nxy',
+  '让我们一起陷入狂赌之渊吧',
+  '星街彗星',
+  '神野冬花',
+]
+
+/**
+ * 源码许可总表（关于页）。
+ *
+ * 事实以 `docs/THIRD-PARTY-NOTICES.md` 为准 —— 拿不准就先查那一份，别凭印象写许可名。
+ * ⚠️ 这张表和**各功能页自己那块 `Credit` 是同一批事实**：用户要求两边都留
+ * （功能旁边写一份、关于页再汇总一份），所以改一处就得同步另一处。
+ */
+const LICENSES: { feature: string; upstream: string; href?: string; license: string; how: string }[] = [
+  {
+    feature: '工程转换',
+    upstream: 'LibreSVIP 2.9.0',
+    href: 'https://github.com/SoulMelody/LibreSVIP',
+    license: 'Apache-2.0',
+    how: '独立进程调用 libresvip-cli.exe，不链接也不修改它的代码',
+  },
+  {
+    feature: '视频解析下载',
+    upstream: 'yt-dlp 2026.08.19',
+    href: 'https://github.com/yt-dlp/yt-dlp',
+    license: 'Unlicense',
+    how: '独立进程，读它的 JSON 输出（Unlicense 等于公有领域，无附加义务）',
+  },
+  {
+    feature: '视频解析（扫码登录）',
+    upstream: 'qrcode.react 4.2.0',
+    href: 'https://github.com/zpao/qrcode.react',
+    license: 'ISC',
+    how: '把登录二维码画成 SVG（纯前端渲染，不联网）；Cookie 由 Rust 直接写进本机配置，不经过前端',
+  },
+  {
+    feature: '音频处理',
+    upstream: 'FFmpeg 9.0.2（gyan.dev essentials）',
+    href: 'https://ffmpeg.org/',
+    license: 'GPL v3',
+    how: '独立进程跑转格式 / 变调变速 / 裁剪 / 响度 / 抽音轨；分发时附 GPL v3 全文并给出源码地址',
+  },
+  {
+    feature: '视频合流转码',
+    upstream: 'FFmpeg 9.0.2（gyan.dev essentials）',
+    href: 'https://ffmpeg.org/',
+    license: 'GPL v3',
+    how: '同上，能「-c copy」就不重编码',
+  },
+  {
+    feature: '音轨分离',
+    upstream: 'python-audio-separator 0.39.1',
+    href: 'https://github.com/nomadkaraoke/python-audio-separator',
+    license: 'MIT',
+    how: '独立进程；运行时与模型都不随包分发，第一次用要先下好依赖',
+  },
+  {
+    feature: '音轨分离（模型）',
+    upstream: 'UVR 系列 BS-RoFormer / MDX，@Anjok07 训练',
+    license: '随模型自带说明',
+    how: '同上，第一次用按需下载',
+  },
+  {
+    feature: '人声转 MIDI（算法）',
+    upstream: 'openvpi/GAME',
+    href: 'https://github.com/openvpi/GAME',
+    license: 'MIT',
+    how: '按它的算法在 Rust 里重写，没有链接或拷贝它的代码',
+  },
+  {
+    feature: '人声转 MIDI（权重）',
+    upstream: 'GAME-1.0.3-large-onnx',
+    license: 'CC BY-NC-SA 4.0',
+    how: '⚠️ 非商业 —— 不随包分发、由界面按需下载；带着它就不能用于商业用途',
+  },
+  {
+    feature: '人声转 MIDI（推理运行时）',
+    upstream: 'ONNX Runtime 1.23.2（ort crate）',
+    href: 'https://github.com/microsoft/onnxruntime',
+    license: 'MIT',
+    how: '运行时才加载 onnxruntime.dll（优先借音轨分离那份），不静态链接、不随包分发',
+  },
+  {
+    feature: '歌词处理',
+    upstream: '163MusicLyrics',
+    href: 'https://github.com/jitwxs/163MusicLyrics',
+    license: 'Apache-2.0',
+    how: '时间戳多写法解析 / LRC 转 SRT 收尾 / 译文对齐等按它移植，移植处都有行内注释；取歌词的 HTTP 是本程序自研',
+  },
+  {
+    feature: '文字 PV（编辑器）',
+    upstream: 'JIZURA v0.9.0 · © 2026 hakoniwa',
+    href: 'https://github.com/852wa/JIZURA',
+    license: 'MIT',
+    how: 'iframe 同源嵌入作者发布的单文件构建产物，界面与功能未改；唯一的改动是把字体来源从 Google Fonts 换成本机文件',
+  },
+  {
+    feature: '文字 PV（随包字体）',
+    upstream: 'Google Fonts 12 个家族',
+    license: 'SIL OFL 1.1',
+    how: '原样随包分发 woff2 子集，未修改字形（OFL 的保留字体名称条款照旧适用）',
+  },
+  {
+    feature: '界面素材',
+    upstream: '@ttqtt/liquid-glass-react',
+    href: 'https://github.com/Tsdsj/liquid-glass-react',
+    license: 'MIT',
+    how: '玻璃材质、配色、字号、间距、圆角与动效；按 Apple 设计语言做的独立组件库，不是 Apple 官方产品，也不含 Apple 的字体或图标素材',
+  },
+  {
+    feature: '汉字读音',
+    upstream: 'pinyin-data',
+    license: 'MIT',
+    how: 'app/data/pinyin.json 的读音数据来源，运行时只读这个 JSON',
+  },
+]
+
 function About({
   state,
   health,
@@ -396,6 +538,24 @@ function About({
   onToast: (m: string, t?: string) => void
 }) {
   const toolsReady = ['ffmpeg', 'ytdlp'].filter((k) => state?.tools?.[k]?.available).length
+
+  /* 「关于作者」那三个按钮：两个外链走系统默认浏览器（和 `Upstream` 同一条路，
+     比指望 WebView 处理 `target="_blank"` 稳）；邮箱按钮复制到剪贴板 ——
+     界面跑在 http://127.0.0.1 上，是安全上下文，剪贴板接口能用；万一被拒就提示手动抄。 */
+  const openInBrowser = (url: string) => {
+    api.fsOpen({ url }).catch((err: unknown) => {
+      console.warn('打不开系统浏览器：', err)
+      onToast('打不开系统浏览器', 'err')
+    })
+  }
+  const copyMail = async () => {
+    try {
+      await navigator.clipboard.writeText(AUTHOR_MAIL)
+      onToast('邮箱已复制', 'ok')
+    } catch {
+      onToast('复制不了，手动抄一下吧', 'err')
+    }
+  }
   return (
     <>
       <Panel>
@@ -415,6 +575,12 @@ function About({
           />
         </div>
         <p className="hint">程序根目录：{state?.paths?.root ?? '未读取到'}</p>
+        <p className="hint">
+          项目地址：
+          <Upstream href="https://github.com/QingMu39-Gao/V-Synth-Studio">
+            github.com/QingMu39-Gao/V-Synth-Studio
+          </Upstream>
+        </p>
         <div className="btn-row">
           <Button
             onClick={async () => {
@@ -428,15 +594,84 @@ function About({
         </div>
       </Panel>
 
+      {/* 关于作者 → 作者的话 → 感谢名单 → 源码许可总表，顺序是用户定的：
+          人名在前、致谢在后，许可垫底。别把许可挪回前面。 */}
       <Panel>
-        <PanelHead title="界面素材" />
+        <PanelHead
+          title="关于作者"
+          desc="初次见面的人初次见面，好久不见的人好久不见 —— 一个热爱 Vocaloid 的普通人"
+        />
+        <div className="author-name">叫我清沐就好</div>
+        <div className="btn-row">
+          <Button
+            size="sm"
+            icon="bilibili"
+            onClick={() => openInBrowser('https://b23.tv/qfAgBjQ')}
+          >
+            哔哩哔哩
+          </Button>
+          <Button
+            size="sm"
+            icon="douyin"
+            onClick={() =>
+              openInBrowser(
+                'https://www.douyin.com/user/MS4wLjABAAAAC4OEMmA9ito6EUZwSHNw2pZQ7e5pqEPH3EJhDEfs3jqiT4EwydjMLiD2QMVrZYy0?from_tab_name=main',
+              )
+            }
+          >
+            抖音
+          </Button>
+          <Button size="sm" icon="mail" onClick={copyMail}>
+            {AUTHOR_MAIL}
+          </Button>
+        </div>
+        <p className="hint">
+          前两个按钮在系统默认浏览器里打开（和资源库、上游链接走同一条路）；邮箱按钮点一下复制到剪贴板。
+        </p>
+      </Panel>
+
+      <Panel>
+        <PanelHead title="作者的话" />
         <p className="muted">
-          玻璃材质、配色、字号、间距、圆角与动效来自开源项目{' '}
-          <a href="https://github.com/Tsdsj/liquid-glass-react" target="_blank" rel="noreferrer">
-            @ttqtt/liquid-glass-react
-          </a>
-          （MIT）。它是按 Apple 设计语言做的独立组件库，不是 Apple 官方产品，
-          也不含 Apple 的字体或图标素材。
+          这个项目由 DeepSeek、Claude 等智能体辅助开发。最初只是清沐想集结各种方便的功能，便于虚拟歌姬调教罢了。
+          作者也只是个学生，很感谢大家的支持呀 —— 这个项目一半的资金都是大家赞助的！真的很谢谢大家！
+        </p>
+      </Panel>
+
+      <Panel>
+        <PanelHead title="感谢名单" desc="赞助者 —— 排名无先后顺序" />
+        <div className="chips">
+          {SPONSORS.map((n) => (
+            <Chip key={n}>{n}</Chip>
+          ))}
+        </div>
+        <p className="hint">以及一些无法展示 id 的用户和测试者们，同样谢谢你们。</p>
+      </Panel>
+
+      {/* 全量许可清单：所有用到第三方开源项目的功能在这儿各占一行。
+          各功能页自己那块 `Credit` 仍然保留（用户要求两边都留），改一处要同步另一处。 */}
+      <Panel>
+        <PanelHead title="源码许可总表" desc="所有用到第三方开源项目的功能，按功能逐项列出" />
+        <div className="lic-list">
+          {LICENSES.map((l) => (
+            <div className="lic-row" key={l.feature}>
+              <div className="lic-feature">{l.feature}</div>
+              <div>
+                <div className="lic-head">
+                  <span className="lic-upstream">
+                    {l.href ? <Upstream href={l.href}>{l.upstream}</Upstream> : l.upstream}
+                  </span>
+                  <Chip>{l.license}</Chip>
+                </div>
+                <p className="hint">{l.how}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="hint">
+          本程序自身是 Rust 写的：Tauri 2（Apache-2.0 / MIT）与各 crate 静态链接进 exe，界面跑在系统自带的
+          WebView2 Runtime 上；许可全文与逐项说明随仓库的 docs/THIRD-PARTY-NOTICES.md 一起分发。
+          早期格式转换用过 UtaFormatix3，相关代码已全部删除，不再需要署名。
         </p>
       </Panel>
     </>

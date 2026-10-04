@@ -234,3 +234,40 @@
     corner-shape: squircle;
   }
 }
+
+/* ── 预览播放器（`components/Preview.tsx`）──────────────────────────────
+   `<video>` 当主时钟、隐藏的 `<audio>` 跟着它跑（B 站 dash 的视频/音频是分开的两条流）。
+   注意 `<audio>` 是 `display: none` 但**必须留在 DOM 里** —— 隐藏的 audio 照样能播放，
+   而重造 Audio() 对象会丢掉跟 video 的对齐。
+   视频自己那块黑底是写死的：亮色主题下 `<video>` 未加载时是白框，看着像坏了。 */
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lg-space-2);
+}
+.preview-box {
+  border-radius: var(--lg-radius-m);
+  border: 1px solid var(--lg-separator);
+  overflow: hidden;
+  background: #000;
+}
+.preview-video {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: #000;
+}
+.preview-audio {
+  display: none;
+}
+.preview-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--lg-label-secondary);
+}
+.preview-err {
+  color: var(--lg-red);
+}

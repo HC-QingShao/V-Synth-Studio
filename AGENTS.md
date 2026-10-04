@@ -478,6 +478,9 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 | 苹果式圆角 | `corner-shape: squircle` + `@supports` 兜底；**别用在玻璃面上**（库的位移贴图是受限几何） |
 | 自定义 CSS 与工具类 | 新前端目前是纯手写 CSS（没用 Tailwind 工具类）。哪天开始用工具类，自定义类必须进 `@layer components`，否则会静默盖掉工具类 |
 | 亮色主题 | 次要文字色不能太浅（对比度 4.5:1 以上）；背景图参数见 `LESSONS.md` |
+| **面板里的输入框比旁边的下拉框宽一截、右边缘压出面板边框** | 玻璃档 **1~3** 的面板是普通 `div.panel`、**不是 `.lg-root`**，拿不到库那条 `.lg-root * { box-sizing: border-box }`（`node_modules/@ttqtt/liquid-glass-react/dist/components.css:7`），而 `<input>` 的 UA 默认是 content-box ⇒ `width:100%` 按内容盒算，宽 26px 高 17px（档 4 自动变好，因为那时才是玻璃根）。**我们自己的 CSS 里 `box-sizing` 声明数原本是 0** —— `.input/.textarea` 必须自己写 `box-sizing: border-box`（`app/web-next/src/index.css`），`.lyrics-result`/`.svsep-drop` 这类 `<button>` 是 UA 默认就 border-box，但也要写明（换元素类型就会踩同一个坑） |
+| **分段控件（`GlassSegmentedControl`）在明亮主题 + 玻璃 3 下选中项文字看不见** | 库给 **clear 材质**设了 `--lg-fg: #fff`（`dist/components.css:68`），而亮色主题的胶囊底 `--lg-lens-bg` 是**不透明纯白**（`dist/tokens.css:461`）⇒ 白字压白底。库自己对 opaque 材质有兜底 `--lg-fg: rgb(0 0 0)`（`components.css:102`），我们照抄一条 `[data-lg-theme='light'] .lg-root[data-material='clear'] { --lg-fg: var(--lg-label) }`。⚠️ 覆盖 `--lg-fg` 前先想清楚作用域（只到 clear 材质的玻璃根；带 variant 的按钮走 `--lg-accent-contrast`，不受影响） |
+| **启动时白屏 / 一直转圈「正在载入工作台…」（明亮 + 玻璃 3 更明显）** | 两个成因叠加：①遮罩只在 `/api/state` 落定后才揭，而 `/api/state` 过去**每个请求**都现算 `detect_tools` —— 它会真的 spawn `yt-dlp --version`/`python --version` 并逐段扫 PATH，机器忙时 2~7 秒（连跑还越来越慢）；已改成 `AppState::probe_cached` 60 秒缓存 + 启动后台线程预热 + `App.tsx` 里 **1.2 秒兜底揭遮罩**。②玻璃 3 的液态折射：`backdrop-filter` 元素 1→14 个、`<feDisplacementMap>` 0→8 个、模糊面积 6840→1,284,139 px²（188×），明亮主题还多一层全屏 `body::before{filter:blur(5px)}`。数据与整改清单见 **`安全审查.md`** |
 | 背景图「压根不显示」 | 触发过两次。图在 `app/web/img/bg/`，被 `index.css` 以 `url()` 引用 —— 别让构建把它当成产物清掉（`emptyOutDir` 必须是 `false`） |
 | 网络 | GitHub / Google 要走代理（`curl -x http://127.0.0.1:7890`）；网易云直连；**测试短信接口绝不用真实手机号** |
 | 图标 | `components/Icon.tsx` 是一张手写 SVG path 表。**没有图标库**（要离线），加图标往表里加 |

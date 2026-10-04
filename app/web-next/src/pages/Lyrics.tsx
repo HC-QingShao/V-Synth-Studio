@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { GlassSegmentedControl, GlassSwitch } from '@ttqtt/liquid-glass-react'
 import { api } from '@/lib/api'
 import { Button } from '@/components/Button'
+import { Credit, Upstream } from '@/components/Credit'
 import { DirectoryInput } from '@/components/DirPicker'
+import { DropHint, useFilePick } from '@/components/FilePick'
 import { Field, TextArea, TextInput } from '@/components/Field'
 import { Icon } from '@/components/Icon'
 import { Chip, Panel, PanelHead } from '@/components/Panel'
@@ -336,6 +338,26 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
     }
   }
 
+  /**
+   * 选本地 .lrc：**系统「打开」对话框**（`/api/fs/pick`）或把文件直接拖进这一页。
+   *
+   * 这里原来挂的是 `DirectoryInput` —— 一个**目录**选择器被拿去选文件，用户看到的
+   * 是自己画的那个目录树，还得先在树里逛到文件所在的文件夹、再手打文件名。
+   * 选文件和选目录是两件事，别再用那个。
+   */
+  const {
+    pick: pickLrc,
+    dropProps,
+    dragging,
+    busy: droppingLrc,
+  } = useFilePick({
+    exts: ['lrc'],
+    label: '歌词文件',
+    title: '选一个 .lrc 文件',
+    onPaths: (paths) => void importPath(paths[0]),
+    onToast,
+  })
+
   /* ── 保存 / 封面 ────────────────────────────────────────── */
 
   const saveLyric = async () => {
@@ -591,7 +613,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
   const fee = feeLabel(song.fee)
 
   return (
-    <div className="lyrics-cols">
+    <div className="lyrics-cols" {...dropProps}>
       {/* ── 左栏：取词的三个入口 ─────────────────────────────── */}
       <div className="lyrics-col">
         <Panel>
@@ -676,13 +698,10 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
               label="从文件导入（本地已有的 .lrc）"
               hint="选一个 .lrc 文件，读进来之后的预览、保存、带去「文字 PV」都和搜到的歌一样，只是来源标成「本地文件」。UTF-8 与 GBK（国内老歌词常见）都能读，读的是哪种会写在歌词预览的来源那一行。译文尽量拆出来：`原文 / 译文` 这种一行两段、以及前后两段同时间轴的写法都认；拆不出来就整份当原文。"
             >
-              <DirectoryInput
-                value=""
-                placeholder="选择一个 .lrc 文件…"
-                onChange={(p) => {
-                  if (p) void importPath(p)
-                }}
-              />
+              <Button icon="folder" onClick={() => void pickLrc()}>
+                选 .lrc 文件
+              </Button>
+              <DropHint dragging={dragging} busy={droppingLrc} text=".lrc 文件也可以直接拖进这个窗口" />
             </Field>
             {importing && <p className="hint">正在读取本地歌词…</p>}
           </div>
@@ -972,6 +991,21 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
             </div>
           </div>
         </Panel>
+
+        {/* 许可与出处：歌词文本处理的规矩是从 163MusicLyrics 移植的 */}
+        <Credit
+          desc="歌词文本处理那套规矩移植自第三方项目，许可与出处写在这里"
+          items={[
+            { label: '文本处理', value: 'Apache-2.0', sub: '移植自 163MusicLyrics' },
+            { label: '取歌词', value: '自研', sub: '走明文端点，不用第三方加密链路' },
+          ]}
+        >
+          LRC 时间戳的多写法解析、LRC 转 SRT 的收尾规则、译文对齐的容错、空行与纯音乐判定、
+          双语 STAGGER 的组织方式，都是按{' '}
+          <Upstream href="https://github.com/jitwxs/163MusicLyrics">jitwxs/163MusicLyrics</Upstream>
+          （Apache-2.0）的实现移植过来的，移植处都留了行内注释。取歌词的 HTTP 调用与端点选择是本程序自己写的：
+          那个项目走 weapi 加密链路，这里改用明文端点，所以不涉及它的网络代码。
+        </Credit>
       </div>
     </div>
   )

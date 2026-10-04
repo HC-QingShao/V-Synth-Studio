@@ -12,7 +12,11 @@ use serde_json::{json, Value};
 use super::{ok, ApiError, AppState};
 
 pub async fn detect(State(st): State<Arc<AppState>>) -> Json<Value> {
-    Json(ok(crate::tools::detect_all(&st.root)))
+    // 这条端点就是界面上的「重新检测」，**必须绕过缓存**现算一遍 ——
+    // 否则用户把 tools/ 目录补回来之后会被缓存骗最多一分钟。
+    // 代价是它本来就要 2~7 秒（真的 spawn 进程 + 扫 PATH），前端那里有转圈提示。
+    let (editors, tools) = st.probe_cached(true);
+    Json(ok(crate::tools::detect_all_from(&st.root, editors, tools)))
 }
 
 /// 一键获取工具。

@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { GlassDialog, List, ListRow, ListSection, PathBar } from '@ttqtt/liquid-glass-react'
-import { api, type FsEntry } from '@/lib/api'
+import { api } from '@/lib/api'
 import { Button } from '@/components/Button'
-import { DirPicker } from '@/components/DirPicker'
+import { DropHint, useFilePick } from '@/components/FilePick'
 import { Panel } from '@/components/Panel'
 import { formatBytes } from '@/lib/format'
 import type { PageProps } from './types'
@@ -287,14 +286,10 @@ interface PendingSave {
 export function Pv({ state, onNavigate, onToast }: PageProps) {
   const [status, setStatus] = useState('正在载入编辑器…')
   const [importing, setImporting] = useState(false)
-  const [pickingLrc, setPickingLrc] = useState(false)
-  /** 非 null = 保存对话框开着（只用来渲染标题；真正的请求在 `pending` 里） */
-  const [ask, setAsk] = useState<{ name: string; size: number } | null>(null)
-
   const frameRef = useRef<HTMLIFrameElement>(null)
   /**
-   * 保存请求的 resolver 与 blob 放 ref 里：`onPick` 与 `onOpenChange` 是两个回调，
-   * 而 DirPicker 选完会先 `onPick` 再 `onOpenChange(false)` —— 靠 state 分不清这两件事。
+   * 保存请求的 resolver 与 blob 放 ref 里：系统「选择文件夹」对话框没有回调可挂，
+   * 只能等它返回之后拿着那个地址接着存 —— 那一头要能找到最初的 resolver。
    */
   const pending = useRef<PendingSave | null>(null)
   /** 切页（卸载）后停掉轮询，别对着一个已经拆掉的 iframe 写十几秒 */
@@ -302,16 +297,19 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
 
   const downloadDir = state?.paths?.downloadDir ?? ''
 
-  /* ── 保存路径的接管 ─────────────────────────────────────── */
+  /* 选歌词文件：系统对话框 + 把 .lrc 直接拖进这个窗口，两条入口都回本机路径
+     （见 `components/FilePick.tsx`；拖进来的那份由后端落成临时文件换回路径）。
+     起点给下载目录 —— 用户手上那批 .lrc 基本就在那儿，但它只是起点，不是限制。 */
+  const { pick, dropProps, dragging, busy: dropping } = useFilePick({
+    exts: ['lrc'],
+    label: '歌词文件',
+    title: '选一个歌词文件',
+    dir: downloadDir || undefined,
+    onPaths: (paths) => void importLrc(paths[0]),
+    onToast,
+  })
 
-  const askDirectory = useCallback(
-    (name: string, blob: Blob) =>
-      new Promise<string>((resolve) => {
-        pending.current = { name, blob, resolve }
-        setAsk({ name, size: blob.size })
-      }),
-    [],
-  )
+  /* ── 保存路径的接管 ─────────────────────────────────────── */
 
   const saveInto = useCallback(
     async (dir: string, p: PendingSave) => {
@@ -332,26 +330,49 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
     [onToast],
   )
 
-  /** 用户把对话框关了：别让它的导出流程一直等在那里 */
+  /** 用户取消（或对话框打不开）：别让它的导出流程一直等在那里 */
   const cancelSave = useCallback(() => {
     const p = pending.current
     if (!p) return
     pending.current = null
-    setAsk(null)
     setStatus(`已取消保存「${p.name}」`)
     p.resolve('')
   }, [])
 
-  const takeDirectory = useCallback(
-    (dir: string) => {
-      const p = pending.current
-      if (!p) return
-      // 先摘掉：DirPicker 点完「就选这里」会紧接着调 onOpenChange(false)，那不该被当成取消
-      pending.current = null
-      setAsk(null)
-      void saveInto(dir, p)
-    },
-    [saveInto],
+  /**
+   * 弹**系统**「选择文件夹」对话框，把 JIZURA 的保存接管过来。
+   *
+   * 以前这一步是自己画的目录树（`DirPicker`），现在换成系统对话框：里面能新建
+   * 文件夹、能跳盘符、能用用户自己收藏的快捷方式 —— 这些都不用我们再写一遍。
+   * 取消 = 空数组，当作用户放弃这次导出（`resolve('')`），不是错误。
+   */
+  const askDirectory = useCallback(
+    (name: string, blob: Blob) =>
+      new Promise<string>((resolve) => {
+        const p: PendingSave = { name, blob, resolve }
+        pending.current = p
+        setStatus(`正在等「${name}」选保存目录…`)
+        void api
+          .fsPick({
+            folder: true,
+            title: `保存「${name}」（${formatBytes(blob.size)}）到哪个目录`,
+            dir: downloadDir || undefined,
+          })
+          .then((r) => {
+            const dir = r.files[0]
+            if (!dir) return cancelSave()
+            pending.current = null
+            void saveInto(dir, p)
+          })
+          .catch((e) => {
+            pending.current = null
+            const msg = `打不开系统对话框：${errText(e)}`
+            setStatus(msg)
+            onToast(msg, 'err')
+            p.resolve('')
+          })
+      }),
+    [cancelSave, downloadDir, onToast, saveInto],
   )
 
   /** 把它的保存接管过来。返回 false = 没找到它的保存函数（那就还是原来的浏览器下载） */
@@ -495,16 +516,22 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
   }
 
   return (
-    <div className="pv-page">
+    <div className="pv-page" {...dropProps}>
       {/* 工具条只有一行：状态 + 两个按钮。**不做额外工具条占高度** ——
           这是个多栏编辑器，空间都留给它。 */}
       <Panel padded={false}>
         <div className="pv-bar">
           <p className="pv-status">{status}</p>
+          <DropHint
+            className="pv-drop"
+            dragging={dragging}
+            busy={dropping}
+            text=".lrc 也能拖进来"
+          />
           <Button size="sm" variant="ghost" icon="music" onClick={() => onNavigate('lyrics')}>
             去「歌词」页取词
           </Button>
-          <Button size="sm" icon="file" loading={importing} onClick={() => setPickingLrc(true)}>
+          <Button size="sm" icon="file" loading={importing} onClick={() => void pick()}>
             导入歌词文件
           </Button>
         </div>
@@ -523,150 +550,11 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
         />
       </div>
 
-      {/* 导出 MP4 / PNG 序列时由 `hookSave` 弹出来：JIZURA 自己只会走浏览器下载 */}
-      <DirPicker
-        open={ask !== null}
-        onOpenChange={(open) => {
-          if (!open) cancelSave()
-        }}
-        onPick={takeDirectory}
-        title={ask ? `保存「${ask.name}」（${formatBytes(ask.size)}）到哪个目录` : '选择目录'}
-      />
+      {/* 许可与出处**不在这里**：这一页的高度全给编辑器，那一块搬去
+          「设置 → 关于」了（见 `Settings.tsx` 的 `About()`）。
 
-      <LrcPicker
-        open={pickingLrc}
-        onOpenChange={setPickingLrc}
-        initial={downloadDir}
-        onPick={(path) => {
-          setPickingLrc(false)
-          void importLrc(path)
-        }}
-      />
+          导出 MP4 / PNG 时的「存到哪里」走系统「选择文件夹」对话框
+          （`askDirectory` 里直接调 `/api/fs/pick`），页面上不再有自画的目录树。 */}
     </div>
-  )
-}
-
-/* ══════════════════════════════════════════════════════ 选 .lrc 文件 ══ */
-
-/**
- * 选一个 .lrc 文件 —— 旧页面的 `pickDirectory({ mode: 'file', exts: ['lrc'] })`。
- *
- * `components/DirPicker.tsx` 只选目录（后端 `files=0`），所以这里用同一套库组件
- * （`GlassDialog` + `PathBar` + `List`）把「列文件」打开。样式复用 `index.css` 里
- * 那组 `.dir-*`（目录选择器已经在用的类），不再另写一套 —— 和 `Convert.tsx` 的
- * 文件选择器是同一个路子。
- *
- * 起点给下载目录（和歌词页那条路一致 —— 用户手上那批 .lrc 基本就在那儿），
- * 但**它只是起点，不是限制**：用户可以自己往上往下走。
- */
-function LrcPicker({
-  open,
-  onOpenChange,
-  onPick,
-  initial,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onPick: (path: string) => void
-  initial: string
-}) {
-  const [cwd, setCwd] = useState('')
-  const [entries, setEntries] = useState<FsEntry[]>([])
-  const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  const load = useCallback(async (path: string) => {
-    setBusy(true)
-    setErr(null)
-    try {
-      let target = path
-      for (let attempt = 0; ; attempt++) {
-        try {
-          const data = await api.fsList(target, { files: true, exts: ['lrc'] })
-          setCwd(data.path)
-          setEntries(data.entries)
-          return
-        } catch (e) {
-          // 起点目录不可用（盘符不在 / 被删了）就退回后端给的默认目录，别再退第二次
-          if (!target || attempt > 0) {
-            setErr(errText(e))
-            return
-          }
-          target = ''
-        }
-      }
-    } finally {
-      setBusy(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!open) return
-    void load(initial)
-  }, [open, initial, load])
-
-  const segments = cwd
-    .replace(/[\\/]+$/, '')
-    .split(/[\\/]/)
-    .filter(Boolean)
-  const dirs = entries.filter((e) => e.dir)
-  const files = entries.filter((e) => !e.dir)
-
-  return (
-    <GlassDialog
-      open={open}
-      onOpenChange={onOpenChange}
-      title="选择歌词文件（.lrc）"
-      description="点进子目录，然后点一个 .lrc 文件；读进来之后会直接填进右边的编辑器"
-      className="dir-dialog"
-    >
-      <div className="dir-body">
-        <PathBar
-          aria-label="所在路径"
-          items={[
-            { key: 'root', label: '此电脑', onSelect: () => void load('') },
-            ...segments.map((seg, i) => ({
-              key: seg + i,
-              label: seg,
-              /* 最后一级不给 onSelect —— 当前项不是链接（和 DirPicker 同一条规矩） */
-              onSelect:
-                i === segments.length - 1
-                  ? undefined
-                  : () => void load(segments.slice(0, i + 1).join('\\')),
-            })),
-          ]}
-        />
-
-        <List>
-          <ListSection header={busy ? '读取中…' : `${dirs.length} 个子目录`}>
-            {dirs.map((e) => (
-              <ListRow key={e.path} label={e.name} disclosure onSelect={() => void load(e.path)} />
-            ))}
-            {!busy && dirs.length === 0 && <ListRow label="（没有子目录）" disabled />}
-          </ListSection>
-          <ListSection header={`${files.length} 个歌词文件`}>
-            {files.map((e) => (
-              <ListRow
-                key={e.path}
-                label={e.name}
-                secondaryLabel={e.size ? formatBytes(e.size) : undefined}
-                onSelect={() => onPick(e.path)}
-              />
-            ))}
-            {!busy && files.length === 0 && <ListRow label="（这个目录里没有 .lrc 文件）" disabled />}
-          </ListSection>
-        </List>
-
-        {err && <p className="finding-text">{err}</p>}
-        <p className="dir-note">当前：{cwd || '（未选择）'}</p>
-      </div>
-
-      <div className="dir-actions">
-        <span className="spacer" />
-        <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>
-          取消
-        </Button>
-      </div>
-    </GlassDialog>
   )
 }

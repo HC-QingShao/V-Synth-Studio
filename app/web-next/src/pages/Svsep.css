@@ -27,37 +27,8 @@
   min-width: 0;
 }
 
-/* ── 选文件的那块大按钮 ─────────────────────────────────── */
-.svsep-drop {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 22px 16px;
-  border: 1px dashed var(--lg-separator);
-  border-radius: 14px;
-  background: transparent;
-  color: var(--lg-label);
-  font: inherit;
-  cursor: pointer;
-  text-align: center;
-}
-
-.svsep-drop:hover {
-  border-color: var(--lg-accent);
-  background: color-mix(in srgb, var(--lg-accent) 6%, transparent);
-}
-
-.svsep-drop-name {
-  font-weight: 600;
-  word-break: break-all;
-}
-
-.svsep-drop-meta {
-  color: var(--lg-label-secondary);
-  font-size: 0.86em;
-}
+/* 选文件那块自己画的大虚线按钮（`.svsep-drop*`）已经删掉：音频素材改用
+   系统「打开」对话框 + 拖入，与别的页一个长相（见 `Svsep.tsx` 那句注释）。 */
 
 /* ── 引擎卡的「约 11 分钟」那一行 ────────────────────────── */
 .svsep-cost {

@@ -1,7 +1,7 @@
 {
   "name": "v-synth-studio-web",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.3.0",
   "type": "module",
   "description": "V-Synth-Studio 前端（React + Vite）。构建产物输出到 ../web/（index.html + assets/），由 Rust 后端直接伺服。",
   "scripts": {
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@ttqtt/liquid-glass-react": "^0.0.2",
+    "qrcode.react": "^4.2.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

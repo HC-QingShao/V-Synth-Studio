@@ -8,14 +8,17 @@ import {
   ListSection,
   Picker,
 } from '@ttqtt/liquid-glass-react'
-import { api } from '@/lib/api'
+import { api, mediaProxyUrl } from '@/lib/api'
 import type { VideoInfo, VideoParse, VideoStreams } from '@/lib/api'
 import { Button, IconButton } from '@/components/Button'
+import { Credit, Upstream } from '@/components/Credit'
 import { DirectoryInput } from '@/components/DirPicker'
 import { Field, TextInput } from '@/components/Field'
 import { Icon } from '@/components/Icon'
 import { JobProgress } from '@/components/Job'
 import { Chip, Finding, Panel, PanelHead, Stat } from '@/components/Panel'
+import { VideoPreview } from '@/components/Preview'
+import { ScanLogin } from '@/components/ScanLogin'
 import { formatBytes, formatDuration, formatNumber } from '@/lib/format'
 import { useJob } from '@/lib/useJob'
 import type { PageProps } from './types'
@@ -297,7 +300,7 @@ interface Picked {
 
 /* ══════════════════════════════════════════════════════════════ 页面 ══ */
 
-export function Video({ state, onNavigate, onToast }: PageProps) {
+export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps) {
   const [settings, setSettings] = useState<Settings>(loadSettings)
   const [url, setUrl] = useState(() => loadSettings().lastUrl)
 
@@ -305,6 +308,7 @@ export function Video({ state, onNavigate, onToast }: PageProps) {
   const [parsed, setParsed] = useState<VideoParse | null>(null)
   const [parseErr, setParseErr] = useState<string | null>(null)
   const [coverErr, setCoverErr] = useState(false)
+  const [loginOpen, setLoginOpen] = useState(false)
 
   const [tab, setTab] = useState<'pages' | 'season'>('pages')
   const [selection, setSelection] = useState<Set<string>>(() => new Set())
@@ -392,6 +396,55 @@ export function Video({ state, onNavigate, onToast }: PageProps) {
      所以这一截回退实际恒为 undefined —— 不崩，但永远不生效。没有删它、也没改运行逻辑，
      只加了个窄断言让它编译，怎么处理交给知道契约那边的人。 */
   const cover = info.cover || (parsed?.currentPage as { cover?: string } | undefined)?.cover || info.thumbnail
+
+  /* ── 预览用的直链 ──────────────────────────────────────────
+     B 站的 dash 流视频/音频是分开的（这正是 yt-dlp 要 merge 的原因），
+     yt-dlp 那边也常只有「分开的轨」，所以预览得跟着当前选中的画质走：
+     durl 只放第一段，dash 取选中视频轨 + 对应音频轨，yt-dlp 优先「有音有画」那条。
+     直链一律套本机代理（`/api/media/proxy`）—— 浏览器直连 B 站 CDN 会因为缺 Referer 被 403。 */
+  const preview = (() => {
+    if (!parsed) return null
+    if (!isBili) {
+      const fs = (info.formats ?? []).filter((f) => !!f.url)
+      const both = fs.find(
+        (f) => !!f.vcodec && f.vcodec !== 'none' && !!f.acodec && f.acodec !== 'none',
+      )
+      const onlyV = fs.find((f) => !!f.vcodec && f.vcodec !== 'none')
+      const onlyA = fs.find(
+        (f) => !!f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none'),
+      )
+      const v = both ?? onlyV
+      if (!v?.url) return null
+      return {
+        videoUrl: mediaProxyUrl(v.url, 'ytdlp'),
+        audioUrl: both ? undefined : onlyA?.url ? mediaProxyUrl(onlyA.url, 'ytdlp') : undefined,
+        poster: info.thumbnail,
+        note: both
+          ? `预览这条是「有音有画」的整段流（${both.resolution || both.formatId || '默认'}）。`
+          : '这个站点只给了分开的视频轨 / 音频轨，播放时两个元素会对齐；直链有时会被站点限速，卡就先下载。',
+      }
+    }
+    if (durl) {
+      const seg = streams?.streams?.[0]
+      if (!seg?.url) return null
+      return {
+        videoUrl: mediaProxyUrl(seg.url),
+        poster: cover,
+        note: '整段流是分段的，预览只放第一段（下载仍是整段排队）。',
+      }
+    }
+    const a = audios.find((x) => x.id === picked.audio) ?? audios[0]
+    const src = selectedVideo?.url || selectedVideo?.backupUrls?.[0]
+    if (!src) return null
+    return {
+      videoUrl: mediaProxyUrl(src),
+      audioUrl: a?.url ? mediaProxyUrl(a.url) : undefined,
+      poster: cover,
+      note: selectedVideo
+        ? `正在预览：${selectedVideo.qualityName}${a?.qualityName ? ` + ${a.qualityName}` : ''}。换个画质这里会跟着换。`
+        : undefined,
+    }
+  })()
 
   const runningItem = queue.find((q) => q.status === 'running')
   const doneCount = queue.filter((q) => q.status === 'done').length
@@ -1014,19 +1067,30 @@ export function Video({ state, onNavigate, onToast }: PageProps) {
                         <div className="video-cookie">
                           <Finding level="warn" title="画质受限：未登录">
                             {locked.length
-                              ? `填入 Cookie 可解锁 1080P+。这个视频有 ${locked
+                              ? `扫码登录就能解锁 1080P+。这个视频有 ${locked
                                   .map((l) => l.name)
                                   .join('、')} 等高画质，但没登录 B 站只能取到 ${
                                   videos.map((v) => v.qualityName).join('、') || '低画质'
-                                }。填一份 Cookie 就能解锁（设置页一次填好，之后一直有效）。`
-                              : '填入 Cookie 可解锁 1080P+ 等大会员画质（设置页一次填好，之后一直有效）。'}
+                                }。`
+                              : '扫码登录就能解锁 1080P+ 等大会员画质。'}
                           </Finding>
                           <div className="btn-row">
-                            <Button size="sm" variant="primary" icon="gear" onClick={() => onNavigate('settings')}>
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              icon="bilibili"
+                              onClick={() => setLoginOpen(true)}
+                            >
+                              扫码登录
+                            </Button>
+                            <Button size="sm" icon="gear" onClick={() => onNavigate('settings')}>
                               去设置填 Cookie
                             </Button>
-                            <span className="video-note">Cookie 只保存在本机配置文件里，不会上传到任何地方。</span>
                           </div>
+                          <p className="video-note">
+                            扫码最省事：手机 B 站扫一下、确认一下，Cookie 就自动写进本机配置，以后一直有效。
+                            也可以自己去设置页填一份。两种方式的 Cookie 都只存在本机配置文件里，不会上传到任何地方。
+                          </p>
                         </div>
                       )}
 
@@ -1170,6 +1234,26 @@ export function Video({ state, onNavigate, onToast }: PageProps) {
         </Panel>
       )}
 
+      {/* ══════════════════════ 预览 ══════════════════════ */}
+      {!parsing && preview && (
+        <Panel>
+          <PanelHead title="预览" desc="不用先下载，直接在这儿看一眼（直链走本机代理取）" />
+          <VideoPreview
+            videoUrl={preview.videoUrl}
+            audioUrl={preview.audioUrl}
+            poster={preview.poster}
+            note={preview.note}
+          />
+        </Panel>
+      )}
+
+      <ScanLogin
+        open={loginOpen}
+        onClose={() => setLoginOpen(false)}
+        onLoggedIn={() => void onRefreshState()}
+        onToast={onToast}
+      />
+
       {/* ══════════════════════ 下载选项 ══════════════════════ */}
       <Panel>
         <PanelHead title="下载选项" desc="存到哪里、下哪些附带内容（会自动记住）" />
@@ -1185,6 +1269,8 @@ export function Video({ state, onNavigate, onToast }: PageProps) {
             <DirectoryInput
               value={settings.outDir}
               placeholder="留空 = 用设置里的默认下载目录…"
+              title="选下载到哪个目录"
+              onToast={onToast}
               onChange={(v) => setSetting('outDir', v)}
             />
           </Field>
@@ -1338,6 +1424,22 @@ export function Video({ state, onNavigate, onToast }: PageProps) {
           <p className="video-note">下载在后台进行：切走视图也不会中断，回来重新解析即可继续。</p>
         </Panel>
       )}
+
+      {/* 许可与出处：解析下载走 yt-dlp、合流转码走 ffmpeg，都是别人的东西 */}
+      <Credit
+        desc="下载与合流各用一个第三方程序，许可与出处写在这里"
+        items={[
+          { label: '解析下载', value: 'Unlicense', sub: 'yt-dlp 2026.08.19' },
+          { label: '合流转码', value: 'GPL v3', sub: 'FFmpeg 9.0.2（gyan.dev）' },
+          { label: 'B 站解析', value: '自研', sub: '不走第三方解析库' },
+        ]}
+      >
+        B 站以外的站点交给 <Upstream href="https://github.com/yt-dlp/yt-dlp">yt-dlp</Upstream>
+        （独立进程，读它的 JSON 输出；它是 Unlicense，等于公有领域）；音视频合流、抽音轨、转码交给随包的{' '}
+        <Upstream href="https://ffmpeg.org/">ffmpeg</Upstream>
+        （GPL v3 构建，能「-c copy」就不重编码）。B 站那条路是本程序自己写的：
+        画质与音轨的取址、登录态与大会员画质都不经过第三方。
+      </Credit>
     </>
   )
 }

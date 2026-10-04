@@ -80,6 +80,26 @@
   --bg-veil: transparent;
 }
 
+/**
+ * 亮色 + 玻璃档 ≥3 时，**分段控件里选中的那一项文字看不见**（白字压白胶囊）。
+ *
+ * 成因在库里，两处叠起来的：
+ *   · `components.css:68` —— `.lg-root[data-material="clear"] { --lg-fg: #fff }`
+ *     （档 ≥3 的材质就是 clear，见 `lib/useGlass.ts` 的 `levelMaterial()`），
+ *     而 `.lg-segment:has(input:checked) { color: var(--lg-fg) }`（:206）；
+ *   · `tokens.css:461` —— 亮色的选中胶囊底色 `--lg-lens-bg: rgb(255 255 255)`，
+ *     **不透明纯白**（库故意如此：亮色下白轨道上的半透明白胶囊会看不见）。
+ * 于是选中项 = 白字 + 白底。档 1 不中招（它走 `data-transparency="opaque"`，
+ * 库自己有 `--lg-fg: rgb(0 0 0)` 兜底，:102），暗色也不中招（`--lg-label` 本来就是白的）。
+ *
+ * 库那个 `#fff` 是「clear 玻璃浮在暗色素材上」的假设；我们亮色主题里玻璃背后是亮背景，
+ * 所以把前景色给回 `--lg-label`（亮色 = 黑），与库对 opaque 材质那条兜底规则同义。
+ * 作用域只到 clear 材质的玻璃根；带 variant 的组件（按钮等）有自己的 color 声明，不受影响。
+ */
+[data-lg-theme='light'] .lg-root[data-material='clear'] {
+  --lg-fg: var(--lg-label);
+}
+
 html,
 body,
 #root {
@@ -283,6 +303,20 @@ html[data-boot='out'] .app-main {
   align-items: center;
   gap: var(--lg-space-2);
   min-width: 0;
+  /**
+   * ⚠️ **2026-10-04 修：品牌原来与侧栏玻璃面板的「外沿」齐平（两者都是 x=112.5），
+   * 而侧栏里的内容是从内边距之后才开始的 —— 用户报的「左上角软件图标文字
+   * 轻微向左偏移」就是这个：图标贴着面板左边线，看着比下面所有东西都靠左。**
+   *
+   * 这里补的正是侧栏那份内边距（同一个 `--lg-space-3` = 12px），补完品牌与
+   * `.app-sidebar-inner` 的内容列对齐（124.5 = 112.5 + 12，与「工作台」那类分组标题同一条竖线）。
+   *
+   * ⚠️ **只加在 `.brand` 上，别加在 `.app-topbar` 上** —— 顶栏自己的左边缘必须继续与
+   * 侧栏玻璃外沿逐像素对齐，`tests/manual/topbar-probe.mjs` 断言的就是那一条。
+   * 想让它跟导航**图标**对齐（再往右 24px，x=148.5）就把这里换成 `calc(var(--lg-space-3) * 3)`；
+   * 三种候选的对比图留在 `tests/manual/out/brand-align-{0,12,36}.png`。
+   */
+  padding-inline-start: var(--lg-space-3);
 }
 /* 应用图标。原来这里是个 `background: var(--lg-accent)` 的纯色方块 ——
    没有图，用户看到的就是「左上角 logo 显示不正常」。
@@ -474,6 +508,18 @@ html[data-boot='out'] .app-main {
 .panel-padded {
   padding: var(--lg-space-5);
 }
+/* ── 面板体内的行距 ──────────────────────────────────────────────
+   `.field` / `.btn-row` / `.drop-hint` 这三种块**自己都没有外边距**，平级相邻时
+   首尾严丝合缝 —— 人声转 MIDI 与音轨分离页看起来就像「控件堆在一起」。
+   这里只给它们补「上面那 16px」：
+     · `.hint`（自带 `margin-block-start`）与 `.panel-head`（自带 `margin-block-end`）
+       不动 —— 相邻外边距会合并，不会叠成两倍；
+     · 列表类面板里的行不在这个名单里，一行行的紧排不受影响；
+     · `.panel > div` 同时命中两个分支：非玻璃档是 `.panel` 里那层无类名的 div，
+       玻璃档是那层 `.panel-padded`（见 components/Panel.tsx:89）。 */
+.panel > div > * + :is(.field, .btn-row, .drop-hint) {
+  margin-block-start: var(--lg-space-4);
+}
 .panel-head {
   display: flex;
   align-items: flex-start;
@@ -568,6 +614,100 @@ html[data-boot='out'] .app-main {
 }
 .stats-action {
   margin-inline-start: auto;
+}
+
+/* ── 许可与出处（`components/Credit.tsx`）──────────────────────────────
+   和上面 `.stats-row` 同形的一排统计格 + 一段说明。单列一个类是因为它要在多处
+   复用（音轨分离 / 音频 / 视频 / 转换 / 歌词 / 文字 PV），而 `.stats-row` 的
+   `align-items: flex-end` 是给「右边挂一个动作」准备的，这里不需要。 */
+.credit-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lg-space-4) var(--lg-space-5);
+  margin-bottom: var(--lg-space-3);
+}
+
+/* ── 关于页的「源码许可总表」（pages/Settings.tsx）─────────────────────
+   一行一个功能：左列功能名，右列「上游 + 许可 + 用法」。分隔线靠 `border-block-start`
+   画在行上、首行去掉，所以整块不用额外上边距（`.panel-head` 自带下边距）。
+   窄窗口把左列收进同一行，不然功能名会把右侧挤成一条。 */
+.lic-list {
+  display: grid;
+}
+.lic-row {
+  display: grid;
+  /* 左列必须用**固定长度**：每行是各自独立的 grid 容器，写 `max-content` 会按「本行」
+     那条功能名算宽 —— 实测 6 种不同的右列起点（510/536/562/581.5/620.5/568.5），
+     14 行的链接全部错位。也不能用 `em`：它按行自己的字号算（10em = 140px），
+     装不下最长的那条「人声转 MIDI（推理运行时）」（13px 字号实测 162.5px、会折行）。
+     `rem` 按根字号算，10.5rem = 168px，刚好放下最长的一条还留几像素。 */
+  grid-template-columns: 10.5rem minmax(0, 1fr);
+  gap: var(--lg-space-1) var(--lg-space-4);
+  padding-block: var(--lg-space-3);
+  border-block-start: 1px solid var(--lg-separator);
+}
+.lic-row:first-child {
+  padding-block-start: 0;
+  border-block-start: 0;
+}
+.lic-feature {
+  font-size: 13px;
+  font-weight: var(--lg-weight-semibold);
+  color: var(--lg-label);
+}
+.lic-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--lg-space-2);
+}
+.lic-upstream {
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--lg-label);
+}
+.lic-row .hint {
+  margin-block-start: var(--lg-space-1);
+}
+@media (max-width: 720px) {
+  .lic-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 说明里的上游链接：浏览器默认的蓝紫压在暗色玻璃上太跳，跟着强调色走
+   （资源库的收录条目也是这个做法）。人声转 MIDI 那份老文案里的链接一并受益。 */
+.hint a {
+  color: var(--lg-accent);
+  text-decoration: none;
+}
+.hint a:hover {
+  text-decoration: underline;
+}
+
+/* ── 上游链接（`components/Credit.tsx` 的 `Upstream`）──────────────────
+   **是 `<button>` 不是 `<a>`**：窗口加载的是 `http://127.0.0.1:17878`，
+   真链接会把整个页面换成上游网站（WebView 里没有后退键可回）。所以它在
+   正文里当链接用、行为却是「交给系统默认浏览器打开」，样式得自己写成链接的样子。
+   段落里的字要跟着正文走（`font: inherit` + `color`），不然按钮的默认字体
+   会在说明文字中间显出来。 */
+.upstream {
+  margin: 0 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--lg-accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.upstream:hover {
+  text-decoration: underline;
+}
+/* 许可表里那一行的上游列（设置页的 `lic-row`）字号跟正文一格 */
+.lic-upstream.upstream {
+  margin: 0;
 }
 
 /* ── 快捷入口：实色可点卡片 ─────────────────────────────────── */
@@ -770,6 +910,13 @@ html[data-boot='out'] .app-main {
 }
 .input,
 .textarea {
+  /* ⚠️ 这行不能省：玻璃档 1~3 的面板是普通 `div.panel`，**不是 `.lg-root`**，
+     拿不到库那条 `.lg-root * { box-sizing: border-box }`；`<input>` 的 UA 默认又是
+     content-box，于是 `width:100%` 按内容盒算，加上 24px 内边距与 2px 边框就比容器宽
+     26px、右边缘压出面板边框（实测人声转 MIDI 页的路径框与「线程数」框，
+     `app/web-next/src/pages/Midi.tsx` 里那两个裸 `.input` 最明显），
+     高度也比旁边的 `<select class="input">` 高 17px。玻璃档 4 自动变好就是这个原因。 */
+  box-sizing: border-box;
   width: 100%;
   min-height: 38px;
   padding: 8px var(--lg-space-3);
@@ -786,6 +933,27 @@ html[data-boot='out'] .app-main {
   outline-offset: 1px;
 }
 
+/* 设置-关于 页「关于作者」里的 ID 一行：比正文大一号、半粗，和 `Stat` 的数值同档 */
+.author-name {
+  font-size: 17px;
+  font-weight: var(--lg-weight-semibold);
+  color: var(--lg-label);
+}
+
+/* 设置页的标题行（「设置 / 外观、路径、外部工具」）**也是左边这条轨的一部分**：
+   它和下面那块玻璃导航同一个左边缘、副标题写的就是导航的小节名，所以页面一滚
+   它自己飘走、玻璃却钉住 —— 用户看到的就是「左边还在跟着鼠标动」。
+   这里把它一起钉住。`top` 仍然是它自己的初始位置 **58**（和 `.app-sidebar` 同一条
+   规矩，理由见那条注释：写小了会先往上跳一截）。
+
+   只对带 `.settings` 两栏布局的页面生效 —— 别的页正文是全宽的，标题钉住会被
+   正文从底下穿过去（设置页右侧面板从 x≈429 起，跟标题、导航都不会重叠）。 */
+.app-main:has(.settings) .page-head {
+  position: sticky;
+  top: calc(var(--lg-space-4) * 2 + 26px);
+  z-index: 1; /* 压在正文之上、顶栏（10）之下 */
+}
+
 /* ── 设置页：左分节 + 右内容 ─────────────────────────────────── */
 .settings {
   display: flex;
@@ -799,7 +967,18 @@ html[data-boot='out'] .app-main {
   width: 142px;
   flex: none;
   position: sticky;
-  top: var(--lg-space-4);
+  /**
+   * ⚠️ **`top` 必须等于初始位置**（和 `.app-sidebar` 同一条规矩）。
+   * 这里踩过第二次：原来写的是 `var(--lg-space-4)`（16px），于是页面一滚这块玻璃
+   * 先自己往上爬 116px、最后停在 16px —— 正好钻进顶栏那条带子（16~42）底下，
+   * 用户看到的就是「子侧边栏跟着滚轮走」。
+   *
+   * 初始位置 = `.app` 上内边距 16 + 顶栏 26 + 一个间距 16 + `.page-head` 高 74 = **132**。
+   * 那个 74 是「设置 / 外观、路径、外部工具」这行的实测高度（`.page-title` 28px/34px
+   * + `.page-sub` 15px + 上边距 4 + `.page-head` 的下内边距 16）；将来改标题字号或
+   * 副标题文案要重新量一次 —— 写小了就是「跟着滚轮走」，写大了页面一打开就会看到它被顶下去。
+   */
+  top: calc(var(--lg-space-4) * 2 + 26px + 74px);
 }
 .settings-body {
   flex: 1;
@@ -1046,30 +1225,39 @@ html[data-boot='out'] .app-main {
   word-break: break-all;
 }
 
-/* ── 目录选择器 ──────────────────────────────────────────────── */
-.dir-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--lg-space-3);
-  min-height: 320px;
-  max-height: 52dvh;
-  overflow: auto;
-}
-.dir-roots {
-  max-height: 132px;
-  overflow: auto;
-}
-.dir-note {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--lg-label-secondary);
-  word-break: break-all;
-}
+/* ── 目录选择器的残留样式 ─────────────────────────────────────
+   自己画的那个目录树（原 `components/DirPicker.tsx` 的 `DirPicker`）已经删掉 ——
+   选目录一律走系统对话框（`DirectoryInput`）。只剩 `.dir-actions` 还活着：
+   资源库那页拿它当「一行操作按钮」的容器，名字是历史遗留，别照名字猜用途。 */
 .dir-actions {
   display: flex;
   align-items: center;
   gap: var(--lg-space-2);
   margin-block-start: var(--lg-space-4);
+}
+
+/* ── 拖入提示条（components/FilePick.tsx）───────────────────────
+   页面根元素才是真正的落点（`dropProps`），这条只是**告诉用户「可以拖」**的
+   一句话。所以它平时低调：一行小字 + 虚线框，文件拖到窗口上时才亮成强调色 ——
+   高亮和「松手有没有用」是同一个状态（`dragging`），不会骗人。 */
+.drop-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--lg-space-2);
+  padding: var(--lg-space-2) var(--lg-space-3);
+  font-size: 12.5px;
+  color: var(--lg-label-secondary);
+  border: 1px dashed var(--lg-separator);
+  border-radius: var(--lg-radius-m);
+  transition:
+    border-color var(--lg-duration-layout) var(--lg-ease-out),
+    background var(--lg-duration-layout) var(--lg-ease-out),
+    color var(--lg-duration-layout) var(--lg-ease-out);
+}
+.drop-hint[data-over='true'] {
+  color: var(--lg-label);
+  border-color: var(--lg-accent);
+  background: var(--lg-fill-tertiary);
 }
 
 /* ── 输入框 + 按钮的一行 ─────────────────────────────────────── */
@@ -1100,4 +1288,40 @@ html[data-boot='out'] .app-main {
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--lg-label-secondary);
+}
+
+/* ── B 站扫码登录（`components/ScanLogin.tsx`）────────────────────────
+   弹窗本体是库的 `GlassDialog`，这里只管里面那块二维码。
+   ⚠️ 二维码必须「白底黑块」：它是给手机摄像头看的，跟着暗色主题走会扫不出来，
+   所以 `.qr-box` 固定白底、`QRCodeSVG` 的 bgColor/fgColor 也在组件里写死了。 */
+.qr-login {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lg-space-4);
+}
+.qr-box {
+  display: grid;
+  place-items: center;
+  align-self: center;
+  padding: var(--lg-space-3);
+  border-radius: var(--lg-radius-m);
+  background: #ffffff;
+  /* 白底在亮色主题里会跟面板糊在一起，加一圈描边把它框住 */
+  border: 1px solid var(--lg-separator);
+}
+.qr-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--lg-space-2);
+  width: 168px;
+  height: 168px;
+  color: var(--lg-label-tertiary);
+}
+.qr-status {
+  margin: 0;
+  text-align: center;
+  font-size: 13.5px;
+  font-weight: 600;
 }

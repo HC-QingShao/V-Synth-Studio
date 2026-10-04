@@ -5,12 +5,13 @@
 //!  - DASH 流解析（视频+音频分离），可选画质与编码
 //!  - 官方字幕、弹幕 XML、封面
 //!  - 登录 Cookie（SESSDATA）解锁 1080P+ / 大会员画质
+//!  - 扫码登录（把登录拿到的 Cookie 写进配置，见 `qr_generate` / `qr_poll`）
 //!  - WBI 签名（不签名会被风控拒绝，HTTP 403 / code -352）
 
 use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
 
@@ -991,6 +992,162 @@ pub fn is_bilibili(raw: &str) -> bool {
     false
 }
 
+/* ══════════════════════ 扫码登录 ══════════════════════ */
+
+/// 申请二维码。**不用登录**，未登录也能拿。
+const API_QR_GENERATE: &str = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate";
+/// 轮询扫码结果。登录成功时 Cookie 只在**响应头**（`Set-Cookie`）里，回包的 JSON 里没有。
+const API_QR_POLL: &str = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll";
+
+/// 登录 Cookie 里要留的字段。
+///
+/// B 站登录成功会下一大把 `Set-Cookie`（`buvid3`/`b_nut`/`buvid4`… 那些是设备指纹），
+/// 只留这几个：写进配置文件的那串越短越好，而 playurl 真正认的只有 `SESSDATA`
+/// （`has_login()` 也只看它）。`bili_jct` 是投币/收藏之类写操作要的 CSRF token，
+/// 现在没用到，但留着不亏 —— 万一以后要「一键三连」。
+const LOGIN_COOKIE_KEYS: [&str; 5] = [
+    "SESSDATA",
+    "bili_jct",
+    "DedeUserID",
+    "DedeUserID__ckMd5",
+    "sid",
+];
+
+/// 扫码登录第一步：要一张二维码，回 `(url, qrcode_key)`。
+///
+/// `url` 是给手机扫的（`https://www.bilibili.com/h5/…` 或 `bilibili://`），
+/// 由前端画成二维码；`qrcode_key` 是下一步轮询的令牌。
+pub async fn qr_generate() -> Result<(String, String), String> {
+    let h = net::headers(&[
+        ("User-Agent", DEFAULT_UA),
+        ("Referer", "https://www.bilibili.com/"),
+    ]);
+    let json = net::fetch_json(API_QR_GENERATE, h, 15, 2).await?;
+    let code = json.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code != 0 {
+        let msg = json
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("未知错误");
+        return Err(format!("申请二维码失败（{code}）：{msg}"));
+    }
+    let url = at(&json, &["data", "url"])
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let key = at(&json, &["data", "qrcode_key"])
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if url.is_empty() || key.is_empty() {
+        return Err("申请二维码失败：返回里没有 url / qrcode_key".to_string());
+    }
+    Ok((url, key))
+}
+
+/// 一次轮询的结果。
+pub struct QrPoll {
+    /// `data.code`：0 成功、86038 已失效、86090 已扫码待确认、86101 未扫码
+    pub code: i64,
+    /// 直接给界面显示的人话
+    pub message: String,
+    /// 只在成功时有：拼好的 Cookie 串（**绝不回传给前端**，见 `server::bili`）
+    pub cookie: Option<String>,
+}
+
+/// 扫码登录第二步：问一次「扫了没」。
+///
+/// 成功后从 `Set-Cookie` 里挑出登录 Cookie —— 这一步必须自己发请求读响应头，
+/// `net::fetch_json` 拿到的是 JSON，头被丢掉了。
+pub async fn qr_poll(key: &str) -> Result<QrPoll, String> {
+    if key.trim().is_empty() {
+        return Err("缺少 qrcode_key".to_string());
+    }
+    let h = net::headers(&[
+        ("User-Agent", DEFAULT_UA),
+        ("Referer", "https://www.bilibili.com/"),
+    ]);
+    let res = net::client()
+        .get(API_QR_POLL)
+        .query(&[("qrcode_key", key), ("source", "main-fe-header")])
+        .headers(h)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                "轮询二维码状态超时（15 秒）".to_string()
+            } else {
+                format!("轮询二维码状态失败：{e}")
+            }
+        })?;
+    // ⚠️ 先读头再读 body：`json()` 会把响应吃掉。
+    let set_cookies: Vec<String> = res
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(String::from)
+        .collect();
+    let json: Value = res
+        .json()
+        .await
+        .map_err(|e| format!("轮询返回不是合法 JSON：{e}"))?;
+
+    let code = at(&json, &["data", "code"])
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+    let (message, cookie) = match code {
+        0 => ("登录成功".to_string(), Some(cookie_from_set_cookie(&set_cookies))),
+        86038 => ("二维码已失效，点「换个二维码」重来".to_string(), None),
+        86090 => ("扫到了，在手机上点一下「确认登录」".to_string(), None),
+        86101 => ("还没扫（用手机 B 站扫这个码）".to_string(), None),
+        _ => {
+            let raw = json
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未知状态");
+            (format!("登录状态异常（{code}）：{raw}"), None)
+        }
+    };
+    // code 0 但一个字段都没捞到 = 没拿着 SESSDATA，等于没登录。这种情况当失败报出去，
+    // 免得界面显示「登录成功」而实际还是未登录（清晰度照旧卡在 480P，白高兴一场）。
+    let cookie = match cookie {
+        Some(c) if !c.contains("SESSDATA=") => {
+            return Err("登录成功了但没拿到 SESSDATA，请重新扫一次".to_string())
+        }
+        other => other,
+    };
+    Ok(QrPoll {
+        code,
+        message,
+        cookie,
+    })
+}
+
+/// 从一堆 `Set-Cookie` 里挑出登录 Cookie。
+///
+/// 每个头形如 `SESSDATA=xxx; Path=/; Domain=.bilibili.com; Expires=…` ——
+/// 只取第一段 `name=value`，属性段全丢；名字不在 `LOGIN_COOKIE_KEYS` 里的也丢。
+fn cookie_from_set_cookie(headers: &[String]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for h in headers {
+        let first = h.split(';').next().unwrap_or("").trim();
+        let Some((name, value)) = first.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if !LOGIN_COOKIE_KEYS.contains(&name) {
+            continue;
+        }
+        let pair = format!("{name}={}", value.trim());
+        if !out.contains(&pair) {
+            out.push(pair);
+        }
+    }
+    out.join("; ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,5 +1218,30 @@ mod tests {
         assert!(is_bilibili("av12345"));
         assert!(!is_bilibili("https://www.youtube.com/watch?v=x"));
         assert!(!is_bilibili("BV1GJ411x7h")); // 位数不够
+    }
+
+    #[test]
+    fn picks_login_cookie_fields_only() {
+        let raw = vec![
+            "buvid3=abc; Path=/; Domain=.bilibili.com".to_string(),
+            "SESSDATA=xyz%2C123; Path=/; Domain=.bilibili.com; HttpOnly".to_string(),
+            "bili_jct=deadbeef; Path=/".to_string(),
+            "DedeUserID=42; Path=/".to_string(),
+            "b_nut=1700000000; Path=/".to_string(),
+        ];
+        assert_eq!(
+            cookie_from_set_cookie(&raw),
+            "SESSDATA=xyz%2C123; bili_jct=deadbeef; DedeUserID=42"
+        );
+        // 没有 SESSDATA 就是空串 —— 调用方（`qr_poll`）拿它当失败处理
+        assert_eq!(
+            cookie_from_set_cookie(&["buvid3=abc; Path=/".to_string()]),
+            ""
+        );
+        // 重复字段只留一个
+        assert_eq!(
+            cookie_from_set_cookie(&["SESSDATA=a".to_string(), "SESSDATA=a".to_string()]),
+            "SESSDATA=a"
+        );
     }
 }

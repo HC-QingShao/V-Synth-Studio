@@ -278,6 +278,14 @@ CLI 调用形态（`libresvip.rs::convert`）：`libresvip-cli proj convert <in>
 
 **yt-dlp 路线**（`ytdlp.rs`）：查找顺序 `tools/yt-dlp.exe` → PATH → `python -m yt_dlp`；`inspect` 用 `-J`（120 秒超时，超时掐进程）；`normalize_info` 统一出 `title/uploader/durationSec/thumbnail/description(≤500字)/formats[]/subtitles[]`，格式按高度、再按码率降序；下载用 `--newline --progress-template` + `--print after_move:{"file":…}` 收产物路径，进度行按 `\n` 和 `\r` 双分隔解析（`p.percent < 0` 表示「只是一行信息」）。错误文本走 `clean_error`（挑一行有用的，滤掉 `[debug]`）。
 
+**扫码登录 + 预览**（`bili.rs::qr_generate` / `qr_poll`、`server/bili.rs`、`media.rs::proxy`、`components/ScanLogin.tsx` + `Preview.tsx`）：
+
+- **扫码登录**：`qr_generate` 现要一张二维码（`passport.bilibili.com/x/passport-login/web/qrcode/generate`）→ 前端画成 SVG → 每 **1.5 秒** `qr_poll`。码表就是 B 站自己那套：`0` 成功 / `86038` 已失效 / `86090` 扫了待确认 / `86101` 没扫。**Cookie 全程不经过前端**：Rust 从响应的 `Set-Cookie` 里挑出 `SESSDATA` / `bili_jct` / `DedeUserID` / `DedeUserID__ckMd5` / `sid`，直接写进 `config.bilibiliCookie` 落盘（和网易云那条 `save_netease_cookie` 同一套路），回包只有 `{code,message,loggedIn}`；`/api/bili/logout` 写空串。
+  ⚠️ 实现细节：读 `Set-Cookie` 必须在 `res.json()` **之前**（`json()` 会把响应体吃掉，之后就只剩错误信息）；二维码**白底黑块写死**，跟主题走暗色会扫不出来。
+- **预览**：`GET /api/media/proxy?src=bilibili|ytdlp&u=<编码后的直链>` 本机转发 —— **白名单 12 个主机后缀**（`bilivideo.com/.cn/.net/.com.cn`、`szbdyd.com`、`hdslb.com`、`bilibili.com`、`b23.tv`、`akamaized.net`、`biliapi.net`、`googlevideo.com`、`ytimg.com`），转发客户端的 `Range`，补 UA + `Referer`/`Origin`，上游状态码原样透传。必须走代理是因为浏览器直连 B 站 CDN 缺 `Referer` 会 403。
+- 前端 `Preview.tsx`：dash 的「视频轨 + 音频轨」用 `<video>`（主时钟）+ 隐藏 `<audio>`（跟播，漂移 >0.25 秒才硬拉，play/pause/seek/ratechange 全同步）两个元素放；yt-dlp 来源优先「有音有画」的整段流，没有才拆两条；durl 只预览第一段。
+- 为此 `ytdlp.rs::normalize_info` 现在把 `formats[].url` 一并带给前端（**只给预览用**，下载仍走后端；YouTube 直链没做 `n` 签名变换，会被限速）。
+
 **关键约束 / 坑**：
 
 - ⚠️ **`/api/fs/open` 只认 `path`**：`Resources.tsx:293`、`Video.tsx:775`、`Audio.tsx:1917` 传的是 `{url:…}` → 按代码必然 400「路径不存在：」（`simple.rs::fs_open` 只读 `body["path"]` 且要求路径存在）。**这一点是按代码核对得出的，未运行验证**（见 §6「未核实」）。
@@ -486,7 +494,9 @@ resources.json
 | yt-dlp | `tools/yt-dlp.exe` → PATH；运行时另有一层 `python -m yt_dlp`（`ytdlp::find_ytdlp`） | `--version` |
 | python | 只查 PATH（`path` 字段固定回 `"python"`） | `--version` |
 
-`/api/tools/detect` 的完整形状由 `tools::detect_all` 组装：`{checkedAt, platform, node, root, editors[], tools{ffmpeg,python,ytdlp}, installedCount}`。⚠️ **`?force=1` 被忽略**（handler 不读 Query，前端仍会带上，无副作用）。
+`/api/tools/detect` 的完整形状由 `tools::detect_all_from(root, editors, tools)` 组装：`{checkedAt, platform, node, root, editors[], tools{ffmpeg,python,ytdlp}, installedCount}`。⚠️ **`?force=1` 仍然被忽略**（handler 不读 Query），但现在**不管有没有带都会强制重新探测**：这条端点就是界面上的「重新检测」，必须绕过缓存。
+
+**探测结果有 60 秒缓存**（`AppState::probe_cached(force)`，`server/mod.rs`）：`detect_tools` 会真的 spawn `yt-dlp --version` / `python --version` 并逐段扫 PATH，机器忙时一次 2~7 秒，而 `/api/state` 从前每个请求都现算 —— 前端首屏等的就是它，表现成「启动卡死/白屏很久」。现在 ①`AppState::new()` 起一个后台线程预热一次；②`/api/state` 走缓存；③`/api/tools/detect` 用 `force=true` 绕过缓存。
 
 **`find_binary(name, extra_dirs)`**（`platform.rs`）：先给定目录、再 PATH；Windows 上自动补 `.exe`。**这就是「将来换 Android 走 JNI」要替换的那一层**（`tools_dir` 形参已经一路穿好）。
 

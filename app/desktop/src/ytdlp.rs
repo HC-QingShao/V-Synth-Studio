@@ -210,6 +210,13 @@ fn normalize_info(info: &Value) -> Value {
                     if let Some(v) = f.get("ext") {
                         m.insert("ext".into(), v.clone());
                     }
+                    // 直链只给**前端预览**用（页面里那个 <video> 要它），下载一律走后端 ——
+                    // 所以它不参与「要不要下这一条」的判断，`info.formats[].url` 为空时
+                    // 预览就退化成「先下载再看」。顺带一提：YouTube 的直链带 `n` 参数，
+                    // 不经过 yt-dlp 的签名变换直接播会被限速（能放，但高码率会卡）。
+                    if let Some(v) = f.get("url") {
+                        m.insert("url".into(), v.clone());
+                    }
                     m.insert(
                         "note".into(),
                         json!(s("format_note").unwrap_or_default()),

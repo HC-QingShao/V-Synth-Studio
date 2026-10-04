@@ -28,6 +28,17 @@
 | Rust 标准库与各 crate | MIT / Apache-2.0，已静态链接进 exe |
 | ONNX Runtime（`ort` crate，MIT） | **运行时按需加载**，见下面「人声转 MIDI」一节 |
 
+前端依赖（打包进 `app/web/assets/index-*.js`，不是独立程序，也不联网请求）：
+
+| 组件 | 实际版本 | 许可 | 用途 |
+|---|---|---|---|
+| React / React DOM | 19.3.0 | MIT | 整个界面的运行时 |
+| @ttqtt/liquid-glass-react | 0.0.2 | MIT | 玻璃材质组件库（材质、配色、字号、间距、圆角与动效） |
+| qrcode.react | 4.2.0 | ISC | 把 B 站登录二维码画成 SVG（纯前端渲染） |
+
+> 三者的许可全文随源码仓库的 `app/web-next/node_modules/` 分发；`package.json` 里记的是
+> 范围（`^`），上表这一列是**实际装上的版本**（`npm ls --depth=0` 实测）。
+
 ---
 
 ## 人声转 MIDI（GAME）—— ⚠️ 权重是**非商业**许可

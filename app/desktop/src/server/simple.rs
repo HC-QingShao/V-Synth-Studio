@@ -23,13 +23,13 @@ use super::{ok, AppState};
 
 /// 对外显示的版本号。
 ///
-/// Cargo 的 `version` 必须是合法 semver（`1.2.0-beta`），但那个字符串给人看太啰嗦。
-/// 界面上要的是 `1.2beta`，所以单独列一个常量 —— 改版本号时五处都要改：
+/// Cargo 的 `version` 必须是合法 semver（`1.3.0`），但那个字符串给人看太啰嗦。
+/// 界面上要的是 `1.3Beta`，所以单独列一个常量 —— 改版本号时五处都要改：
 /// 这里、`Cargo.toml`、`tauri.conf.json`、`app/web-next/package.json`
 /// （后两个是打包器与 npm 各读各的），以及 `Cargo.lock` / `package-lock.json`
 /// 那两条锁文件记录（跑 `cargo update -p v-synth-studio --precise <版本>` 与
 /// `npm install --package-lock-only` 让它们自己跟上，别手改）。
-pub const APP_VERSION: &str = "1.2beta";
+pub const APP_VERSION: &str = "1.3Beta";
 
 /// 作者标识。出现在「关于」里，也散落在源码注释中作为出处水印。
 pub const AUTHOR_TAG: &str = "QingMu39";
@@ -216,13 +216,17 @@ pub async fn config_post(
 
 pub async fn state(State(st): State<Arc<AppState>>) -> Json<Value> {
     let cfg = st.config_snapshot();
+    // 工具与声库探测走缓存（见 AppState::probe_cached）：
+    // 它要 spawn 进程 + 扫 PATH，机器忙时一次 2~7 秒，而前端首屏就在等这个接口。
+    // 启动时已经在后台线程预热过一次，这里通常直接命中。
+    let (editors, tools) = st.probe_cached(false);
     Json(ok(json!({
         // 前端侧边栏要显示版本号。以前它只能自己写死（/api/state 没这个字段），
         // 结果改了 APP_VERSION 界面完全不跟。这里给出去，前端就不必猜。
         "version": APP_VERSION,
         "formats": crate::libresvip::list_formats(&st.root),
-        "editors": crate::tools::detect_editors(),
-        "tools": crate::tools::detect_tools(&st.root),
+        "editors": editors,
+        "tools": tools,
         "transformOps": crate::data::transform_ops(),
         "audioFormats": crate::data::audio_formats(),
         "pinyin": crate::data::pinyin_summary(&st.root),
@@ -314,6 +318,160 @@ fn parse_exts(raw: Option<&str>) -> Vec<String> {
         .map(|s| s.trim().trim_start_matches('.').to_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/* ── 选文件的两条入口：系统对话框 / 拖入落盘 ──────────────────────────────────
+ *
+ * 界面上「选一个文件」这件事由 `app/web-next/src/components/FilePick.tsx`
+ * 统一收口，底下就是这两个端点：
+ *   - `/api/fs/pick`   弹 Windows 自己的「打开」对话框，回**绝对路径**；
+ *   - `/api/fs/upload` 收拖进来的文件原文，落盘之后再回路径。
+ *
+ * 为什么非要绕回「路径」不可：网页的 `<input type="file">` 与拖放拿到的都是
+ * `File` 对象，**没有本机路径**，而这两条路后面全是吃路径的活 —— ffmpeg
+ * （`/api/audio/run`）、试听（`/api/fs/raw` 支持 Range）、`/api/midi/transcribe`
+ * 都直接读本机文件，只认 `body.input → PathBuf`。要是坚持走「上传字节流」，
+ * 就得给每个页面再造一套上传端点，还要把几百 MB 的 wav 变成 base64 塞进 JSON
+ * （`convert.rs` 那条 `run-upload` 通道就是这么来的，所以它只敢卡 80MB）。
+ * 现在换成「上传的只是路径的搬运工」，页面侧完全不用改业务逻辑。
+ */
+
+/// `POST /api/fs/pick` —— 弹系统对话框。
+///
+/// 请求 `{exts?: string[], label?: string, title?: string, dir?: string, multi?: boolean,
+/// folder?: boolean}`，响应 `{ok:true, files:[绝对路径…]}`。**取消就是空数组**，
+/// 不是错误 ——「点了取消」和「对话框坏了」在界面上必须能分开。
+///
+/// `folder: true` 走另一套对话框（`platform::pick_folder`，系统「选择文件夹」）：
+/// 目录选择以前是前端自己画的，六个页面各一份，都得换成系统的那个。
+/// 两种对话框的请求/响应形状保持一样，前端只多传一个布尔。
+pub async fn fs_pick(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let str_of = |k: &str| body.get(k).and_then(Value::as_str).map(str::to_string).filter(|s| !s.is_empty());
+    let folder = body.get("folder").and_then(Value::as_bool).unwrap_or(false);
+    let opts = crate::platform::PickOptions {
+        label: str_of("label"),
+        exts: body
+            .get("exts")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.trim().trim_start_matches('.').to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        title: str_of("title"),
+        dir: str_of("dir"),
+        multi: body.get("multi").and_then(Value::as_bool).unwrap_or(false),
+    };
+
+    /*
+     * `spawn_blocking` 不是可选项：这个对话框一直阻塞到用户点下确定。
+     * 直接在 `async fn` 里调它，等于把一个 tokio worker 线程钉死在窗口消息循环里
+     * （worker 数 = CPU 核数，几下就全没了）—— 表现是整个服务卡住，
+     * 连「再点一次」都发不出去。
+     */
+    let files = tokio::task::spawn_blocking(move || {
+        if folder {
+            crate::platform::pick_folder(&opts)
+        } else {
+            crate::platform::pick_files(&opts)
+        }
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("文件对话框任务挂了：{e}")))?
+    .map_err(ApiError::internal)?;
+
+    Ok(Json(ok(json!({ "files": files }))))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UploadQuery {
+    /// 拖进来的文件名。浏览器只会给文件名（`File.name`），不带任何目录。
+    pub name: Option<String>,
+}
+
+/// 单个拖入文件的上限：2 GiB。
+///
+/// ⚠️ **别指望 `DefaultBodyLimit`**：那个中间件只对 `Bytes` / `String` 这类
+/// 「一次性收完」的提取器生效，对裸 `Body` 流一点作用都没有，挂上去是个假的保护。
+/// 所以这里在收流的循环里自己数。
+const UPLOAD_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+
+/// `POST /api/fs/upload?name=xxx.wav` —— 请求体原样落成临时文件，回它的路径。
+///
+/// 响应 `{ok:true, path, name, bytes}`。
+pub async fn fs_upload(Query(q): Query<UploadQuery>, body: Body) -> Result<Json<Value>, ApiError> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let name = sanitize_name(q.name.as_deref());
+    let dir = drop_dir();
+    tokio::fs::create_dir_all(&dir).await?;
+    // 毫秒时间戳打头：同一批拖进来的重名文件（还有上一次留下的）不会互相盖掉
+    let path = dir.join(format!("{}-{name}", now_millis()));
+
+    let mut file = tokio::fs::File::create(&path).await?;
+    let mut stream = body.into_data_stream();
+    let mut total: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| ApiError::bad_request(format!("收文件的时候断了：{e}")))?;
+        total += chunk.len() as u64;
+        if total > UPLOAD_LIMIT {
+            // 已经写下去的那些要收干净：临时目录不是垃圾桶
+            drop(file);
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(ApiError::bad_request(format!(
+                "单个文件不能超过 {} GiB",
+                UPLOAD_LIMIT / (1024 * 1024 * 1024)
+            )));
+        }
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+    drop(file);
+
+    if total == 0 {
+        // 拖了个文件夹进来（浏览器会当成 0 字节的文件）、或者中途取消，都会到这儿。
+        // 留一个 0 字节的临时文件只会让后面 ffmpeg 报一句更难懂的错。
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(ApiError::bad_request("收到的文件是空的（文件夹拖不进来，请拖文件）"));
+    }
+
+    Ok(Json(ok(json!({
+        "path": crate::platform::clean_path(&path),
+        "name": name,
+        "bytes": total,
+    }))))
+}
+
+/// 拖入落盘的目录。
+///
+/// 按进程号分开：两个实例（用户那个 17878 + 测试那个 8891）同时开着时不会互相删。
+/// **不主动清理** —— 这些文件接下来还要被 ffmpeg / 试听读到，什么时候能删只有
+/// 用户知道（真要清，关掉程序之后手动清临时目录即可，系统也会自己回收）。
+fn drop_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("qingmu-drops-{}", std::process::id()))
+}
+
+/// 把浏览器给的文件名洗成能安全落盘的单个文件名。
+fn sanitize_name(raw: Option<&str>) -> String {
+    let base = raw
+        .unwrap_or("")
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let safe: String = base
+        .chars()
+        .map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '_' } else { c })
+        .collect();
+    if safe.is_empty() || safe == "." || safe == ".." {
+        "dropped".to_string()
+    } else {
+        safe
+    }
 }
 
 fn files_json(dir: &Path, want: bool, exts: &[String]) -> Value {
