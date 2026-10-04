@@ -22,6 +22,7 @@
 | [八、平台移植](#八平台移植) | 碰 `platform.rs` / 谈 macOS / Android |
 | [九、历史](#九历史留档) | 考古、找已删代码 |
 | [十、下一步](#十下一步) | 接着做 |
+| [十一、减法重构方案（剔除 Axum，只留 IPC）](../docs/TAURI-IPC-PLAN.md) | 要动「窗口怎么加载前端」「前端怎么调 Rust」时 |
 
 ---
 
@@ -34,12 +35,13 @@
    直接 `cargo build` **不会**把 exe 复制到程序根目录，你双击启动器跑的还是旧版本，
    然后你会以为改动没生效。
 
-2. **前端构建也由 `build.ps1` 第一步代劳**（`npm run build`）。只改前端的话不用重编 Rust：
-   `cd app\web-next; npm run watch` + 刷新浏览器即可 —— 前端是**每请求从磁盘读**的。
+2. **前端也由 `build.ps1` 一步做完**（第一步 `npm run build`）。⚠️ **2026-10-04 起前端
+   是内嵌进 exe 的，改完必须重跑 `build.ps1`** —— 以前那句「改前端不用重编、刷新就行」
+   已经作废（那是静态伺服时代的行为）。
 
 3. **发布版依赖只增不减地写进 `bundle.resources` 时，别把 `app/web-next` 加进去。**
 
-4. **改完必须跑验证三件套**（第四节），并且**按端口 owner / 精确 PID 停测试实例**，
+4. **改完必须跑验证**（第五节），并且**只能按精确 PID 停实例**，
    别按命令行子串杀进程 —— 曾经误杀过 DSH 自己的任务进程。
 
 5. **别自己发明路径**。应用根目录、可写目录、工具目录全部来自 `main.rs::resolve_paths()`，
@@ -51,7 +53,8 @@
 7. **改 `.ps1` 要补 BOM、改 `.bat` 要转回 CRLF**，`write` / `edit` 两个工具都会破坏它们。
    细节见第三节「文件编码」。
 
-8. **用户正在用的实例别动**。正式端口是 17878；测试一律用 8891。
+8. **用户正在用的实例别动**。⚠️ **2026-10-04 起没有端口了** —— 从前端改走 Tauri IPC
+   之后「端口」这个概念整体消失（验证方式是 `Get-NetTCPConnection` 上不该有任何监听）。
    更别在用户跑着任务时重编 exe 覆盖它。
 
 ---
@@ -73,23 +76,31 @@
 
 ## 二、架构
 
-### 一个进程（运行时不依赖 Node）
+### 一个进程、零端口（运行时不依赖 Node，也不监听任何端口）
 
 ```
 ┌─ Tauri 2 外壳（原生窗口）
-│   └─ 同进程内嵌 axum HTTP 服务（http://127.0.0.1:17878）
-│        ├─ 提供 REST API（56 条路由）
-│        └─ 伺服前端静态文件（app/web/）
-└─ 窗口用 WebviewUrl::External 加载那个本地地址
+│   ├─ 窗口用 WebviewUrl::App("index.html") 加载**内嵌**的前端资源
+│   ├─ tauri::command（IPC）—— 70 条命令，前端唯一能碰到后端的入口
+│   │    └─ invoke('命令名', args) → Result<Value, String>，没有端口、没有路由表
+│   └─ asset 协议（Tauri 内置）—— 本地音视频播放，Range/206 是它自带的
+└─ 纯 Rust 后端（libresvip / lyrics / bili / ytdlp / audio / svsep / midi_transcribe / platform）
 ```
 
-**关键点**：窗口加载的是 `http://127.0.0.1:<port>`，**不是** Tauri 标准的
-`frontendDist` 内嵌方式。所以 `app/web/` 是**每请求从磁盘读**的 —— 改了
-HTML/CSS/JS 刷新就生效，**不需要重新编译**。`frontendDist: "./dist"` 只是个错误页，
-别被它误导。
+**关键点（2026-10-04 起，与以前完全相反）**：
 
-**历史上是 Node 后端（19,019 行），已全部重写成 Rust。** 运行时没有 `node.exe`。
-`node` 现在只出现在**构建期**（前端走 Vite，见第三节）。
+- 窗口加载的是 Tauri 的**资源协议**（Windows 上是 `http://tauri.localhost`），
+  前端资源（`app/web/`）在**编译时打包进 exe**。
+- **所以「改前端不用重编」这条已经不成立了** —— 改完前端要重跑 `build.ps1`
+  （它会先 `npm run build` 再编 Rust），或者在开发时用 Vite（`devUrl` 已删，
+  见 `docs/TAURI-IPC-PLAN.md`）。
+- **端口概念整体消失**，验证方式是「`Get-NetTCPConnection` 上不该有任何监听」。
+- 本机音视频**不许自己起 HTTP 服务**：本地文件用 `convertFileSrc(path)`，
+  Rust 侧读字节用 `tauri::ipc::Response`。
+
+**历史上是 Node 后端（19,019 行）→ 内嵌 axum HTTP 服务（9 文件 / 5,610 行 / 56 条路由）
+→ Tauri IPC（`src/ipc/`，14 文件 / 70 条命令）**，两次都把中间层整个删掉、没有留开关。
+运行时没有 `node.exe`；`node` 只出现在**构建期**（前端走 Vite，见第三节）。
 
 ### 目录
 
@@ -97,10 +108,25 @@ HTML/CSS/JS 刷新就生效，**不需要重新编译**。`frontendDist: "./dist
 app/
   desktop/            Tauri + Rust 后端
     src/
-      main.rs         入口：选端口、开窗口、resolve_paths
+      main.rs         入口：开窗口、resolve_paths、generate_handler!（70 条命令的唯一清单）
+      ipc/            **前端唯一能碰到后端的入口**（14 文件 / 70 条命令）
+        mod.rs        IPC 层说明：两条铁律 + 命令命名前缀 + 注册点只有一个
+        state.rs      状态聚合（AppState = 路径 + 配置快照 + 任务表）与任务表
+        config.rs     配置读写 + migrate_legacy_settings（取代 localStorage）
+        config_file.rs 配置文件的落盘/读取 —— 用户偏好的唯一真相
+        jobs.rs       任务生命周期、资源库、job_watch（Channel 订阅）
+        fs.rs         选文件 / 打开 / 拖入落盘 / 二进制读写 / asset 协议放行
+        tools.rs      外部工具探测（绕缓存）与启动外部程序
+        convert.rs    工程转换（LibreSVIP 编排）
+        media.rs      视频解析下载 / 音频工具 / 预览缓存（convertFileSrc）
+        lyrics.rs     歌词（网易云专区）
+        svsep.rs      音轨分离
+        midi.rs       人声转 MIDI
+        pv.rs         文字 PV 分块落盘
+        bili.rs       B 站扫码登录
       net.rs          共用 HTTP 客户端 + DEFAULT_UA
       platform.rs     跨平台路径、下载目录、回收站、find_binary
-      tools.rs        外部工具检测（ffmpeg / yt-dlp / python / 编辑器路径表）
+      tools.rs        外部工具的探测实现（被 ipc/tools.rs 调）
       libresvip.rs    LibreSVIP 引擎封装（转换 + 读工程）
       lyrics.rs       歌词：搜索 / 取词 / LRC-SRT / 封面 / 歌曲直链 / 短信登录
       svsep.rs        音轨分离：离线引擎（Python 子进程）+ 大包下载解压
@@ -108,14 +134,6 @@ app/
       ytdlp.rs        yt-dlp 桥接
       audio.rs        音频处理（ffmpeg）
       data.rs         静态数据（格式表、拼音）
-      server/
-        mod.rs        路由表（改路由来这里）
-        simple.rs     health / state / config / fs / jobs / 静态文件
-        convert.rs    工程转换
-        media.rs      视频解析下载 + 音频
-        lyrics.rs     歌词相关路由
-        svsep.rs      音轨分离：转发给内嵌的 Python 分离后端
-        tools.rs      工具检测
     tauri.conf.json   窗口、打包、resources
     build.ps1         唯一的构建入口
   web-next/           前端**源码**（React + Vite + TS + Tailwind）—— 9 页已全部搬完
@@ -135,21 +153,23 @@ app/
         Job.tsx       任务进度（库的 GlassProgress + 取消 + 日志）
         DirPicker.tsx 目录选择（库的 GlassDialog + PathBar + List）/ DirectoryInput
       lib/
-        api.ts        后端调用（56 条路由；API 在根路径 /api/*，**必须写绝对路径**）
-        types.ts      后端数据结构（照 tests/contract/fixtures 定义）
+        api.ts        后端调用（⚠️ **第 3 步待改**：现在还是 fetch('/api/…')，要换成 invoke）
+        ipc.ts        （第 3 步新建）invoke 包装 + 错误规范化 + Channel 订阅助手
+        config.ts     （第 3 步新建）useConfig()，取代 26 处 localStorage
+        types.ts      后端数据结构（照回包形状手写，**不引 ts-rs**）
         format.ts     formatBytes / formatDuration / formatNumber
-        useJob.ts     任务订阅：SSE + 轮询兜底
+        useJob.ts     任务订阅（⚠️ 待改：SSE → Channel，保留轮询兜底）
         useGlass.ts   玻璃等级 1~4（材质 / 透明度 / 面板要不要玻璃全由它派生）
         useNavLens.ts 侧栏与小节导航的滑动高亮块
         boot.ts       揭开启动加载画面
       pages/          9 页：Dashboard / Convert / Video / Svsep / Audio / Lyrics / Pv / Resources / Settings
                       （每页自带一个同名 .css；页面约定与库组件清单见 docs/FRONTEND.md）
-  web/                前端**产物 + 随包静态资源**（后端伺服的就是这个目录）
-    index.html        ← Vite 产物（**刷新即生效**；也是 resolve_paths 的哨兵文件）
+  web/                前端**产物 + 随包静态资源**
+    index.html        ← Vite 产物（**也是 resolve_paths 的哨兵文件**）
     assets/           ← Vite 产物（带内容哈希，每次构建新增；emptyOutDir:false 所以旧的不自动删）
     vendor/jizura/    JIZURA 文字 PV（上游构建产物 + 2335 个字体）—— **不是产物，别让构建清掉**
     img/bg/           桌面背景图（明亮/黑暗）—— 同上，被 index.css 以 url() 引用
-    img/logo.png      顶栏图标（源 app/desktop/icons/128x128.png，拷进来才伺服得到）
+    img/logo.png      顶栏图标（源 app/desktop/icons/128x128.png，拷进来才打得到）
   data/                只读数据：resources.json / pinyin.json（schema 见第六节）
                        绿色版的可写 config.json 也落在这里（安装版在 %APPDATA%）
 tools/                 随包分发：ffmpeg / yt-dlp / LibreSVIP（约 288 MB）—— **不入库**，见第三节
@@ -159,9 +179,9 @@ tests/
 docs/                  THIRD-PARTY-NOTICES / FEATURES / FRONTEND / GLASS-HANDOFF / LESSONS
 ```
 
-> ⚠️ **两个都不存在了**：`lib/useTheme.ts`、`lib/usePerfMode.ts` —— 主题与透明度现在在
-> `App.tsx` 里直接喂库的 `GlassProvider`；`perfMode` 的 config 字段后端有、**前端还没接**。
-> 启动加载画面：`index.html` 的 `#boot` + `lib/boot.ts`，规范见 `GLASS-HANDOFF.md` §4。
+> ⚠️ **`lib/useTheme.ts` 与 `lib/usePerfMode.ts` 都不存在了**：主题与透明度在 `App.tsx` 里
+> 直接喂库的 `GlassProvider`；`perfMode` 后端有字段、**前端还没接**。启动加载画面见
+> `GLASS-HANDOFF.md` §4（`#boot` + `lib/boot.ts`）。
 
 ### 路径模型（这段很重要）
 
@@ -269,7 +289,7 @@ Remove-Item Env:\GITHUB_TOKEN
 | 环节 | 需要 Node 吗 |
 |---|---|
 | 用户运行打包好的 exe | **不需要** —— 产物是静态 HTML/JS/CSS，exe 是 Rust |
-| 后端运行时 | **不需要** —— 56 条路由全在 Rust，`node.exe` 进程数为 0 |
+| 后端运行时 | **不需要** —— 70 条 IPC 命令全在 Rust，`node.exe` 进程数为 0 |
 | **编译前端**（`build.ps1` 第一步） | **需要** —— Vite 是 Node 工具 |
 
 `app/web-next/node_modules/` 约 91 MB，**但不进安装包**：
@@ -284,7 +304,7 @@ Remove-Item Env:\GITHUB_TOKEN
 
 | 位置 | 现在写的 | 谁读它 |
 |---|---|---|
-| `app/desktop/src/server/simple.rs` 的 `APP_VERSION` | `1.2beta` | **界面**（总览页脚、「关于」小节的「程序版本」），`/api/health` 与 `/api/state` 都发它 |
+| `app/desktop/src/ipc/config_file.rs` 的 `APP_VERSION` | `1.2beta` | **界面**（总览页脚、「关于」小节的「程序版本」），`get_state` 与 `get_config` 都发它 |
 | `app/desktop/Cargo.toml` 的 `version` | `1.2.0` | cargo（必须是合法 semver） |
 | `app/desktop/tauri.conf.json` 的 `version` | `1.2.0` | **MSI 的版本号**（不是 git tag） |
 | `app/web-next/package.json` 的 `version` | `1.2.0` | npm（只在日志里出现，但别让它落后） |
@@ -306,7 +326,7 @@ cd app\web-next; npm install --package-lock-only --no-audit --no-fund
 |---|---|
 | `启动工作站.bat` | React 前端（URL 前缀 `/`） |
 | 直接双击 `v-synth-studio.exe` | **同一个** React 前端 |
-| `v-synth-studio.exe --serve --port=<端口>` | 只起服务不开窗（给测试用） |
+| `v-synth-studio.exe --serve --port=<端口>` | **已删除**（2026-10-04）：没有 HTTP 服务了，写它没有任何效果 |
 
 **`--ui=next|old` 与启动器的 `--old` 已经删除**，现在写它们不会有任何效果（参数被忽略）。
 旧的手写前端（`app/web/js/`、`app/web/css/`、手写 `index.html`）已整体删除，
@@ -315,7 +335,8 @@ cd app\web-next; npm install --package-lock-only --no-audit --no-fund
 > 这一节以前叫「切换界面（旧前端 / 新前端）」，记着「启动器默认新前端、exe 默认旧前端」
 > 那套双界面机制。**那套机制已经不存在了，别再照它推理。**
 
-**改前端不用重新编译**：`npm run build` 或 `npm run watch` + 刷新即可，只有改 Rust 才需要 `build.ps1`。
+⚠️ **改前端也要重跑 `build.ps1`**（前端内嵌进 exe 了）。`npm run watch` 只负责重建
+`app/web/` 那份产物，它不进 exe —— 想看到效果必须重编。
 
 ### 文件编码
 
@@ -398,11 +419,12 @@ npm run watch   # 开发时推荐：改完自动重建，浏览器刷新即可
 
 ### 上 Vite 时的四条硬约束（已全部落地）
 
-- Vite 的 `outDir` 指向 `app/web/`、`base: '/'`，**服务端一行不用改** ——
-  窗口加载的是 `http://127.0.0.1:<port>`，静态文件每请求从磁盘读。
+- Vite 的 `outDir` 指向 `app/web/`、`base: '/'` —— 那份产物是 `frontendDist` 的来源，
+  `build.ps1` 编 Rust 时会把它**打包进 exe**。
 - `emptyOutDir` **必须是 `false`**（理由见上）。
-- ⚠️ **前端里所有 API 调用必须用绝对路径 `/api/...`**。相对路径 `./api/state` 在子路径下
-  会变成 `/app/api/state` → 404。见 `lib/api.ts` 的注释。
+- ⚠️ **前端调后端只剩一条路：`invoke('命令名')`**。**别再写 `fetch('/api/…')`** ——
+  那些路由已经不存在了（见 `docs/TAURI-IPC-PLAN.md`）。命令清单在 `main.rs` 的
+  `generate_handler!`（70 条，唯一登记处）。
 - `build.ps1` 仍是唯一构建入口（第一步就是 `npm run build`），代价是**编译机必须有 Node**。
 
 ---
@@ -410,27 +432,27 @@ npm run watch   # 开发时推荐：改完自动重建，浏览器刷新即可
 ## 五、怎么验证
 
 ```powershell
-# 启动测试实例（端口用 8891，别和用户正在开的实例打架）
-$p = Start-Process -FilePath 'H:\工作站\v-synth-studio.exe' `
-     -ArgumentList '--serve','--port=8891' -PassThru -WindowStyle Hidden
-Start-Sleep -Seconds 8
+# 1) Rust 单测 —— 现在是主验证（应 93 passed / 0 failed）
+cd app\desktop; cargo test --bins
 
-# 1) 接口契约（对冻结夹具）—— 应 17/17
-node tests\contract\verify.mjs 8891
+# 2) 起真窗口（带 CDP 端口）
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9349'
+$app = Start-Process -FilePath '.\v-synth-studio.exe' -PassThru
+Remove-Item Env:\WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+Start-Sleep -Seconds 9
 
-# 2) 九个页面渲染 + 关键字断言 —— 应 9/9
-node tests\manual\next-smoke.mjs 8891
-
-# 3) Rust 单测
-cd app\desktop; cargo test --bins      # 应全绿
+# 3) 问窗口自己 + 10 页冒烟（都应全绿）
+node tests\manual\window-check.js 9349
+node tests\manual\cdp-window-check.mjs 9349
 ```
 
-- 契约夹具在 `tests/contract/fixtures/`（17 个），是 Node 后端还在时抓的真实响应，
-  **永久基准**。`verify.mjs` 逐字段 diff，并把「有意差异」列在 `INTENDED` 白名单里 ——
-  **加条目要写清理由，它很容易变成掩盖问题的垃圾桶**。
-- `next-smoke.mjs` 会断言每页的关键字（如总览要有「欢迎回来」「格式支持」）。
-  **改页面文案会让它红**，改文案前先看它断言了什么。
-- `--serve` 模式只跑服务不开窗口，专门给测试用。
+- ⚠️ **契约测试与 `--serve` 已退役**（2026-10-04）：没有 HTTP 服务，`tests/contract/`
+  那套（对冻结夹具 diff、17 个用例）整条路失效，**别再去修它** —— 验收收敛到 `cargo test`。
+- `window-check.js` 问窗口「origin / IPC 在不在 / 渲染了多少」，`cdp-window-check.mjs`
+  走 10 页冒烟。两个都用 CDP，**表达式写在文件里、命令只传端口**。
+- ⚠️ **CDP 的 `Runtime.evaluate` 回包是两层 `result`**（外层是 JSON-RPC 响应壳、内层才是
+  RemoteObject）。写成 `r.result.value` 会**每一项都拿到 `undefined`**，而报告照样打印得整整齐齐，
+  看着像「应用没有 origin」—— 这个坑真踩过、白查一轮。
 
 ### 浏览器验证的坑
 
@@ -439,7 +461,7 @@ cd app\desktop; cargo test --bins      # 应全绿
 | 无头模式 | 必须 `--headless=old`（本机 `--headless=new` 报 Multiple targets 起不来） |
 | `--disable-gpu` | **只对截图有害**：带着它 `backdrop-filter` 会糊成一片空白。<br>`next-smoke.mjs` 里带了它没关系 —— 那条路只 dump DOM，不看画面对不对 |
 | `--dump-dom` 看不到 iframe 内部 | 要验 iframe 里的东西必须用 CDP（`--remote-debugging-port` + Node 自带 WebSocket，不要装包）。参考 `tests/manual/pv-verify.mjs` |
-| 端口 | 正式启动是 17878，**测试用 8891** |
+| 端口 | **没有了**（2026-10-04 起）。验证方式反过来：`Get-NetTCPConnection` 上不该有任何监听 |
 
 ### 进程卫生
 
@@ -447,12 +469,13 @@ cd app\desktop; cargo test --bins      # 应全绿
 无头 Edge 每个约 60–100 MB，会堆到十几个）：
 
 ```powershell
-$c = Get-NetTCPConnection -LocalPort 8891 -State Listen -EA SilentlyContinue | Select-Object -First 1
-if ($c) { Stop-Process -Id $c.OwningProcess -Force }
-Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHandle -eq 0 } | Stop-Process -Force
+Stop-Process -Id $app.Id -Force      # 上面 Start-Process -PassThru 拿到的那个 PID
+Get-Process -Name 'msedgewebview2','msedge' -EA SilentlyContinue |
+  Where-Object { $_.MainWindowHandle -eq 0 } | Stop-Process -Force
 ```
 
-⚠️ **杀进程只能按精确 PID 或端口 owner**，别按命令行子串匹配 —— 曾经误杀过 DSH 自己的任务进程。
+⚠️ **杀进程只能按精确 PID**（端口没了，所以「按端口 owner 杀」这条老办法也失效了），
+别按进程名或命令行子串匹配 —— 曾经误杀过 DSH 自己的任务进程。
 
 ---
 
@@ -463,14 +486,14 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 
 | 症状 / 场景 | 结论 |
 |---|---|
-| `/api/fs/open` 收两种参数 | `path`（本地路径，**要求存在**）或 `url`（http/https/ftp/mailto，走系统默认程序、不做存在性检查）。**2026-10-02 之前它只读 `path`**，于是所有传 `{url}` 的调用必然 400 —— 两个前端的「在浏览器打开」都是坏的，已修（`platform::open_url` + `looks_like_url`，带单测） |
+| `open_path` 收两种参数 | `path`（本地路径，**要求存在**）或 `url`（http/https/ftp/mailto，走系统默认程序、不做存在性检查）。**2026-10-02 之前它只读 `path`**，于是所有传 `{url}` 的调用必然 400 —— 两个前端的「在浏览器打开」都是坏的，已修（`platform::open_url` + `looks_like_url`，带单测） |
 | 接口「发了没反应 / 永远空列表」 | **先对后端源码与夹具**，别信旧前端的调用姿势：`collect` 要 `{dirs:[…]}`（旧前端发 `{dir}` → 永远 0 个文件）、`preview` 要 `{inputs,toFormat}`、`fs/list` 空 `path` **必须整个省略**（发 `path=` → 400）、`fs/roots` 字段是 `name` 不是 `label`。四处都是搬页面时实测翻出来的，见 `docs/FRONTEND.md` 第 5 节 |
 | 「改了界面但用户看不到变化」 | **先怀疑缓存**：静态文件必须发 Cache-Control: no-store（simple.rs 已加）。测试每次开全新浏览器，永远命中不了缓存，只有用户常驻的 WebView2 拿着旧文件 |
-| **某个接口连回复都没有**（curl `Empty reply from server` / `HTTP 000` / `size 0`，**没有 500、没有 JSON、没有日志**，同一进程别的路由照常 200） | 这是 **tokio worker 线程 panic**，不是路由或网络问题 —— **去抓 `--serve` 进程的 stderr**（`Start-Process -RedirectStandardError`）。真踩过：`/api/midi/status` 里调 `ort` 的 `is_available()` 时 panic（`Failed to load ONNX Runtime dylib: MissingApi { path: "onnxruntime.dll" }`）—— ort 的 `setup_api()` 是**惰性**的，**任何 ORT 调用之前必须先 `ort::init_from(...).commit()`**，否则它去找裸文件名。见 `docs/INTEGRATIONS.md`「五之五·补」⑥ |
+| **某条命令永远不返回 / 窗口像卡住了**（旧形态是「路由连回复都没有」：`Empty reply from server` / `HTTP 000` / `size 0`，**没有 500、没有 JSON、没有日志**，同一个进程别的路由照常 200） | 这是 **tokio worker 线程 panic**，不是命令本身的问题 —— panic 会把那一条命令的应答整个吞掉。真踩过：`midi_status` 里调 `ort` 的 `is_available()` 时 panic（`Failed to load ONNX Runtime dylib: MissingApi { path: "onnxruntime.dll" }`）—— ort 的 `setup_api()` 是**惰性**的，**任何 ORT 调用之前必须先 `ort::init_from(...).commit()`**，否则它去找裸文件名。见 `docs/INTEGRATIONS.md`「五之五·补」⑥ |
 | 想知道「这台机器能不能用 CUDA」 | ⛔ **`ort::ep::CUDA::is_available()` 回答不了**：它只说明「这份 ORT 构建里**编进了** CUDA provider」，**AMD RX 580 上也回 `Ok(true)`**。唯一真判据是拿一张 1×1 的 Identity 图 `commit_from_memory` 一次。见「五之五·补」⑤·补 |
 | 手写 protobuf 拼 ONNX 图，ORT 报 `Tensor does not have type information.` | 错在**字段号**不在长度：`ValueInfoProto{ name = 1, type = 2 }`（`type` 是**字段 2**），`shape.dim.dim_value` 也不能丢。⛔ **自己写的「线格式自检」抓不到**（它验的是同一个错误假设、照样全绿）—— 必须以真 ORT 建一次会话为准 |
 | 「往上找某个目录」的函数永远找不到 | 先怀疑**判据写反了**（要找的层在**更下面**）：真踩过 `if d.file_name() == "nvidia"`，而 `nvidia` 是 `site-packages` **下面**的一层 ⇒ 条件恒假、不报错、只是永远不生效。见「五之五·补」③ |
-| 端口不能随机 | 固定 17878；**localStorage 按 origin 隔离**，端口一变 = 全新存储（JIZURA 标记、界面设置、PV 工程自动保存全丢） |
+| ~~端口不能随机~~ | **这条已作废**（2026-10-04）：端口没了，配置也不再放 `localStorage`，改成后端 `config.json`（启动时一次 `get_config` 拉回来）。**旧的 `qingmu.*` / `fandiao.*` 键**由 `migrate_legacy_settings` 一次性搬过去（已有的键优先，幂等） |
 | 悬停/过渡「生硬地闪一下」 | 多半是 `var(--x)` **没定义** → 整条 `transition` 静默失效。先跑 `LESSONS.md` 里那段查未定义变量的脚本 |
 | 过渡曲线 | `--ease` 管微交互、`--ease-out` 管入场、`--spring` 只给大位移；取值表在 `LESSONS.md` |
 | 侧栏/导航 | **一个框 + 一个滑动高亮块**（库的 .lg-selection-lens），行本身零描边零底色；首帧不能滑、用 offsetTop 量位置（`lib/useNavLens.ts`）。⚠️ 高亮块**不是玻璃面**，库的 `--lg-lens-bg` 只按主题分档；要玻璃得自己在 `.nav-lens` 上改半透明 + 消费 `--lg-backdrop`。⚠️ 侧栏 `position: sticky` 的 `top` **必须等于初始位置**（含让开顶栏那 44px），否则一滚就先跳 44px |
@@ -491,7 +514,7 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 | **「打包好了」≠「装机装得上」** | 判据是**代码真去找的那几个文件**，不是「包里有一大堆文件」。`runtime_ready()` 要 `runtime/python.exe` **和** `backend/app.py`，而打包脚本第一版用 `CreateFromDirectory` 只能装一个顶层目录 → 只装了 `runtime\`，用户下完 4.5 GB 仍然起不来。改成 `ZipFile.Open` + `CreateEntryFromFile` 手工加条目（`Dirs = @('runtime','backend','bin')`）。⚠️ 用 `ZipArchiveMode` 必须**同时** `Add-Type System.IO.Compression`（`.FileSystem` 里没有这个类型） |
 | **后台跑 cargo test 会被 linker 撞** | 两个 `cargo test` 并行会抢同一个输出文件，报 `linking with link.exe failed: exit code: 1104`（**不是代码问题**）。串行跑 |
 | **子进程收不住强杀** | 分离引擎是 `python.exe` 子进程。`impl Drop for Svsep` 只覆盖正常退出 —— **任务管理器强杀实测留下孤儿**：它继续监听 17879、占着几 GB 内存，用户看到「关掉了风扇还转」。兜底是 Windows 作业对象（`svsep.rs` 的 `job` 模块）：`CreateJobObjectW` + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` + `AssignProcessToJobObject`，句柄故意不关（存 `OnceLock`），进程一死句柄被内核回收 → 作业里的进程一起死。⚠️ `windows-sys` 要同时开 `Win32_System_JobObjects`、`Win32_System_Threading`（类型定义在 Threading 下）和 `Win32_Security`（`CreateJobObjectW` 的参数用了 `SECURITY_ATTRIBUTES`） |
-| **看着在收、其实没跑** | `main.rs` 的 `RunEvent::Exit` 里别写 `app.try_state::<Arc<AppState>>()`：`AppState` 是在 `serve()`（一个 spawn 出去的 task）里建的，从没 `app.manage()` 过，`try_state` **永远回 None**。这种死代码比不写更坏 |
+| **看着在收、其实没跑** | `main.rs` 的 `RunEvent::Exit` 里写了 `app.try_state::<Arc<AppState>>()`，却没有任何地方 `manage` 过它 —— `try_state` 会**永远回 None**，于是「退出时收尾」那段代码从来没执行过。这种死代码比不写更坏。⚠️ 2026-10-04 之前的旧架构正是这个状态（`AppState` 建在 `serve()` 里）；改成 IPC **之后它才真的被执行** |
 | **CI 上 `link.exe` 报 `/usr/bin/link: extra operand`** | **Git for Windows 的 `C:\Program Files\Git\usr\bin` 在 runner 的系统 PATH 里，那个 `link.exe` 是 coreutils 的 `ln` 别名**，rustc 调裸名 `link.exe` 就撞上它。后面那句「build tools may need to be repaired」是**纯误导**。修法在 `build.ps1`：把 `\Git\{usr,mingw64,cmd}` 从 PATH 剔掉、再把 MSVC 的 `bin\Hostx64\x64`（用 `VCToolsInstallDir` 问出来）顶到最前，开跑前用 `where link.exe` 第一行验身份。**本地没有 Git 那套 `usr\bin`，永远复现不了** —— 要复现就自己造个假 `link.exe` 放进 `H:\tmp\faker\Git\usr\bin` 并 prepend 到 PATH |
 | **批处理里 `%PATH%` 死活不生效** | **别把命令拼成 `cmd /c "a && b && c"` 长链**：cmd 把整条链**先解析、把 `%VAR%` 全展开**再逐条执行，所以链里 `set "PATH=...;%PATH%"` 拿到的是**启动 cmd 时的原始 PATH**，前面 `set`/`vcvars` 改的全白费（实测：剔掉 Git 段的 PATH 又被原样放回）。**改成写临时 `.cmd` 逐行执行**。另：`set "RUSTFLAGS=-C linker="C:\...\link.exe""` 的引号会原样传给 rustc，报 `os error 123`，**别用这条路**，把链接器目录顶到 PATH 最前就够了 |
 | **`npm install` 在 CI 报 `Could not read package.json`** | **`npm install` 只在当前目录找 `package.json`**（不像 vite/tsc 往上找）。`build.ps1` 开头 `Push-Location $here`（= `app\desktop`）后直接 install 就会去找 `app\desktop\package.json`。**开发机永远暴露不了**（`node_modules` 早装好了，这句不跑）—— 改构建脚本后要按「干净 clone」的心智过一遍 |
@@ -509,15 +532,13 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 `@ttqtt/liquid-glass-react`，不是这节原文写的 `rdev/liquid-glass-react`
 （**两个同名包，完全不同的项目**，我装错过）。
 **三条血的教训**（用户复报「除了侧栏都没有实现对应的玻璃材质」时定位到的）：
-
-1. **材质要写在 `GlassProvider` 上。** 库的控件（`GlassButton` / `GlassSegmentedControl` /
-   `TabBar` …）**不接材质参数**，读的是 policy。只给自家包装的面传，切到液态玻璃时
-   只有那两个面变 `clear`、控件还是 `regular` —— 看着就是「只有侧栏有材质」。
-2. **背景自身的 `--bg-blur` 必须小（3~4px）。** 背景先糊成奶白，玻璃再糊一次等于没糊。
-   **玻璃的观感来自「背后有东西被它糊掉」**，不是来自玻璃自己。
-3. **栏本身不画底。** 库的 `GlassToolbar` 注释：「工具栏本身不携带背景 —— 它是一行分组，
-   玻璃是每一组」。一整条大玻璃 + 一堆手写平控件 = 屏幕上看不出材质。
-   平栏要配 `ScrollEdge`（不给 `targetRef` 即盯页面滚动），否则内容会从文字下面穿过去。
+① **材质要写在 `GlassProvider` 上** —— 库的控件（`GlassButton` / `GlassSegmentedControl` /
+`TabBar`…）**不接材质参数**、读的是 policy；只给自家包装的面传，切到液态玻璃就只有那两个面
+变 `clear`、控件还是 `regular`，看着就是「只有侧栏有材质」。
+② **背景自身的 `--bg-blur` 必须小（3~4px）** —— 背景先糊成奶白、玻璃再糊一次等于没糊；
+**玻璃的观感来自「背后有东西被它糊掉」**，不是来自玻璃自己。
+③ **栏本身不画底**（库的 `GlassToolbar` 注释：「它是一行分组，玻璃是每一组」）——
+一整条大玻璃 + 一堆手写平控件 = 看不出材质；平栏要配 `ScrollEdge`，否则内容从文字下面穿过。
 4. **玻璃是设置里的 1~4 级滑块**（库的 `GlassSlider`，键 `qingmu.glassLevel`）：
    1 级不透明、2 级毛玻璃（这两级内容面板用轻量材质）、**3 级液态 = 只有栏/侧栏/控件折射**
    （= `backup-pre-global-glass` 那一版，用户报过「一半液态玻璃的效果没了」，就是这档）、
@@ -540,7 +561,7 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 |---|---|---|
 | 做法 | **包一个别人的 Python 服务**：子进程 + 固定端口 + 健康检查 + 作业对象收尸 | **把算法重写进 Rust**：进程内、零子进程、零端口 |
 | 大件 | 运行时 4.7 GB + 模型 462 MB | 模型包 364 MB（解开 376 MB；运行时**能借**音轨分离那份 ORT —— 包括 GPU） |
-| 代码 | `src/svsep.rs` `src/server/svsep.rs` `src/pages/Svsep.tsx` | `src/game/**` `src/midi_transcribe.rs` `src/server/midi.rs` `src/pages/Midi.tsx` |
+| 代码 | `src/svsep.rs` `src/ipc/svsep.rs` `src/pages/Svsep.tsx` | `src/game/**` `src/midi_transcribe.rs` `src/ipc/midi.rs` `src/pages/Midi.tsx` |
 
 **要嵌新东西之前，先读那两节里这几条**（它们是血换来的，别重走）：
 
@@ -590,7 +611,7 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 | `mime_of` | 已补齐（2026-10-02）：`.jpg/.jpeg/.webp/.gif/.woff/.ttf/.mp3/.wav/.mp4/.txt/.map` 都有映射 |
 | `backdrop-filter` 降级 | 无该特性环境的降级方案没做视觉验证 |
 | `audio.rs` 顶部注释 | 写着「ffmpeg 不随程序分发」，与事实相反（注释是旧的） |
-| Rust 代码行数 | README 曾写「约 5,900 行 / 31 条路由」，**都是旧数字**，现为 56 条路由 |
+| Rust 代码行数 | README 里那些「约 5,900 行 / 31 条路由 / 56 条路由」**都是旧数字**。现为 `src/` 约 16,900 行、**70 条 IPC 命令**（`src/ipc/` 约 4,500 行） |
 | **工程转换** | 选项键已改用 LibreSVIP **官方选项名**，VSQX 参数曲线崩溃已**自动降级**（16 个真样本 15 通过，剩下 1 个是源工程自身音符重叠）。⚠️ `音高信息输入模式` 默认档是官方 `plain`（≈ 只带"已编辑"部分），要完整保留手画音高就在选项面板选「完整」。选项表与实现见 `docs/FEATURES.md` §3.1 |
 
 ### 打包：CI 出 MSI，真机装过、验证通过
@@ -624,7 +645,7 @@ Get-Process -Name 'msedge' -EA SilentlyContinue | Where-Object { $_.MainWindowHa
 ⚠️ 万一安装版一启动就挂，看 `%APPDATA%\com.qingmu.vocalworkstation\desktop-error.log`
 （`main.rs::error_log_hint()` 会把真实路径打在错误提示里）。
 
-其余形态：Windows 绿色版也命中（同样靠 `is_writable` 区分）；**`--serve` 等传 `None` 的调用点靠「往上找」，开发机与 CI 都成立 —— 所以「换掉往上找」不再是 Windows 的待办，它只为 macOS bundle 而做**。
+其余形态：Windows 绿色版也命中（同样靠 `is_writable` 区分）；开发机与 CI 靠「往上找」也成立 —— 所以「换掉往上找」不再是 Windows 的待办，它只为 macOS bundle 而做。
 
 ---
 
@@ -682,25 +703,14 @@ git log --all -- app/data/resources.json
 
 仓库从 **83 MB 缩到 6.7 MB**：`app/web/vendor/`（JIZURA 字体，2338 个文件 / 50.7 MB）、
 `tests/manual/out/`（探针截图 78 个 / 23.7 MB）、`app/shell/`（旧 WebView2 dll）
-这三条路径**从全部历史里删掉了**（它们本来就不在 HEAD 上）。
+用 `git filter-branch --index-filter` **从全部历史里删掉了**（本就不在 HEAD 上）。
 
-```powershell
-# 当时的做法（--prune-empty 没删掉任何提交；工作树字节级不变，HEAD 树哈希前后一致）
-git filter-branch --force --index-filter `
-  "git rm -r --cached --ignore-unmatch app/web/vendor tests/manual/out app/shell" `
-  --prune-empty --tag-name-filter cat -- --all
-```
-
-**三条要记住的：**
-
-1. **所有提交 SHA 都变了**（当时的 `refs/tags/v1.2.0` 从 `48049c4` 变 `ca0ff84`，
-   `assets-v1` 从 `341d234` 变 `9f03e02`）。文档或聊天里出现的旧 SHA 已经不存在，
-   别再照它们 `git show`。三个 tag 都是 force push 上去的，**Release 靠 tag 名绑定、附件没丢**。
-2. `git log --all -- app/web/vendor`（或 `tests/manual/out`、`app/shell`）**现在恒为空**——
-   不是「没删过」，是历史里没有了，别再怀疑命令写错。
-   `app/server`（Node 后端）、`app/web/js`（旧前端）这些小体积历史**故意留着**，仍可考古。
-3. **`app/web/vendor/jizura/` 在磁盘上还在**（2338 个文件，靠 `fetch-tools.ps1` 补），
-   只是不入库 —— 别因为「历史里搜不到」就以为它被误删了。
+**三条要记住的**：① **所有提交 SHA 都变了**（`v1.2.0` 从 `48049c4` 变 `ca0ff84`、
+`assets-v1` 从 `341d234` 变 `9f03e02`）—— 旧 SHA 已不存在，别照着 `git show`；
+tag 是 force push 的，Release 靠 tag 名绑定、**附件没丢**。② `git log --all -- app/web/vendor`
+（或 `tests/manual/out`、`app/shell`）**现在恒为空** —— 不是命令写错，是历史里没有了；
+`app/server`、`app/web/js` 这些小体积历史**故意留着**。③ **`vendor/jizura/` 磁盘上还在**
+（靠 `fetch-tools.ps1` 补），只是不入库。
 
 ---
 
@@ -743,10 +753,10 @@ git filter-branch --force --index-filter `
 
 四件事全部落地 —— **实现细节与实测证据全在 `docs/FEATURES.md` §3.4，改这块先读它**：
 ① `source` 概念整体删掉（前端分段与 `SOURCES`/`isQq`/`loginKey`/`sourceLabel` 全没，
-后端 `normalize_source()` 删除、`server/lyrics.rs::source_of()` 永远返回 `"netease"`，
+后端 `normalize_source()` 删除、`ipc/lyrics.rs::source_of()` 永远返回 `"netease"`，
 QQ 那整条链 `QQ_UA`/`qq_search`/`qq_fetch`/`html_unescape`/songmid 解析/相关单测全删、
 **应为 0 命中**；回包里的 `"source"` 字段**保留**，形状冻结）；
-② 歌曲直链下载 `POST /api/lyrics/song`（`{id,outDir?,name?}` → `{path,name,size,level,format}`，
+② 歌曲直链下载 `lyrics_song`（`{id,outDir?,name?}` → `{path,name,size,level,format}`，
 **拿不到直链回 400 不回 500**）；
 ③ 封面修掉 7 MB 原图（`cover_url()` 统一拼 `?param=500y500`，3000×3000 / 7.1 MB → 249,916 B）；
 ④ 删掉「填写 QQ 音乐 cookie」。
@@ -772,10 +782,10 @@ QQ 那整条链 `QQ_UA`/`qq_search`/`qq_fetch`/`html_unescape`/songmid 解析/�
    都已核实没问题（见第七节），现在这条只为 **macOS bundle** 和「省掉构建脚本复制 exe 那步」而做。
 2. **把剩下几处手写控件换成库的**：`Button`（已是 `GlassButton`）和 `List`/`Dialog`/`Slider`/
    `Progress`/`Badge`/`Switch` 都在用了，但 `Field.tsx` 的输入框、页面里的 `.seg` / `.input`
-   还是手写的（只有材质走库）。库有对应的 `TextField`（`multiline`）/ `Picker` / `RadioGroup` /
-   `GlassSegmentedControl`（胶囊、可拖、拖动中实时更新选择）。**换的时候注意**：
-   库的分段控件是 `<label class="lg-segment"><input type=radio>`，`aria-label` 挂在内层
-   `.lg-segmented-track` 上 —— 写自动化测试时别在外层 `.lg-segmented` 上取 `aria-label`。
+   还是手写的（只有材质走库）。库有 `TextField`（`multiline`）/ `Picker` / `RadioGroup` /
+   `GlassSegmentedControl`（胶囊、可拖、拖动中实时更新）。**换的时候注意**：库的分段控件是
+   `<label class="lg-segment"><input type=radio>`，`aria-label` 挂在内层 `.lg-segmented-track`
+   上 —— 别在外层 `.lg-segmented` 上取它。
 3. **给前端补点击穿透测试** —— 自动化现在只到「渲染 + 文案 + 控制台」，真实操作链路（选文件 → 预检 → 提交任务）靠人工 + 探针截图。
 4. **侧栏形态要不要换成库的 `TabBar`？** 它自带透镜、拖拽换页、窄屏自动变底部胶囊栏，
    但它的侧栏形态是 `position: fixed` 的整列贴窗口左边，而且**没有分组标题**

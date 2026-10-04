@@ -337,7 +337,7 @@ pub fn move_to_trash(target: &Path) -> std::io::Result<()> {
              if ($item) {{ $item.InvokeVerb('delete') }} else {{ throw '找不到项目' }}",
             target.to_string_lossy().replace('\'', "''")
         );
-        let out = crate::server::quiet_command("powershell")
+        let out = crate::ipc::tools::quiet_command("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()?;
         if out.status.success() {

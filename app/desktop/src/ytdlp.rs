@@ -568,6 +568,10 @@ mod tests {
             "formats": [{
                 "formatId": "mp4",
                 "ext": "mp4",
+                // ⚠️ **`url` 是后来加的第 14 个字段**（给前端预览用，见 `normalize_info`
+                // 里那段注释），而这个期望值当初没跟着改，于是这条用例红了很久。
+                // 加字段改契约时**两处一起改** —— 这条注释就是那次漏改留下的。
+                "url": "https://www.w3schools.com/html/mov_bbb.mp4",
                 "note": "",
                 "resolution": "audio only",
                 "height": 0,

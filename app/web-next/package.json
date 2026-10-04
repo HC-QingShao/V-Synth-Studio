@@ -11,6 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.12.1",
     "@ttqtt/liquid-glass-react": "^0.0.2",
     "qrcode.react": "^4.2.0",
     "react": "^19.3.0",
@@ -18,12 +19,12 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
-    "@types/node": "^24.10.1",
+    "@types/node": "^26.6.4",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.3.1"
+    "vite": "^8.3.2"
   }
 }

@@ -1,42 +1,32 @@
-//! 人声转 MIDI 的 HTTP 路由。
+//! 人声转 MIDI（扒谱）的命令 —— 从 `server/midi.rs` 搬过来的。
 //!
-//! 这一组和音轨分离那组长得像，但**底下完全不同**：那边是转发给一个 Python
-//! HTTP 服务，这边是直接在进程里算（`crate::midi_transcribe`）。没有端口、没有
-//! 健康检查、没有「服务没起来」这一类错误 —— 只有输入不对和模型没装。
+//! 扒谱算法在 `crate::game`（GAME 的原生移植：ORT 推理、去噪循环、边界解码）与
+//! `crate::midi_transcribe`（编排、模型包下载、MIDI 写出）里，这一层只做
+//! **参数校验、任务表、进度上报**。
 //!
-//! 路由一览：
-//!   GET  /api/midi/status             动态库 / 模型 / 半个包的状态（前端轮询它）
-//!   POST /api/midi/models/download    下 ONNX 权重包（364 MB）并解包
-//!   POST /api/midi/runtime/download   下 ONNX Runtime（官方 zip 78 MB，只留里面那个 dll）
-//!   POST /api/midi/download/pause     ⚠️ 等价于「停止」——这个包不支持续传，界面不用它
-//!   POST /api/midi/download/stop      停止下载并删掉半截文件
-//!   POST /api/midi/deps/delete        删掉下下来的模型与动态库（回 {files, bytes, note}）
-//!   GET  /api/midi/device             读推理方式（自动 / GPU / CPU）+ CUDA 能不能用
-//!   POST /api/midi/device             写推理方式（`{"mode": "gpu"}`）
-//!   POST /api/midi/transcribe         提交一次扒谱（body 里给音频路径）
-//!   GET  /api/midi/task/{id}          查任务
-//!   POST /api/midi/task/{id}/cancel   取消任务
-//!   POST /api/midi/open-output        在资源管理器里选中输出目录
-//!   GET  /api/midi/task/{id}/file/{name}  取结果文件（.mid / .csv / .json）
+//! ⚠️ **只有 `status` / `device_payload` 碰得到 ORT 的状态，而它们不建会话。**
+//! `ort` 的 `setup_api()` 是**惰性**的，任何 ORT 调用之前必须先
+//! `ort::init_from(<绝对路径的 onnxruntime.dll>).commit()`，否则它去找裸文件名然后
+//! panic（踩过：`/api/midi/status` 曾经整个请求没有回复 —— 那是 tokio worker 线程
+//! panic，不是路由问题）。真正的初始化在 `game/engine.rs::load_runtime`。
 //!
-//! 为什么没有「上传音频」：音频本来就在用户盘上，多传一遍 600 MB 只是把同一份
-//! 数据从磁盘搬到磁盘。音轨分离那边要 multipart 是因为它的后端只认字节流，
-//! 这里没有那个约束。
+//! 没有「上传音频」：音频本来就在用户盘上，多传一遍 600 MB 只是把同一份数据从磁盘
+//! 搬到磁盘。音轨分离那边要 multipart 是因为它的后端只认字节流，这里没有那个约束。
+//!
+//! 删掉的一条：`GET /api/midi/task/{id}/file/{name}`（改 asset 协议 ——
+//! 结果目录记在任务的 `result.dir` 里，前端 `convertFileSrc` 直接拼就行）。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde_json::{json, Value};
 
-use super::{convert, ok, ApiError, AppState};
+use super::jobs::{finish_job, log_job, new_job, set_job};
+use super::Cmd;
 use crate::game::engine;
 use crate::midi_transcribe as mt;
 
-/// 下载进度（前端每 2 秒轮询 `/api/midi/status`）。
+/// 下载进度（前端每 2 秒轮询 `midi_status`）。
 ///
 /// 和音轨分离那三个静态量是**分开的一份**，不是共用：两边可以同时下（用户一边
 /// 下分离引擎一边下扒谱模型完全合理），共用一份状态会让两条进度条互相踩。
@@ -73,8 +63,10 @@ fn download_state() -> Value {
     })
 }
 
-pub async fn status(State(st): State<Arc<AppState>>) -> Json<Value> {
-    let mut v = mt::status(&st.root, &st.writable);
+/// 扒谱依赖状态：模型 / 运行时（可能借音轨分离那份）/ 推理设备 / 当前任务。
+#[tauri::command]
+pub async fn midi_status(st: super::St<'_>) -> Cmd {
+    let mut v = mt::status(&st.inner().root, &st.inner().writable);
     if let Some(o) = v.as_object_mut() {
         o.insert("download".into(), download_state());
         let running = RUNNING
@@ -83,47 +75,42 @@ pub async fn status(State(st): State<Arc<AppState>>) -> Json<Value> {
             .and_then(|r| r.as_ref().map(|(id, _)| id.clone()));
         o.insert("running".into(), json!(running));
     }
-    Json(ok(v))
+    Ok(v)
 }
 
-/* ══════════════════════════════ 推理方式（三选一） ══════════════════════════════ */
-
-/// `GET /api/midi/device` —— 现在选的推理方式，以及这台机器能不能用 GPU。
+/// 现在选的推理方式，以及这台机器能不能用 GPU。
 ///
-/// 内容与 `/api/midi/status` 里的 `device` 一节**同源**（都出自
-/// `mt::device_status`）。单开一条是为了让「设置」那一格能独立刷新 —— 用户刚在
-/// 另一个页面装完音轨分离，不必等整个状态对象重新拉一遍。
+/// 内容与 `midi_status` 里的 `device` 一节**同源**（都出自 `mt::device_status`）。
+/// 单开一条是为了让「设置」那一格能独立刷新 —— 用户刚在另一个页面装完音轨分离，
+/// 不必等整个状态对象重新拉一遍。
 ///
-/// ⚠️ `cuda.ok` 报的是「provider 在、那 12 个 dll 加载成功」，**不是**「保证能建
-/// 出会话」—— 后者只有真跑一次才知道。真建不出来时 `engine` 会退回 CPU 并把
-/// ORT 的原话写进任务日志。
-pub async fn device_get(State(st): State<Arc<AppState>>) -> Json<Value> {
-    Json(ok(device_payload(&st)))
+/// ⚠️ `cuda.ok` 报的是「provider 在、那 12 个 dll 加载成功」，**不是**「保证能建出
+/// 会话」—— 后者只有真跑一次才知道。真建不出来时 `engine` 会退回 CPU 并把 ORT
+/// 的原话写进任务日志。
+#[tauri::command]
+pub async fn midi_device_get(st: super::St<'_>) -> Cmd {
+    Ok(device_payload(&st.inner().root, &st.inner().writable))
 }
 
-/// `POST /api/midi/device` —— body `{"mode": "auto" | "cpu" | "gpu"}`。
+/// 设置推理方式。`{ mode: "auto" | "cpu" | "gpu" }`
 ///
 /// ⛔ **不校验「GPU 到底能不能用」**：盘上记的是用户的意愿，不是硬件现状。
-/// 硬拦下来会出现「换台机器/装完运行时要重设一次」这种莫名其妙的限制；而且
-/// 真跑起来用不了时 `engine` 会自己退回 CPU（日志里有原因）。界面负责在
-/// **选不了的时候**把格子锁住，后端不重复一遍这个判断。
-pub async fn device_set(
-    State(st): State<Arc<AppState>>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
-    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("auto");
-    let dev = mt::Device::parse(mode);
-    mt::write_device(&st.writable, dev)
-        .map_err(|e| ApiError::internal(format!("写推理方式失败：{e}")))?;
+/// 硬拦下来会出现「换台机器/装完运行时要重设一次」这种莫名其妙的限制；而且真跑起来
+/// 用不了时 `engine` 会自己退回 CPU（日志里有原因）。界面负责在**选不了的时候**
+/// 把格子锁住，后端不重复一遍这个判断。
+#[tauri::command]
+pub async fn midi_device_set(st: super::St<'_>, mode: String) -> Cmd {
+    let dev = mt::Device::parse(&mode);
+    mt::write_device(&st.inner().writable, dev).map_err(|e| format!("写推理方式失败：{e}"))?;
     crate::log_line(&format!("人声转 MIDI：推理方式改成 {}", dev.as_str()));
-    Ok(Json(ok(device_payload(&st))))
+    Ok(device_payload(&st.inner().root, &st.inner().writable))
 }
 
-/// 给界面的那一小段状态。三处（`status` / `device_get` / `device_set`）共用，
-/// 免得改了一个地方另外两个漏掉。
-fn device_payload(st: &AppState) -> Value {
-    let dll = mt::runtime_dll(&st.root, &st.writable);
-    let ds = mt::device_status(&st.writable, dll.as_deref());
+/// 给界面的那一小段状态。三处（`midi_status` / `midi_device_get` / `midi_device_set`）
+/// 共用，免得改了一个地方另外两个漏掉。
+fn device_payload(root: &std::path::Path, writable: &std::path::Path) -> Value {
+    let dll = mt::runtime_dll(root, writable);
+    let ds = mt::device_status(writable, dll.as_deref());
     json!({
         "mode": ds.device.as_str(),
         "cuda": { "ok": ds.cuda_ok, "detail": ds.cuda_detail },
@@ -146,15 +133,15 @@ fn note_progress(got: u64, total: Option<u64>, stage: crate::svsep::Stage) {
 
 /// 起一个后台下载，立刻返回。`kind` 是 `"models"` / `"runtime"`。
 ///
-/// 和音轨分离那边同一套骨架：**不占着请求**，进度由前端轮询 `/api/midi/status`。
+/// 和音轨分离那边同一套骨架：**不占着请求**，进度由前端轮询 `midi_status`。
 /// 那边还要照顾暂停续传、`.part` 记号、五轮重试的收场；这里因为不分段续传，
 /// 收场简单得多（错了就删半截文件）。
-fn spawn_download<F>(kind: &'static str, job: F) -> Result<Json<Value>, ApiError>
+fn spawn_download<F>(kind: &'static str, job: F) -> Result<Value, String>
 where
     F: std::future::Future<Output = Result<Value, String>> + Send + 'static,
 {
     if DL_ACTIVE.load(Ordering::Relaxed) == 1 {
-        return Err(ApiError::bad_request("已经有一个下载在跑了，等它结束。"));
+        return Err("已经有一个下载在跑了，等它结束。".into());
     }
     if let Ok(mut e) = DL_ERROR.lock() {
         *e = None;
@@ -181,20 +168,24 @@ where
         }
     });
 
-    Ok(Json(ok(json!({ "started": true }))))
+    Ok(json!({ "started": true }))
 }
 
-pub async fn models_download(State(st): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    if !mt::missing_models(&st.root, &st.writable).is_empty()
-        && mt::models_dir(&st.root, &st.writable).join("encoder.onnx").is_file()
+/// 下载模型包（364 MB）。已经装了就报错，而不是白下一遍。
+#[tauri::command]
+pub async fn midi_models_download(st: super::St<'_>) -> Cmd {
+    let root = st.inner().root.clone();
+    let writable = st.inner().writable.clone();
+
+    if !mt::missing_models(&root, &writable).is_empty()
+        && mt::models_dir(&root, &writable).join("encoder.onnx").is_file()
     {
         // 已经装了就别再下 364 MB —— 前端按钮本来也会换掉，这是防手快 / 防旧页面。
-        let missing = mt::missing_models(&st.root, &st.writable);
-        if missing.is_empty() {
-            return Err(ApiError::bad_request("模型已经装好了，不用再下。"));
+        if mt::missing_models(&root, &writable).is_empty() {
+            return Err("模型已经装好了，不用再下。".into());
         }
     }
-    let writable = st.writable.clone();
+
     // `DownloadCtl` 收的是 `&'static AtomicBool`，而这两个旗标正是 `'static` ——
     // 直接借，不用 clone（clone 出来的是个临时值，借不成 'static）。
     let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, None);
@@ -205,13 +196,15 @@ pub async fn models_download(State(st): State<Arc<AppState>>) -> Result<Json<Val
     })
 }
 
-pub async fn runtime_download(State(st): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    if mt::runtime_dll(&st.root, &st.writable).is_some() {
-        return Err(ApiError::bad_request(
-            "ONNX Runtime 已经能用了（本机已有，或已从音轨分离那边借到），不用再下。",
-        ));
+/// 下载 ONNX Runtime（78 MB 的官方包）。已有就直接报错。
+#[tauri::command]
+pub async fn midi_runtime_download(st: super::St<'_>) -> Cmd {
+    let root = st.inner().root.clone();
+    let writable = st.inner().writable.clone();
+
+    if mt::runtime_dll(&root, &writable).is_some() {
+        return Err("ONNX Runtime 已经能用了（本机已有，或已从音轨分离那边借到），不用再下。".into());
     }
-    let writable = st.writable.clone();
     let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, None);
     spawn_download("runtime", async move {
         let v = mt::download_runtime(&writable, &ctl, note_progress).await?;
@@ -220,62 +213,56 @@ pub async fn runtime_download(State(st): State<Arc<AppState>>) -> Result<Json<Va
     })
 }
 
-pub async fn download_pause() -> Result<Json<Value>, ApiError> {
+/// 停止下载。**不支持续传**，所以没有「暂停」这个动作 —— 停了就删掉半个包。
+#[tauri::command]
+pub async fn midi_download_stop() -> Cmd {
     if DL_ACTIVE.load(Ordering::Relaxed) != 1 {
-        return Err(ApiError::bad_request("现在没有在下载"));
-    }
-    DL_PAUSE.store(true, Ordering::Relaxed);
-    Ok(Json(ok(json!({ "pausing": true }))))
-}
-
-pub async fn download_stop() -> Result<Json<Value>, ApiError> {
-    if DL_ACTIVE.load(Ordering::Relaxed) != 1 {
-        return Err(ApiError::bad_request("现在没有在下载"));
+        return Err("现在没有在下载".into());
     }
     DL_STOP.store(true, Ordering::Relaxed);
-    Ok(Json(ok(json!({ "stopping": true }))))
+    Ok(json!({ "stopping": true }))
 }
 
-pub async fn deps_delete(State(st): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+/// 一键删掉下好的模型 / 运行时（正在跑或正在下时拒绝）。
+#[tauri::command]
+pub async fn midi_deps_delete(st: super::St<'_>) -> Cmd {
     if DL_ACTIVE.load(Ordering::Relaxed) == 1 {
-        return Err(ApiError::bad_request("正在下载，先停下再删。"));
+        return Err("正在下载，先停下再删。".into());
     }
     if RUNNING.lock().ok().and_then(|r| r.as_ref().map(|_| ())).is_some() {
-        return Err(ApiError::bad_request("正在扒谱，等它跑完再删模型。"));
+        return Err("正在扒谱，等它跑完再删模型。".into());
     }
-    let (files, bytes, note) = mt::delete_deps(&st.root, &st.writable);
+    let (files, bytes, note) = mt::delete_deps(&st.inner().root, &st.inner().writable);
     crate::log_line(&format!(
         "人声转 MIDI：删掉 {files} 个文件、{bytes} 字节；{note}"
     ));
-    Ok(Json(ok(json!({ "files": files, "bytes": bytes, "note": note }))))
+    Ok(json!({ "files": files, "bytes": bytes, "note": note }))
 }
 
 /* ══════════════════════════════════ 扒谱 ══════════════════════════════════ */
 
-/// 提交一次扒谱。body：
+/// 提交一次扒谱：
 ///
 /// ```json
 /// { "input": "D:\\歌\\干声.wav", "outDir": "D:\\歌\\midi", "steps": 8, "language": 4 }
 /// ```
 ///
 /// `input` **是路径不是上传的字节**（见文件头的说明）；`outDir` 不给就写到音频
-/// 同目录下的 `midi` 子目录。
-pub async fn transcribe(
-    State(st): State<Arc<AppState>>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
-    let input = body
+/// 同目录下的 `midi` 子目录。立刻回 `{jobId}`，进度走 `job_watch`。
+#[tauri::command]
+pub async fn midi_transcribe(st: super::St<'_>, args: Value) -> Cmd {
+    let input = args
         .get("input")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim()
         .to_string();
     if input.is_empty() {
-        return Err(ApiError::bad_request("没给音频路径"));
+        return Err("没给音频路径".into());
     }
     let input_path = std::path::PathBuf::from(&input);
     if !input_path.is_file() {
-        return Err(ApiError::bad_request(format!("文件不存在：{input}")));
+        return Err(format!("文件不存在：{input}"));
     }
     // 输出不能盖住输入：用户把 .mid 拖进来（想「再扒一遍」）时，
     // 输出主干和输入同名同目录，会直接把源文件写没。
@@ -284,35 +271,32 @@ pub async fn transcribe(
         .map(|e| e.to_string_lossy().to_ascii_lowercase() == "mid")
         .unwrap_or(false)
     {
-        return Err(ApiError::bad_request(
-            "输入是 MIDI 文件，扒谱要的是音频（wav / mp3 / flac…）。",
-        ));
+        return Err("输入是 MIDI 文件，扒谱要的是音频（wav / mp3 / flac…）。".into());
     }
 
-    let models = mt::models_dir(&st.root, &st.writable);
+    let root = st.inner().root.clone();
+    let writable = st.inner().writable.clone();
+
+    let models = mt::models_dir(&root, &writable);
     let missing = engine::missing_models(&models);
     if !missing.is_empty() {
-        return Err(ApiError::bad_request(format!(
+        return Err(format!(
             "模型还没装全（缺 {}）。先点「下载模型」。",
             missing.join("、")
-        )));
-    }
-    let Some(dll) = mt::runtime_dll(&st.root, &st.writable) else {
-        return Err(ApiError::bad_request(
-            "缺 ONNX Runtime 动态库。点「下载运行库」，装了音轨分离的话它能直接借到。",
         ));
+    }
+    let Some(dll) = mt::runtime_dll(&root, &writable) else {
+        return Err("缺 ONNX Runtime 动态库。点「下载运行库」，装了音轨分离的话它能直接借到。".into());
     };
 
     {
-        let guard = RUNNING.lock().map_err(|_| ApiError::internal("任务表坏了"))?;
+        let guard = RUNNING.lock().map_err(|_| "任务表坏了".to_string())?;
         if guard.is_some() {
-            return Err(ApiError::bad_request(
-                "已经有一次扒谱在跑了。这个功能一次只跑一个（CPU 都被它占着）。",
-            ));
+            return Err("已经有一次扒谱在跑了。这个功能一次只跑一个（CPU 都被它占着）。".into());
         }
     }
 
-    let out_dir = body
+    let out_dir = args
         .get("outDir")
         .and_then(|v| v.as_str())
         .map(str::trim)
@@ -326,22 +310,31 @@ pub async fn transcribe(
         });
 
     let opts = engine::Options {
-        steps: clamp_usize(body.get("steps").and_then(|v| v.as_u64()), 8, 1, 32),
-        language: clamp_usize(body.get("language").and_then(|v| v.as_i64().map(|i| i as u64)), 4, 0, 126)
-            as i64,
-        threads: clamp_usize(body.get("threads").and_then(|v| v.as_u64()), 4, 1, 32),
+        steps: clamp_usize(args.get("steps").and_then(|v| v.as_u64()), 8, 1, 32),
+        language: clamp_usize(
+            args.get("language").and_then(|v| v.as_i64().map(|i| i as u64)),
+            4,
+            0,
+            126,
+        ) as i64,
+        threads: clamp_usize(args.get("threads").and_then(|v| v.as_u64()), 4, 1, 32),
         /* 推理方式**以盘上的设置为准**，不看 body：那是界面上的一个开关，
            而任务可能来自「再跑一次」或别处，body 里没有这一项时会退回默认值，
            变成「设置里选了 GPU、这一首悄悄按 CPU 跑」。 */
-        device: mt::read_device(&st.writable),
+        device: mt::read_device(&writable),
     };
 
+    let st_arc: Arc<super::AppState> = st.inner().clone();
     let title = format!("人声转 MIDI · {}", mt::output_stem(&input_path));
-    let job_id = convert::new_job(&st, "transcribe", &title, "");
-    convert::log_job(
-        &st,
+    let job_id = new_job(&st_arc, "transcribe", &title);
+    log_job(
+        &st_arc,
         &job_id,
-        &format!("输入：{input}（去噪 {} 步，推理方式 {}）", opts.steps, opts.device.as_str()),
+        &format!(
+            "输入：{input}（去噪 {} 步，推理方式 {}）",
+            opts.steps,
+            opts.device.as_str()
+        ),
     );
 
     let cancel = mt::Cancel::new();
@@ -349,23 +342,23 @@ pub async fn transcribe(
         *slot = Some((job_id.clone(), cancel.clone()));
     }
 
-    let st2 = st.clone();
+    let st2 = Arc::clone(&st_arc);
     let id2 = job_id.clone();
-    let tools_dir = st.tools_dir();
+    let tools_dir = st_arc.tools_dir();
     let stem = mt::output_stem(&input_path);
-    let scratch = mt::data_dir(&st.writable).join("work");
+    let scratch = mt::data_dir(&writable).join("work");
     tokio::spawn(async move {
         run_job(st2, id2, input_path, out_dir, scratch, tools_dir, models, dll, opts, cancel, stem)
             .await;
     });
 
-    Ok(Json(ok(json!({ "jobId": job_id }))))
+    Ok(json!({ "jobId": job_id }))
 }
 
 /// 任务主体：ffmpeg 转码 → 推理 → 落盘。所有失败都变成任务里的 `status: error`。
 #[allow(clippy::too_many_arguments)]
 async fn run_job(
-    st: Arc<AppState>,
+    st: Arc<super::AppState>,
     job_id: String,
     input: std::path::PathBuf,
     out_dir: std::path::PathBuf,
@@ -378,7 +371,7 @@ async fn run_job(
     stem: String,
 ) {
     let result = run_job_inner(
-        st.clone(),
+        Arc::clone(&st),
         job_id.clone(),
         &input,
         &out_dir,
@@ -401,20 +394,16 @@ async fn run_job(
         }
     }
     match result {
-        Ok(notes) => convert::finish_job(&st, &job_id, &format!("完成：{notes} 个音符")),
+        Ok(notes) => finish_job(&st, &job_id, &format!("完成：{notes} 个音符")),
         Err(e) if e == mt::CANCELLED => {
-            convert::set_job(
-                &st,
-                &job_id,
-                json!({ "status": "canceled", "message": "已取消" }),
-            );
+            set_job(&st, &job_id, json!({ "status": "canceled", "message": "已取消" }));
         }
         Err(e) => {
-            convert::log_job(&st, &job_id, &e);
+            log_job(&st, &job_id, &e);
             // ⚠️ 状态词是 `"error"` 不是 `"failed"` —— 前端 `Job['status']` 的联合类型
             // 只有 `running | done | error | canceled`，别的词会让 `useJob` 永远
-            // 收不到终态、进度条一直转。`server/media.rs:90` 是这个写法。
-            convert::set_job(
+            // 收不到终态、进度条一直转。
+            set_job(
                 &st,
                 &job_id,
                 json!({ "status": "error", "error": e, "message": e }),
@@ -425,7 +414,7 @@ async fn run_job(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_job_inner(
-    st: Arc<AppState>,
+    st: Arc<super::AppState>,
     job_id: String,
     input: &std::path::Path,
     out_dir: &std::path::Path,
@@ -455,17 +444,13 @@ async fn run_job_inner(
         .and_then(|v| v.as_f64())
         .filter(|d| *d > 0.0)
         .unwrap_or(0.0);
-    let st_dec = st.clone();
+    let st_dec = Arc::clone(&st);
     let id_dec = job_id.clone();
-    convert::set_job(
-        &st_dec,
-        &id_dec,
-        json!({ "message": "正在解码音频…", "percent": 1 }),
-    );
+    set_job(&st_dec, &id_dec, json!({ "message": "正在解码音频…", "percent": 1 }));
     let ctl = cancel.clone();
     let cancel_flag = move || ctl.stopped();
     let on_dec = move |pct: f64, _sec: f64| {
-        convert::set_job(
+        set_job(
             &st_dec,
             &id_dec,
             json!({ "message": "正在解码音频…", "percent": (pct * 0.05).min(5.0) }),
@@ -497,7 +482,7 @@ async fn run_job_inner(
     // 是最省事的写法（进度本来就只有几十条，不值得为它上 select!）。
     let report = loop {
         while let Ok((what, pct)) = rx.try_recv() {
-            convert::set_job(&st, &job_id, json!({ "message": what, "percent": pct }));
+            set_job(&st, &job_id, json!({ "message": what, "percent": pct }));
         }
         if handle.is_finished() {
             break handle.await;
@@ -509,13 +494,13 @@ async fn run_job_inner(
     let report = report.map_err(|e| format!("推理线程崩了：{e}"))??;
 
     // ── 3. 落盘 ─────────────────────────────────────────────────────────
-    convert::set_job(&st, &job_id, json!({ "message": "正在写文件…", "percent": 96 }));
+    set_job(&st, &job_id, json!({ "message": "正在写文件…", "percent": 96 }));
     let written = mt::write_outputs(out_dir, stem, &report)?;
     let names: Vec<String> = written
         .iter()
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .collect();
-    convert::log_job(
+    log_job(
         &st,
         &job_id,
         &format!(
@@ -529,14 +514,15 @@ async fn run_job_inner(
     );
 
     let notes = report.notes.len();
-    convert::set_job(
+    let dir = crate::platform::clean_path(out_dir);
+    set_job(
         &st,
         &job_id,
         json!({
             "message": format!("完成：{notes} 个音符"),
             "percent": 100,
             "result": {
-                "dir": crate::platform::clean_path(out_dir),
+                "dir": dir,
                 "files": names,
                 "notes": notes,
                 "seconds": {
@@ -555,6 +541,7 @@ async fn run_job_inner(
     Ok(notes)
 }
 
+/// 把界面给的值夹在合理区间里（`steps` / `threads` 之类的滑块不该由用户手打越界值）。
 fn clamp_usize(v: Option<u64>, default: usize, lo: usize, hi: usize) -> usize {
     match v {
         Some(n) => (n as usize).clamp(lo, hi),
@@ -564,11 +551,10 @@ fn clamp_usize(v: Option<u64>, default: usize, lo: usize, hi: usize) -> usize {
 
 /* ══════════════════════════════════ 任务查询 ══════════════════════════════════ */
 
-pub async fn task(
-    State(st): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let guard = st.jobs.lock().unwrap();
+/// 查一个扒谱任务。
+#[tauri::command]
+pub async fn midi_task(st: super::St<'_>, id: String) -> Cmd {
+    let guard = st.inner().jobs.lock().map_err(|_| "任务表坏了".to_string())?;
     let job = guard.items.get(&id).cloned();
     drop(guard);
     match job {
@@ -576,13 +562,15 @@ pub async fn task(
             if let Some(o) = j.as_object_mut() {
                 o.insert("id".into(), json!(id));
             }
-            Ok(Json(ok(j)))
+            Ok(j)
         }
-        None => Err(ApiError::not_found(format!("没有这个任务：{id}"))),
+        None => Err(format!("没有这个任务：{id}")),
     }
 }
 
-pub async fn cancel(State(st): State<Arc<AppState>>, Path(id): Path<String>) -> Json<Value> {
+/// 取消扒谱。**不是立刻停** —— 去噪循环在下一个 step 边界才收手。
+#[tauri::command]
+pub async fn midi_cancel(st: super::St<'_>, id: String) -> Cmd {
     let mut hit = false;
     // 只读地看一眼槽里是谁 —— 不去改它：**这里不该把槽清空**，清空是
     // `run_job` 收工时的活（它要认 id）。否则任务还在跑，`status.running`
@@ -598,93 +586,30 @@ pub async fn cancel(State(st): State<Arc<AppState>>, Path(id): Path<String>) -> 
     // 旗标立了，真正的收场在推理那一侧（它在每个切片边界看一眼）。
     // 这里**不改任务状态** —— 由 `run_job` 统一写，免得两边打架。
     if hit {
-        convert::log_job(&st, &id, "收到取消请求，正在当前这一段结束后停下…");
+        log_job(&st.inner().clone(), &id, "收到取消请求，正在当前这一段结束后停下…");
     }
-    Json(ok(json!({ "canceled": hit })))
+    Ok(json!({ "canceled": hit }))
 }
 
-/// 在资源管理器里选中一个目录。
+/// 在资源管理器里选中一个目录。`{ dir }`
 ///
 /// ⚠️ 和音轨分离那边不同：结果**不在固定的 `<数据目录>/outputs/<id>`**，
 /// 而是落在用户选的目录（或音频同目录下的 `midi/`）。所以前端必须把
 /// 任务 `result.dir` 原样传回来；空串只兜底开本功能的数据目录。
-pub async fn open_output(
-    State(st): State<Arc<AppState>>,
-    body: Option<Json<Value>>,
-) -> Result<Json<Value>, ApiError> {
-    let body = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    let dir = body.get("dir").and_then(|v| v.as_str()).unwrap_or("").trim();
+#[tauri::command]
+pub async fn midi_open_output(st: super::St<'_>, args: Option<Value>) -> Cmd {
+    let args = args.unwrap_or_else(|| json!({}));
+    let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or("").trim();
     let target = if dir.is_empty() {
         // 不给就开本功能的数据目录（模型、动态库都在这儿，用户想翻也翻得到）
-        mt::data_dir(&st.writable).to_string_lossy().to_string()
+        mt::data_dir(&st.inner().writable).to_string_lossy().to_string()
     } else {
         dir.to_string()
     };
     let p = std::path::Path::new(&target);
     if !p.exists() {
-        return Err(ApiError::bad_request(format!("目录不存在：{target}")));
+        return Err(format!("目录不存在：{target}"));
     }
-    crate::platform::reveal_in_explorer(&target, false).map_err(ApiError::from)?;
-    Ok(Json(ok(json!({ "path": target }))))
-}
-
-/// 取结果文件。
-///
-/// 输出目录是用户任选的、记在任务的 `result.dir` 里，所以这里得回任务表查 ——
-/// 不能像音轨分离那样按 `<数据目录>/outputs/<id>/` 拼出来。
-///
-/// **不检查它是不是这次任务的产物**：用户要听的就是那个 `.mid` / 看那个 `.csv`，
-/// 路径本来就由 `task` 的 `result.files` 给出，这里只把字节发出去。
-/// 但仍然挡住路径穿越（`..`、分隔符、绝对路径）—— 参数会拼进路径，不能白信任。
-pub async fn output(
-    State(st): State<Arc<AppState>>,
-    Path((id, name)): Path<(String, String)>,
-) -> Result<Response, ApiError> {
-    if id.is_empty()
-        || name.is_empty()
-        || name.contains("..")
-        || name.contains('/')
-        || name.contains('\\')
-        || !name.chars().all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' '))
-    {
-        return Err(ApiError::bad_request("文件名不合法"));
-    }
-    let dir = job_output_dir(&st, &id)
-        .ok_or_else(|| ApiError::not_found("任务不在，或它还没写出文件（工作站重启过？）"))?;
-    let path = std::path::Path::new(&dir).join(&name);
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| ApiError::not_found(format!("读不到 {}：{e}", path.display())))?;
-    let mime = match path
-        .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("mid") | Some("midi") => "audio/midi",
-        Some("csv") => "text/csv; charset=utf-8",
-        Some("json") => "application/json",
-        _ => "application/octet-stream",
-    };
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, mime.to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{name}\""),
-            ),
-        ],
-        bytes,
-    )
-        .into_response())
-}
-
-/// 从任务表里挖出这次任务写到哪个目录。
-fn job_output_dir(st: &Arc<AppState>, id: &str) -> Option<String> {
-    let guard = st.jobs.lock().ok()?;
-    let job = guard.items.get(id)?;
-    job.get("result")?
-        .get("dir")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    crate::platform::reveal_in_explorer(&target, false).map_err(|e| e.to_string())?;
+    Ok(json!({ "path": target }))
 }

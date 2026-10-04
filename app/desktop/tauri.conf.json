@@ -5,13 +5,17 @@
   "identifier": "com.qingmu.vocalworkstation",
 
   "build": {
-    "frontendDist": "./dist"
+    "frontendDist": "../../app/web"
   },
 
   "app": {
     "windows": [],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
     }
   },
 

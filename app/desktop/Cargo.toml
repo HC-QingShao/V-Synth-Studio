@@ -10,14 +10,18 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `protocol-asset`：本地媒体的播放/试听走 Tauri 内置的 asset 协议
+# （`convertFileSrc(path)` → `http://asset.localhost/<路径>`），Range(206) 是它内置的
+# —— 见 `ipc/fs.rs` 里运行时 `asset_protocol_scope().allow_directory()`。
+# 它取代了以前那条自写的 `/api/fs/raw`（同样支持 Range，但是自己解析的）。
+tauri = { version = "2", features = ["protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# HTTP 服务：实现和 Node 后端完全相同的 39 个路由，前端零改动
-axum = { version = "0.8", features = ["json", "query"] }
+# ⚠️ **axum 与 tower-http 已经摘掉了**（2026-10-04）：它们只服务旧的本机 HTTP 服务，
+# 而那一层已经整体搬进 `ipc/`（Tauri IPC + asset 协议）。别再为了「顺手起个 HTTP 端点」
+# 把它们加回来 —— 前端加载的是 Tauri 的资源协议，页面里根本没有 HTTP 服务器的位置。
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "process", "time", "sync", "io-util"] }
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 
 # 下载 / B 站解析 / 链接检查要用
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
@@ -49,6 +53,7 @@ flate2 = "1"
 # CUDA 库。所以 AMD 机器、没装 CUDA 的机器照样能用这个 exe，只是那一格锁着。
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["ndarray", "load-dynamic", "cuda"] }
 ndarray = "0.17"
+tauri-plugin-dialog = "2"
 
 # 只有 Unix 下需要：给进程组发信号，把子进程树一起收掉
 [target.'cfg(unix)'.dependencies]

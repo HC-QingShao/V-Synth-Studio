@@ -763,7 +763,7 @@ fn kill_tree(child: &mut Child) {
     #[cfg(windows)]
     {
         let pid = child.id();
-        let _ = crate::server::quiet_command("taskkill")
+        let _ = crate::ipc::tools::quiet_command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

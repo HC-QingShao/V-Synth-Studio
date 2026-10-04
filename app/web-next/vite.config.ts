@@ -84,6 +84,24 @@ export default defineConfig({
    */
   base: '/',
   plugins: [react(), tailwindcss(), restoreStandardBackdropFilter()],
+  /*
+   * ⚠️ **这里配了 `server.port`，但 `tauri.conf.json` 里故意没有 `devUrl`。**
+   *
+   * 原因（踩过）：`devUrl` 在**每一次 `cargo build`**（debug 构建）里都会被
+   * `get_app_url()` 无条件优先采用 —— `cfg(dev)` 的判据是「没开 `custom-protocol`
+   * feature」，也就是 debug 构建。于是窗口会去连 `http://localhost:1420`，
+   * 而除了 `tauri dev` 之外没人会起那个服务：窗口白屏（实测页面 URL 变成
+   * `chrome-error://chromewebdata/`）。连 `show_error()` 弹的那个错误窗口都会去连它。
+   *
+   * 所以「怎么跑」只有一条路：`npm run build` 出产物 → `cargo build` 把产物嵌进 exe。
+   * 想要热更新再引 `@tauri-apps/cli` + `cargo tauri dev`（那时 `devUrl` 才是有意义的），
+   * 别为了省这一步让默认构建依赖一个外部服务。
+   */
+  server: {
+    port: 1420,
+    strictPort: true,
+    host: 'localhost',
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

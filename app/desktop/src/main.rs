@@ -1,13 +1,16 @@
 // V-Synth-Studio  ·  QingMu39
-// Tauri 桌面外壳 + 内嵌 HTTP 后端
+// Tauri 桌面应用（纯 IPC，没有 HTTP 服务）
 //
 // 架构：
-//   一个进程搞定所有事 —— 窗口、HTTP 服务、转换编排、任务系统全在这里。
-//   没有 node.exe 子进程，也没有任何 sidecar 子进程。
+//   一个进程搞定所有事 —— 窗口、命令处理、转换编排、任务系统全在这里。
+//   前端加载的是 Tauri 自己的资源协议（Windows 上是 `http://tauri.localhost`），
+//   前后端交互**只走 `tauri::command`**（见 `src/ipc/`）。
 //
-// 两种运行方式：
-//   v-synth-studio.exe                        开窗口（正常使用）
-//   v-synth-studio.exe --serve --port=17878    只跑服务，不开窗口（开发/对照测试用）
+//   这里以前有一个同进程的 axum HTTP 服务（56 条路由 + 静态文件伺服，5,610 行），
+//   因为窗口是用 `WebviewUrl::External` 加载 `http://127.0.0.1:17878` 的 —— 那种
+//   加载方式下页面拿不到 Tauri IPC，只能自己造一套 REST。2026-10 那次减法重构把它
+//   整个删了：窗口改用 `WebviewUrl::App`，于是端口、静态伺服、SSE、上传、
+//   Range 代理这一整层替身全部消失。
 //
 // ── 关于「为什么没有控制台窗口」──
 // 这里**始终**用 windows 子系统，debug 版也不例外。
@@ -16,7 +19,6 @@
 //
 // 代价是看不到 stdout —— 所以日志改成写文件（见 log_line）。
 // 这反而更好用：日志能翻历史、能搜索，也不会因为关掉窗口就丢了。
-// `--serve` 模式如果想把输出打到终端，重定向即可（Start-Process -RedirectStandardOutput）。
 
 #![windows_subsystem = "windows"]
 
@@ -24,12 +26,12 @@ mod audio;
 mod bili;
 mod data;
 mod game;
+mod ipc;
 mod libresvip;
 mod lyrics;
 mod midi_transcribe;
 mod net;
 mod platform;
-mod server;
 mod svsep;
 
 /// 追加一行日志到 `<可写目录>/app.log`。
@@ -40,7 +42,7 @@ mod svsep;
 ///
 /// 刻意不引日志库：这里只有十来行输出，一个 `OpenOptions::append` 就够。
 ///
-/// `pub(crate)`：`server` 模块里也有需要记一行的地方（见 `server/simple.rs` 读配置那处）。
+/// `pub(crate)`：别的模块里也有需要记一行的地方（见 `ipc/config.rs` 读配置那处）。
 pub(crate) fn log_line(msg: &str) {
     use std::io::Write;
 
@@ -81,64 +83,26 @@ mod tools;
 mod ytdlp;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 const WINDOW_TITLE: &str = "V-Synth-Studio";
-const STARTUP_TIMEOUT_SECS: u64 = 30;
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    /*
+     * 界面只有一套，入口是 Tauri 的资源协议（见 `tauri.conf.json` 的 `frontendDist`）。
+     * 2026-10-02：旧前端（`app/web/js` + `css` + 那个手写 `index.html`）整体退役；
+     * 在那之前这里是一段 `--ui=next|old` 的选择逻辑，两套界面并存是为了并行搬迁。
+     *
+     * ⚠️ `--serve` / `--port=` 已经**不存在**了。以前那个「只跑服务不开窗口」的模式
+     * 是为了给 `tests/contract` 与无头浏览器探针打端口用；HTTP 层删掉之后它没有意义，
+     * 传了也只会照常开窗口。要跑自动化就用 Rust 侧的单测（`cargo test --bins`）。
+     */
+    note!("界面：React 前端（Tauri 资源协议 + IPC）");
 
-    // ── 界面：只有一个，就在根路径 ──────────────────────────────
-    //
-    //   v-synth-studio.exe   →   http://127.0.0.1:<port>/   （React + Vite，产物在 app/web/）
-    //
-    // 2026-10-02：旧前端（`app/web/js` + `css` + 那个手写 `index.html`）整体退役。
-    // 在那之前这里是一段 `--ui=next|old` 的选择逻辑，窗口 URL 取 `/next/` 或 `/`；
-    // 两套界面并存是为了并行搬迁（谁都没被破坏），8 页搬完后就没必要了 ——
-    // **一个界面就不该有「选哪个界面」这层机制**。`--ui=` 与启动器的 `--old` 一并撤掉。
-    //
-    // 前端是**每请求从磁盘读**的（server/simple.rs::static_files），
-    // 所以改前端仍然不需要重新编译 exe：跑 `npm run build` 刷新即可。
-    // 记一行启动路径。出问题时（窗口白屏 / 404）先看这行，能立刻分清是
-    // 「服务没起来」还是「起来的不是想跑的那份」，不用猜。
-    note!("界面：React 前端（URL 前缀 '/'）");
-
-    // ── 纯服务模式（开发与对照测试用）──────────────────────────
-    if args.iter().any(|a| a == "--serve") {
-        let port = args
-            .iter()
-            .find_map(|a| a.strip_prefix("--port="))
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(8891);
-
-        let paths = match resolve_paths(None) {
-            Some(p) => p,
-            None => {
-                // 这个哨兵文件是**前端构建产物**（Vite 的 outDir 就是 app\web\）。
-                // 它不见了的典型原因不是「目录少拷了」，而是前端从没构建过、或者被清掉了。
-                note!(
-                    "错误：找不到程序文件（应该包含 app/web/index.html）。\n\
-                     \x20 这个文件是前端产物，也是「程序根目录」的判定依据。\n\
-                     \x20 先跑一次构建：powershell -ExecutionPolicy Bypass -File app\\desktop\\build.ps1"
-                );
-                std::process::exit(1);
-            }
-        };
-
-        let rt = tokio::runtime::Runtime::new().expect("创建 tokio 运行时失败");
-        rt.block_on(async move {
-            if let Err(e) = serve(paths, port).await {
-                note!("错误：服务启动失败：{e}");
-                std::process::exit(1);
-            }
-        });
-        return;
-    }
-
-    // ── 正常模式：Tauri 窗口 + 内嵌服务 ────────────────────────
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -157,93 +121,154 @@ fn main() {
                     return Ok(());
                 }
             };
-
-            let port = pick_port();
-
-            /*
-             * 服务跑在进程内的 tokio 任务里，**不是子进程**。
-             * 这是这次重写的核心目的：窗口和服务同生共死，不存在孤儿进程。
-             */
-            let paths_for_server = paths.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = serve(paths_for_server, port).await {
-                    note!("错误：内嵌服务异常退出：{e}");
-                }
-            });
-
-            // 等端口真的能连上再开窗口
-            if !wait_for_port(port, STARTUP_TIMEOUT_SECS) {
-                show_error(&handle, "内嵌服务 30 秒内没有启动成功。");
-                return Ok(());
+            note!("  根目录：{}", crate::platform::clean_path(&paths.root));
+            if paths.installed {
+                note!("  配置目录：{}", crate::platform::clean_path(&paths.writable));
             }
 
-            // 注意末尾的斜杠：少了它，静态文件处理器会先 301 再补，直接带上省一次跳转。
-            // 前缀恒为空 —— 界面只有一套，就挂在根路径 / 上（2026-10-02 旧前端退役）。
-            let url: tauri::Url = format!("http://127.0.0.1:{port}/")
-                .parse()
-                .expect("本地地址一定能解析");
+            /*
+             * 状态**必须** `manage` 进来（IPC command 靠 `State<Arc<AppState>>` 取它）。
+             *
+             * ⚠️ 这里和以前不一样，而且修掉了一段死代码：那时 `AppState` 是在
+             * `serve()`（一个 spawn 出去的 task）里建的局部变量，从没 `manage` 过，
+             * 所以 `RunEvent::Exit` 里的 `try_state::<Arc<AppState>>()` **永远回 None**
+             * —— 那段「退出时收子进程」的代码看着在收、其实一次都没跑。
+             * 现在它真的取得到了。
+             */
+            let state = ipc::AppState::new(paths.clone());
+            app.manage(Arc::clone(&state));
 
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            // 后台预热一次外部工具探测：`detect_tools` 会真的 spawn
+            // `yt-dlp --version` / `python --version` 并逐段扫 PATH，机器忙时 2~7 秒。
+            // 不预热的话，前端首屏那次 `get_state` 就要干等这几秒（用户看到的是白屏）。
+            std::thread::spawn(move || {
+                let _ = state.probe_cached(false);
+            });
+
+            /*
+             * ⚠️ **不再关掉 Tauri 的拖放拦截。**
+             *
+             * 以前这里是 `.disable_drag_drop_handler()` —— Tauri 默认会把拖进来的文件
+             * 截走、改发成 Tauri 事件，而那时页面拿不到 IPC，只能收 HTML5 的 drop 事件，
+             * 所以必须关掉它。
+             *
+             * 现在反过来：**我们要的正是那个 Tauri 事件** —— `DragDropEvent::Drop`
+             * 的载荷里直接带 `paths`（真路径），比 HTML5 那条「拿到 File 对象再上传
+             * 换一个路径」的路少一整圈。所以用默认值（开着拦截）。
+             */
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title(WINDOW_TITLE)
                 .inner_size(1360.0, 880.0)
                 .min_inner_size(960.0, 640.0)
-                /*
-                 * ⚠️ **必须关掉 Tauri 的拖放拦截**，否则网页里收不到 HTML5 的 drop 事件。
-                 * Tauri 默认 `drag_drop_enabled = true`：文件拖进来会被它自己截走、改发成 Tauri 事件，
-                 * 而我们是「网页 + 本地 HTTP 服务」的架构（页面拿不到 Tauri IPC），
-                 * 结果就是「把工程拖进窗口」永远没反应。
-                 * 关掉之后交给 WebView 原生处理，`dataTransfer.files` 才有值。
-                 */
-                .disable_drag_drop_handler()
                 .center()
                 .build()?;
 
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            /* ── 状态与配置 ── */
+            ipc::state::get_state,
+            ipc::config::get_config,
+            ipc::config::set_config,
+            ipc::config::migrate_legacy_settings,
+            /* ── 文件系统 ── */
+            ipc::fs::pick_paths,
+            ipc::fs::allow_path,
+            ipc::fs::open_path,
+            ipc::fs::open_url,
+            ipc::fs::upload_dropped,
+            ipc::fs::read_bytes,
+            ipc::fs::mkdir,
+            ipc::fs::remove_path,
+            /* ── 文字 PV 分块落盘 ── */
+            ipc::pv::pv_save_chunk,
+            /* ── 任务与资源库 ── */
+            ipc::jobs::list_jobs,
+            ipc::jobs::get_job,
+            ipc::jobs::cancel_job,
+            ipc::jobs::job_watch,
+            ipc::jobs::get_resources,
+            ipc::jobs::check_resources,
+            /* ── 外部工具 ── */
+            ipc::tools::tools_detect,
+            ipc::tools::tools_launch,
+            /* ── 工程转换 ── */
+            ipc::convert::convert_collect,
+            ipc::convert::convert_inspect,
+            ipc::convert::convert_preview,
+            ipc::convert::convert_run,
+            /* ── 视频解析下载 / 音频 / 预览缓存 ── */
+            ipc::media::video_parse,
+            ipc::media::video_download,
+            ipc::media::audio_probe,
+            ipc::media::audio_run,
+            ipc::media::preview_fetch,
+            ipc::media::preview_clear,
+            /* ── B 站扫码登录 ── */
+            ipc::bili::bili_qr_generate,
+            ipc::bili::bili_qr_poll,
+            ipc::bili::bili_logout,
+            /* ── 歌词（网易云专栏）── */
+            ipc::lyrics::lyrics_search,
+            ipc::lyrics::lyrics_get,
+            ipc::lyrics::lyrics_parse_link,
+            ipc::lyrics::lyrics_import,
+            ipc::lyrics::lyrics_save,
+            ipc::lyrics::lyrics_cover,
+            ipc::lyrics::lyrics_song,
+            ipc::lyrics::lyrics_logout,
+            ipc::lyrics::lyrics_login_sms,
+            ipc::lyrics::lyrics_login_cellphone,
+            /* ── 音轨分离 ── */
+            ipc::svsep::svsep_status,
+            ipc::svsep::svsep_start,
+            ipc::svsep::svsep_stop,
+            ipc::svsep::svsep_models_download,
+            ipc::svsep::svsep_runtime_download,
+            ipc::svsep::svsep_download_pause,
+            ipc::svsep::svsep_download_stop,
+            ipc::svsep::svsep_deps_delete,
+            ipc::svsep::svsep_backend_status,
+            ipc::svsep::svsep_inference_get,
+            ipc::svsep::svsep_set_inference,
+            ipc::svsep::svsep_separate,
+            ipc::svsep::svsep_task,
+            ipc::svsep::svsep_cancel,
+            ipc::svsep::svsep_open_output,
+            /* ── 人声转 MIDI ── */
+            ipc::midi::midi_status,
+            ipc::midi::midi_device_get,
+            ipc::midi::midi_device_set,
+            ipc::midi::midi_models_download,
+            ipc::midi::midi_runtime_download,
+            ipc::midi::midi_download_stop,
+            ipc::midi::midi_deps_delete,
+            ipc::midi::midi_transcribe,
+            ipc::midi::midi_task,
+            ipc::midi::midi_cancel,
+            ipc::midi::midi_open_output,
+        ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用构建失败")
-        .run(|_app, event| {
+        .run(|app, event| {
             /*
-             * 这里原本想在退出时收掉音轨分离的子进程（python.exe），但**写不出来**：
-             * `AppState` 是在 `serve()` 里建的 —— 那是个 `spawn` 出去的 task，
-             * 从来没 `app.manage()` 过，所以 `app.try_state::<Arc<AppState>>()`
-             * 永远回 `None`。写成那样就是一段看着在收、其实一次都没跑的死代码。
+             * 真正收子进程（分离引擎的 python.exe）的是两套机制，缺一不可：
              *
-             * 真正收子进程的是 `impl Drop for Svsep`：`Svsep` 是 `AppState` 的字段，
-             * 而 `AppState` 是 `serve()` 的局部变量 —— 进程退出时 tokio 运行时的
-             * 任务被 drop，`serve()` 的 future 跟着 drop，`Svsep::drop` 就跑了。
-             * 收不掉的那种退出（任务管理器强杀、运行时被跳过析构）是这套机制
-             * 的边界，要靠 Windows 作业对象才兜得住，那是另一个量级的改动。
+             *   1. `impl Drop for Svsep` —— 正常退出时跑。`Svsep` 是 `AppState` 的字段，
+             *      而下面的 `try_state` 现在真的拿得到它，所以正常退出这条路是可靠的。
+             *   2. Windows 作业对象（`svsep.rs` 的 `job` 模块）—— 兜住任务管理器强杀：
+             *      那种退出不会跑析构，只能靠「进程一死句柄被内核回收 → 作业里的进程
+             *      一起死」。
              */
             if let tauri::RunEvent::Exit = event {
                 note!("窗口关闭，正在收尾…");
+                let _ = app.try_state::<Arc<ipc::AppState>>();
             }
         });
 }
 
-/// 起 HTTP 服务（阻塞到进程结束）
-async fn serve(paths: AppPaths, port: u16) -> Result<(), String> {
-    let state = server::AppState::new(paths.clone());
-    let app = server::router(state.clone());
+/* ────────────────────────────────── 路径 ────────────────────────────────── */
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .map_err(|e| format!("端口 {port} 绑定失败：{e}"))?;
-
-    note!("翻调工作站已启动 —— 地址 http://127.0.0.1:{port}");
-    note!("  根目录：{}", crate::platform::clean_path(&paths.root));
-    if paths.installed {
-        note!("  配置目录：{}", crate::platform::clean_path(&paths.writable));
-    }
-
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| format!("服务运行出错：{e}"))
-}
-
-/* ────────────────────────────────── 路径与端口 ────────────────────────────────── */
-
-/// 从可执行文件位置往上找程序根目录。
 /// 程序的路径布局。两种形态共用一套代码：
 ///
 /// - **绿色版**（整个目录解压，双击 bat）：根目录就是解压出来的那一层，
@@ -252,7 +277,7 @@ async fn serve(paths: AppPaths, port: u16) -> Result<(), String> {
 ///   resource_dir 下，而**那里是只读的** —— 配置必须写到用户目录，
 ///   否则保存设置会失败（Program Files 需要管理员权限才能写）。
 /// 只读数据目录（`resources.json`、`pinyin.json`，随包分发不改）是
-/// `<root>/app/data/` —— 服务端在 `AppState` 里自己拼（`server/mod.rs:data_dir()`），
+/// `<root>/app/data/` —— 由 `AppState` 自己拼（`server/mod.rs::data_dir()`），
 /// 所以这里不需要一个同名的访问器。
 #[derive(Clone)]
 pub struct AppPaths {
@@ -272,6 +297,11 @@ pub struct AppPaths {
 ///   3. 当前工作目录往上找 —— 开发时直接 `cargo run` 走这条
 ///
 /// 判据是 `app/web/index.html` 存在（前端的入口，两种形态都在）。
+///
+/// ⚠️ 这个文件**同时**是 `tauri.conf.json` 的 `frontendDist` 源目录 ——
+/// 也就是说它既随包分发（Tauri 要把它嵌进 exe），也留在磁盘上当哨兵。
+/// 别再把它改成「只嵌进 exe、磁盘上不留」的纯 `frontendDist` 布局：
+/// 那样 `resolve_paths` 就找不到根目录了（`tools/`、`app/data/` 全在它旁边）。
 fn resolve_paths(resource_dir: Option<PathBuf>) -> Option<AppPaths> {
     let has_web = |d: &Path| d.join("app").join("web").join("index.html").is_file();
 
@@ -369,56 +399,6 @@ fn user_data_dir() -> PathBuf {
     base.join("com.qingmu.vocalworkstation")
 }
 
-/// 界面用的首选端口。
-///
-/// **端口必须稳定**：localStorage 按 origin（协议 + 主机 + 端口）隔离，
-/// 端口一变就等于换了一套存储 —— JIZURA 的教程标记、界面设置、
-/// **工程自动保存（jizura.project.\*）** 全都会丢。
-///
-/// 选 17878：在 Windows 的动态端口范围（49152 起）之外，不会被临时连接占用，
-/// 也不撞常见服务端口。只绑 127.0.0.1，不暴露到局域网。
-const PREFERRED_PORT: u16 = 17878;
-
-/// 优先用固定端口，被占用了才退回随机 —— 但要在日志里说清楚，
-/// 否则以后「设置和工程怎么又没了」没法排查。
-fn pick_port() -> u16 {
-    if port_is_free(PREFERRED_PORT) {
-        return PREFERRED_PORT;
-    }
-    let fallback = free_port();
-    note!(
-        "端口 {PREFERRED_PORT} 已被别的程序占用，本次改用随机端口 {fallback}。\
-         注意：界面设置、教程标记与 PV 工程自动保存都与端口绑定，这一次不会延续。"
-    );
-    fallback
-}
-
-/// 端口能不能绑（只探 127.0.0.1，和 serve 的绑定范围一致）
-fn port_is_free(port: u16) -> bool {
-    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
-}
-
-/// 让系统分一个空闲端口
-fn free_port() -> u16 {
-    std::net::TcpListener::bind(("127.0.0.1", 0))
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .unwrap_or(PREFERRED_PORT)
-}
-
-/// 轮询端口直到真的能连上（不靠死等固定秒数）
-fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    while std::time::Instant::now() < deadline {
-        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(120));
-    }
-    false
-}
-
 /* ────────────────────────────────── 失败提示 ────────────────────────────────── */
 
 /// 出错日志的完整路径，给用户看的。
@@ -453,7 +433,8 @@ fn show_error(app: &tauri::AppHandle, message: &str) {
     }
     note!("错误：{message}");
 
-    // 开一个窗口把原因显示出来（走内嵌的起始页，原因通过 hash 传过去）
+    // 开一个窗口把原因显示出来（走内嵌的起始页，原因通过 hash 传过去）。
+    // `build()` 失败时不 panic —— 那时候真正的原因已经写进日志了。
     if let Ok(w) = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title(WINDOW_TITLE)
         .inner_size(720.0, 420.0)

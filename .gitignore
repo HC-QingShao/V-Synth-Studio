@@ -92,17 +92,24 @@ tests/samples/real-sample-*
 tests/samples/openutau-*
 
 # ── 前端构建（app/web-next）────────────────────────────────
-# Vite 的**产物**（app/web/：index.html + assets/，含带哈希的文件名）要入库 ——
-# 后端运行时伺服它，属于「随包分发的东西」。⚠️ 别把它当成可再生成的构建垃圾忽略掉：
-# 没有 assets/ 的话 fresh clone 打开就是白屏（index.html 引用的是哈希文件名）。
-# 代价是每次前端构建都会改 index.html + 两个哈希文件，这是刻意的取舍。
-# 但依赖与增量编译缓存不进库：
+# ⚠️ **2026-10-05 起 `app/web/assets/` 不入库**（规则见本段末尾）—— 下面这段原本写的是
+# 「产物要入库，否则 fresh clone 打开就是白屏」，**那个说法已经作废**，别再照它 `git add -f`。
+#
+# 现在的规矩：**前端产物由 `build.ps1` 重新生成**，所以不必入库。
+#   * `build.ps1`（不加 `-SkipWeb`）第一步就是 `cd app/web-next && npm ci && npm run build`，
+#     产物直接落在 `app\web\`，`assets/` 会被补齐；
+#   * ⚠️ **只有加了 `-SkipWeb` 才需要自己先跑一次前端构建**（那个开关只为「只改 Rust
+#     省几秒」而存在），否则 `index.html` 会指向不存在的哈希文件名 → **窗口白屏**；
+#   * `index.html` 本身**要入库**：它既是 Vite 的入口，也是 `resolve_paths()` 判定
+#     程序根目录的哨兵（`app/web/index.html`）。
+#
+# 为什么不入 assets/：里面是**带内容哈希**的文件名，而 `emptyOutDir: false` 让每次构建
+# 都往里加新文件、旧的也不自动删（磁盘上现在就是两套）。入库的话每构建一次就多两个
+# 永不被引用的文件，且「旧版本」会在历史里越堆越多。
+#
+# ⚠️ 但依赖与增量编译缓存同样不进库：
 app/web-next/node_modules/
 *.tsbuildinfo
-# ∧ 补充（2026-10-05）：assets/ 里是**带内容哈希**的产物，`emptyOutDir:false`
-# 让每次构建都往里加新文件、旧的也不会自动删。入库的话每构建一次就多两个永不
-# 被引用的文件，且「旧版本」会在历史里越堆越多 —— 只保留 index.html 这一个
-# 入口（它同时也是 resolve_paths() 判定程序根目录的哨兵）。
 app/web/assets/
 
 # ── JIZURA 字体（同上：大二进制，编译前补齐）────────────────

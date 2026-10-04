@@ -388,7 +388,7 @@ pub struct ConvertResult {
 /// `options` 是前端传上来的选项表（键见 `RULES`）；缺的项一律照抄 CLI 提示里的默认值。
 ///
 /// 实现要点（每一条都对应一个踩过的坑）：
-///  1. **静默起进程**：用 `crate::server::simple::quiet_command`（CREATE_NO_WINDOW）。
+///  1. **静默起进程**：用 `crate::ipc::tools::quiet_command`（CREATE_NO_WINDOW）。
 ///     以前用 `Command::new`，每转一个文件就闪一个控制台窗口 —— 批量转换时满屏都是窗口。
 ///  2. **逐题应答**：stdout 单独开线程读、用 channel 递过来；主循环在「安静 160ms
 ///     且结尾是冒号」时认为它在等回答，写一条答案进去。
@@ -421,7 +421,7 @@ pub fn convert(root: &Path, input: &Path, output: &Path, options: &Value) -> Res
         None
     };
 
-    let mut child = crate::server::simple::quiet_command(&cli.to_string_lossy())
+    let mut child = crate::ipc::tools::quiet_command(&cli.to_string_lossy())
         .args(["proj", "convert"])
         .arg(input)
         .arg(output)

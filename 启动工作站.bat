@@ -7,14 +7,18 @@ REM ===========================================================
 REM  V-Synth-Studio launcher
 REM
 REM  Usage:
-REM    launch.bat                       start the app (window + embedded service)
-REM    launch.bat --serve --port=8891   service only, no window (for tests)
+REM    launch.bat                       start the app (window + IPC commands)
+REM
+REM  NOTE: there is no HTTP service any more. The embedded axum server,
+REM  the --serve mode and the fixed port (17878) are gone: the window now
+REM  loads the front end through Tauri's own protocol and talks to Rust
+REM  over IPC. See docs/TAURI-IPC-PLAN.md.
 REM
 REM  There is only ONE front end now (React, served at "/").
 REM  Until 2026-10-02 this file chose between the old and the new UI
 REM  ("--old" / "--ui=next"); the old UI is gone, so the choice is gone.
-REM  Files are read from disk per request, so editing the front end still
-REM  needs no rebuild -- only "npm run build" in app\web-next.
+REM  The front end is embedded in the exe now, so editing it DOES need a
+REM  rebuild: "npm run build" in app\web-next, then recompile.
 REM
 REM  ---------------------------------------------------------
 REM  HARD RULES for this file (learned the hard way):
