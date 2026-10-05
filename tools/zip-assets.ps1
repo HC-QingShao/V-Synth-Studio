@@ -10,9 +10,13 @@
 # NOTE: this script ONLY packs. Uploading is yours to do.
 # NOTE: think before repacking -- the current zips are the ones already in use.
 #       New bytes mean every machine without a warm cache downloads again.
+# NOTE: 云上打包见 .github/workflows/publish-assets.yml（手动触发，打完直接发 Release）。
 #
 #   powershell -ExecutionPolicy Bypass -File tools\zip-assets.ps1
-#   powershell -ExecutionPolicy Bypass -File tools\zip-assets.ps1 -Src app\data -Name probe
+#   powershell -ExecutionPolicy Bypass -File tools\zip-assets.ps1 -Src docs -Name probe -Out $env:TEMP\zipprobe
+#
+# ⚠️ `-Src` 别指向 app\data —— 那底下住着 8.4 GB 的 svsep 运行时（2.7 万个小文件）
+#    与 376 MB 的模型，Compress-Archive 会一路压下去（实测把探针跑飞过一次）。
 
 param(
     [string]$Out,      # 输出目录；默认是 <程序根目录>\资料归档

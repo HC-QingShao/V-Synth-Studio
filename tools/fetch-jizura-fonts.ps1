@@ -1,7 +1,11 @@
 ﻿# Fetch and self-host the Google Fonts used by JIZURA (one-shot script; output ships with the app).
 #
-# Usage (proxy must be up first):
+# Usage:
 #   powershell -ExecutionPolicy Bypass -File tools\fetch-jizura-fonts.ps1
+#
+# Proxy is optional now (see the $Proxy block below): Google is unreachable from
+# mainland China without one, while a cloud runner reaches it directly and has no
+# proxy at all. Same script, both cases.
 #
 # NOTE: this file is deliberately ASCII-only. Windows PowerShell 5.1 reads
 # BOM-less .ps1 as ANSI, so non-ASCII text here becomes mojibake and breaks parsing.
@@ -14,7 +18,25 @@
 # run does not have to re-fetch 18 x ~450 KB of CSS from Google.
 
 $ErrorActionPreference = 'Stop'
-$Proxy = 'http://127.0.0.1:7890'
+
+# Proxy handling -------------------------------------------------------------
+#   * VSYNTH_FONT_PROXY=<url>  use that proxy
+#   * VSYNTH_FONT_PROXY=''     force direct (no proxy)
+#   * unset                    use http://127.0.0.1:7890 if something listens
+#                              there, otherwise go direct
+# The last case is what lets this same script run on a dev box (proxy up) and on
+# a GitHub runner (direct). curl only gets -x when a proxy was actually picked.
+$Proxy = $env:VSYNTH_FONT_PROXY
+if ($null -eq $Proxy) {
+  $Proxy = ''
+  $probe = New-Object System.Net.Sockets.TcpClient
+  try { $probe.Connect('127.0.0.1', 7890); $Proxy = 'http://127.0.0.1:7890' }
+  catch { }
+  finally { $probe.Dispose() }
+}
+$ProxyArg = @()
+if ($Proxy) { $ProxyArg = @('-x', $Proxy) }
+
 $Root = Split-Path -Parent $PSScriptRoot
 $Dir = Join-Path $Root 'app\web\vendor\jizura'
 $FontDir = Join-Path $Dir 'fonts'
@@ -46,7 +68,8 @@ $Specs = @(
 
 New-Item -ItemType Directory -Force -Path $FontDir | Out-Null
 New-Item -ItemType Directory -Force -Path $RawDir | Out-Null
-$env:HTTPS_PROXY = $Proxy
+if ($Proxy) { $env:HTTPS_PROXY = $Proxy }
+Write-Host "proxy: $(if ($Proxy) { $Proxy } else { '(none, direct)' })"
 
 # gstatic paths allow dots inside the file name (....cjb4.85.woff2), so the tail may not
 # be greedy across dots: `[^/]+\.woff2` with the \. anchored to the LAST dot only works
@@ -69,7 +92,7 @@ foreach ($spec in $Specs) {
   } else {
     Write-Host "[$n/$($Specs.Count)] $spec"
     $url = "https://fonts.googleapis.com/css2?family=$spec&display=swap"
-    $css = & curl.exe -s -x $Proxy --max-time 90 -A $UA $url
+    $css = & curl.exe -s @ProxyArg --max-time 90 -A $UA $url
     if ($LASTEXITCODE -ne 0 -or -not $css -or ($css -join '') -notmatch [regex]::Escape('@font-face')) {
       throw "no CSS for $spec (curl exit $LASTEXITCODE)"
     }
@@ -110,7 +133,9 @@ if ($todo.Count) {
       param($u, $dir, $proxy)
       $name = Split-Path $u -Leaf
       $dest = Join-Path $dir $name
-      & curl.exe -s -f -x $proxy --max-time 90 -o $dest $u
+      $px = @()
+      if ($proxy) { $px = @('-x', $proxy) }
+      & curl.exe -s -f @px --max-time 90 -o $dest $u
       if ($LASTEXITCODE -ne 0 -or -not (Test-Path $dest)) { return $u }
       return $null
     }).AddArgument($u).AddArgument($FontDir).AddArgument($Proxy)
@@ -140,4 +165,7 @@ $cssFinal = [regex]::Replace($out.ToString(), $UrlRe, { param($m) 'fonts/' + (Sp
 
 $mb = [math]::Round($bytes / 1MB, 1)
 Write-Host "done: $($files.Count) files on disk, $($failed.Count) failed, $mb MB -> app\web\vendor\jizura\fonts\"
-if ($failed.Count) { $failed | ForEach-Object { Write-Host "  failed: $_" } }
+if ($failed.Count) {
+  $failed | ForEach-Object { Write-Host "  failed: $_" }
+  throw "$($failed.Count) font files failed to download -- NOT a usable font set"
+}

@@ -1,0 +1,232 @@
+# 把两个「随程序分发、但不属于源码」的大件打成 Release 附件（tag `assets-v1`）。
+#
+# 手动跑：Actions → 发布大件附件 (assets-v1) → Run workflow
+#
+# ── 为什么要有这个工作流 ────────────────────────────────────────────────────
+#
+#   tools\                   ffmpeg + yt-dlp + LibreSVIP CLI   ≈ 288MB（压后 129MB）
+#   app\web\vendor\jizura\   JIZURA 文字 PV + 2335 个字体       ≈ 54MB（压后 51MB）
+#
+# 这两块都不入库。干净 clone 与 CI 靠 `app\desktop\fetch-tools.ps1` 从本 Release 取；
+# `build.ps1 -Bundle` 打包前会核对它们在不在；`build-msi.yml` 的第一个 job 更是
+# 直接去 Release 下载。**附件不在，这三件事全都做不成。**
+#
+# 而从国内往 GitHub Releases 上行 180MB 很痛 —— 让 runner 自己打、自己传，
+# 上传发生在机房内部，是秒级的。
+#
+# ⚠️ **跑之前先把 tag 推上去**：`git push origin master --tags`
+#    Release 挂在 tag `assets-v1` 上（本地那个指向 9f03e02，是当初打附件用的提交）。
+#    没推的话 `gh release create --verify-tag` 会**明确报错**，不会悄悄另建一个 tag
+#    留下「远端 tag 和本地 tag 指的不是同一个提交」这种坑。
+# ⚠️ **这个 tag 不能以 `v` 开头** —— 会顺手触发 build-msi.yml 的版本构建。
+#
+# ── 它能自愈到什么程度 ──────────────────────────────────────────────────────
+#
+#   tools.zip   三个上游官方地址现下（gyan.dev / yt-dlp release / LibreSVIP release），
+#               不依赖本仓库任何附件 —— 也就是说**第一次也能跑通**。
+#   jizura.zip  首页（index.html + LICENSE，共 2.3MB）是**入库**的；字体与 fonts.css
+#               由 tools\fetch-jizura-fonts.ps1 现场从 Google Fonts 抓。那个脚本现在
+#               会自己判断要不要代理：本机有 7890 就用、runner 上直连（VSYNTH_FONT_PROXY 可覆盖）。
+
+name: 发布大件附件 (assets-v1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: '只打哪一个'
+        type: choice
+        options:
+          - all
+          - tools
+          - jizura
+        default: all
+      upload:
+        description: '打完上传到 Release（取消勾选 = 只验证能不能打出来）'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write          # 建/更新 Release 并把附件传上去
+
+env:
+  ASSETS_TAG: assets-v1
+
+jobs:
+  assets:
+    name: 打包两个大件并发布
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── tools\ ──────────────────────────────────────────────────────────────
+      - name: 补齐 tools（从三个上游官方地址现下，约 288MB）
+        if: ${{ inputs.only != 'jizura' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./app/desktop/fetch-tools.ps1 -Only tools
+          if ($LASTEXITCODE -ne 0) { throw "fetch-tools.ps1 -Only tools 失败（exit $LASTEXITCODE）" }
+
+      # ⚠️ 判「齐不齐」必须核对**代码真去找的那几个文件**，不能只看目录在不在
+      #    —— 半途失败的解压会留下看似完整的空壳，要到用户点「工程转换」才现形。
+      #    这里这 5 条与 fetch-tools.ps1 自己的判据逐字一致（L167-171）。
+      - name: 核对 tools 真齐了
+        if: ${{ inputs.only != 'jizura' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $need = @(
+            'tools\ffmpeg\bin\ffmpeg.exe',
+            'tools\ffmpeg\bin\ffprobe.exe',
+            'tools\yt-dlp.exe',
+            'tools\libresvip\libresvip-cli\libresvip-cli.exe',
+            'tools\libresvip\libresvip-cli\_internal\libresvip\plugins'
+          )
+          foreach ($p in $need) {
+            if (-not (Test-Path $p)) { throw "tools\ 不完整：缺少 $p" }
+          }
+          $files = @(Get-ChildItem tools -Recurse -File)
+          $mb = ($files | Measure-Object Length -Sum).Sum / 1MB
+          Write-Host ("tools\  {0:N0} 个文件，{1:N1} MB" -f $files.Count, $mb)
+          # 实测 129MB 压前的目录约 288MB。阈值取得很松，只拦「下了一半」这种。
+          if ($mb -lt 100) { throw "tools\ 只有 $mb MB，明显不完整" }
+
+      # ── app\web\vendor\jizura\ ───────────────────────────────────────────────
+      - name: 取字体缓存（2335 个 woff2，抓一次要几分钟）
+        if: ${{ inputs.only != 'tools' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/web/vendor/jizura/fonts
+            app/web/vendor/jizura/css-raw
+          key: jizura-fonts-${{ hashFiles('tools/fetch-jizura-fonts.ps1') }}
+
+      - name: 抓 JIZURA 字体（Google Fonts → vendor/jizura/fonts）
+        if: ${{ inputs.only != 'tools' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./tools/fetch-jizura-fonts.ps1
+          if ($LASTEXITCODE -ne 0) { throw "fetch-jizura-fonts.ps1 失败（exit $LASTEXITCODE）" }
+
+      # 判据是「fonts.css 里引用的每个文件都在盘上」+「文件数没少一大截」，
+      # 而不是「fonts\ 目录存在」—— 缺一半字体时文字 PV 页只会少字体，不报错。
+      - name: 核对 jizura 真齐了
+        if: ${{ inputs.only != 'tools' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = 'app\web\vendor\jizura'
+          foreach ($f in 'index.html', 'LICENSE', 'fonts.css') {
+            if (-not (Test-Path "$dir\$f")) { throw "缺少 $dir\$f（index.html 与 LICENSE 是入库文件，fonts.css 上一步生成）" }
+          }
+          $fonts = @(Get-ChildItem "$dir\fonts" -Filter *.woff2 -File)
+          if ($fonts.Count -lt 2000) { throw "字体只有 $($fonts.Count) 个（实测 2335 个），明显不完整" }
+
+          $css = Get-Content "$dir\fonts.css" -Raw
+          $refs = [regex]::Matches($css, 'fonts/([A-Za-z0-9._\-]+\.woff2)') |
+            ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+          $missing = @($refs | Where-Object { -not (Test-Path (Join-Path "$dir\fonts" $_)) })
+          if ($missing.Count) {
+            throw "fonts.css 引用了 $($missing.Count) 个盘上没有的字体，头一个是 $($missing[0])"
+          }
+          $mb = ($fonts | Measure-Object Length -Sum).Sum / 1MB
+          Write-Host ("jizura  {0} 个 woff2，{1:N1} MB，fonts.css 引用 {2} 个，全部在盘上" -f $fonts.Count, $mb, $refs.Count)
+
+      # css-raw\ 是抓 CSS 时的缓存（zip-assets.ps1 会把整个目录收进去），不该进附件
+      - name: 清掉 css-raw 缓存
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force 'app\web\vendor\jizura\css-raw' -ErrorAction SilentlyContinue
+          Write-Host '已清（本来就没有也不报错）'
+
+      # ── 打包 ────────────────────────────────────────────────────────────────
+      - name: 打包
+        shell: pwsh
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'assets-out'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          # ⚠️ 参数别写反：`-Src tools` 是**摊平**（zip 顶层直接是 ffmpeg\ / yt-dlp.exe），
+          #    jizura 要**带一层壳**（fetch-tools.ps1 按 <解压>\jizura\index.html 找）。
+          #    写成反过来不会报错，只会在用户那台机器上才现形。
+          switch ($env:ONLY) {
+            'tools'  { ./tools/zip-assets.ps1 -Src tools -Name tools -Out $out -Force }
+            'jizura' { ./tools/zip-assets.ps1 -Src 'app\web\vendor\jizura' -Name jizura -Out $out -Force }
+            default  { ./tools/zip-assets.ps1 -Out $out -Force }
+          }
+          if ($LASTEXITCODE -ne 0) { throw "zip-assets.ps1 失败（exit $LASTEXITCODE）" }
+          foreach ($z in Get-ChildItem "$out\*.zip") {
+            Write-Host ("  {0}  {1:N1} MB" -f $z.Name, ($z.Length / 1MB))
+          }
+
+      - name: 校验打出来的 zip
+        shell: pwsh
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'assets-out'
+          $want = switch ($env:ONLY) { 'tools' { @('tools.zip') } 'jizura' { @('jizura.zip') } default { @('tools.zip', 'jizura.zip') } }
+          foreach ($n in $want) {
+            $f = Join-Path $out $n
+            if (-not (Test-Path $f)) { throw "没打出来：$n" }
+            $mb = (Get-Item $f).Length / 1MB
+            # 与 build-msi.yml 同一个阈值：只拦「压出一半」这种
+            if ($mb -lt 20) { throw "$n 只有 $mb MB，明显不完整" }
+            Write-Host ("  {0}  {1:N1} MB  OK" -f $n, $mb)
+          }
+
+      # ── 发布 ────────────────────────────────────────────────────────────────
+      - name: 上传到 Release
+        if: ${{ inputs.upload }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = $env:GITHUB_REPOSITORY
+          $tag  = $env:ASSETS_TAG
+          $zips = @(Get-ChildItem (Join-Path $env:RUNNER_TEMP 'assets-out') -Filter *.zip | ForEach-Object { $_.FullName })
+          if (-not $zips.Count) { throw '没有任何 zip 可传' }
+
+          # gh 失败时把话写在 stderr 上，而 pwsh 的 $ErrorActionPreference='Stop' 会把它
+          # 当成终止错误 —— 所以这一段临时放宽，只用退出码判断。
+          $eap = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          gh release view $tag --repo $repo *> $null
+          $exists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = $eap
+
+          if (-not $exists) {
+            Write-Host "Release $tag 还不存在，用那个**已推送的** tag 建一个（--verify-tag）"
+            gh release create $tag --repo $repo --verify-tag `
+              --title '大件附件（tools / jizura）' `
+              --notes '由 `.github/workflows/publish-assets.yml` 打包上传。**别删这个 Release 的附件** —— 干净 clone 与 CI 都靠 `fetch-tools.ps1` 从这里补齐 `tools/` 与 `app/web/vendor/jizura/`。换附件请重跑那个 workflow（会覆盖同名附件）。'
+            if ($LASTEXITCODE -ne 0) {
+              throw "建 Release 失败。最常见的原因是 tag 还没推上去 —— 先 `git push origin master --tags` 再重跑本工作流。"
+            }
+          }
+
+          Write-Host "上传到 $tag：$($zips.Count) 个附件"
+          gh release upload $tag $zips --clobber --repo $repo
+          if ($LASTEXITCODE -ne 0) { throw "上传失败（exit $LASTEXITCODE）" }
+
+      - name: 汇总
+        if: ${{ always() }}
+        shell: pwsh
+        env:
+          ONLY: ${{ inputs.only }}
+          UPLOAD: ${{ inputs.upload }}
+        run: |
+          Write-Host "只打：$env:ONLY　　上传：$env:UPLOAD"
+          $out = Join-Path $env:RUNNER_TEMP 'assets-out'
+          if (Test-Path $out) { Get-ChildItem "$out\*.zip" | Format-Table Name, Length }
+          Write-Host ''
+          Write-Host '下一步（本机）：'
+          Write-Host '  powershell -ExecutionPolicy Bypass -File app\desktop\fetch-tools.ps1'
+          Write-Host '  然后 build.ps1（要出安装包就 -Release -Bundle）'

@@ -31,10 +31,18 @@
 !/tools/*.ps1
 
 # ── JIZURA 文字 PV（构建产物 2.3 MB + 2335 个 woff2 字体，合计约 54 MB）────
-# PV 页的 iframe 指向 /vendor/jizura/index.html，离线可用靠的就是它，
-# 所以不能只留在网盘上 —— 由 fetch-tools.ps1 补进 app\web\vendor\jizura\。
-# ⚠️ 只忽略 jizura 这一层，别写成 app/web/vendor/（以后往里加别的东西不被连坐）。
-app/web/vendor/jizura/
+# PV 页的 iframe 指向 /vendor/jizura/index.html，离线可用靠的就是它。
+# ⚠️ **2026-10-05 起放行 index.html 与 LICENSE 这两个文件**：
+#    首页是 JIZURA 上游（github.com/852wa/JIZURA，MIT）的**构建产物**，
+#    仓库里没有任何脚本能重新产出它 —— 不入库的话，jizura.zip 就永远只能在本机
+#    手工打包再上传（51 MB 上行）。放行它俩（2.3 MB）换来的是
+#    「.github/workflows/publish-assets.yml 能在云端把 jizura.zip 完整重建」。
+#    剩下的 fonts/ 与 fonts.css 仍然不入库：由 tools\fetch-jizura-fonts.ps1
+#    现场从 Google Fonts 抓（云端 runner 直连即可，本机自动走 7890 代理）。
+# ⚠️ 只忽略 jizura 这一层的内容，别写成 app/web/vendor/（以后往里加别的东西不被连坐）。
+app/web/vendor/jizura/*
+!app/web/vendor/jizura/index.html
+!app/web/vendor/jizura/LICENSE
 
 # ── 本机状态（app/data/ 本身不在忽略之列，只排除下面几个子项）─────────────
 # 配置：含个人路径与登录 Cookie，程序首次运行会按默认值自己生成。
