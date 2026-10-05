@@ -216,33 +216,8 @@ jobs:
         # -NoCopy：CI 不需要把 exe 复制到仓库根目录（那是给本机启动器用的）
         run: ./app/desktop/build.ps1 -Release -Bundle -NoCopy
 
-      # 让「编出来的东西真的能跑」有个证据，而不是只看编译退出码。
-      # 契约用例是 Node 后端时代冻结的真实响应基准（永久基准），8 页冒烟走的是真无头 Edge。
-      - name: 冒烟（契约 + 8 页）
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $exe = 'app/desktop/target/release/v-synth-studio.exe'
-          if (-not (Test-Path $exe)) { throw "找不到 $exe" }
-          $p = Start-Process -FilePath $exe -ArgumentList '--serve', '--port=8891' -PassThru -WindowStyle Hidden
-          try {
-            # 服务是异步起的（main.rs 最多等 30 秒），轮询到能应答为止
-            $ok = $false
-            foreach ($i in 1..30) {
-              Start-Sleep -Seconds 1
-              try { Invoke-WebRequest 'http://127.0.0.1:8891/api/health' -UseBasicParsing -TimeoutSec 3 | Out-Null; $ok = $true; break } catch { }
-            }
-            if (-not $ok) { throw "服务没能起来（8891 无应答）—— 看 target/release 旁边或 %APPDATA% 下的日志" }
-            node tests/contract/verify.mjs 8891
-            if ($LASTEXITCODE -ne 0) { throw "契约用例不一致（退出码 $LASTEXITCODE）" }
-            node tests/manual/next-smoke.mjs 8891
-            if ($LASTEXITCODE -ne 0) { throw "8 页冒烟失败（退出码 $LASTEXITCODE）" }
-          } finally {
-            # ⚠️ 按**精确 PID** 停：不要按进程名或命令行子串杀，那会连别的东西一起带走。
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          }
-
-      # 先把产物传成 build artifact：不管有没有传 Release，跑完都能在 Actions 页面下载
+      # ⚠️ 产物**先**传成 build artifact，再跑冒烟：这样万一冒烟红了，MSI 仍然能在
+      #    Actions 页面下载到（少一次「白等 30 分钟什么都没拿到」）。传 Release 仍在冒烟之后。
       - name: 传 MSI（build artifact）
         uses: actions/upload-artifact@v4
         with:
@@ -250,6 +225,27 @@ jobs:
           # target 目录被 .gitignore 忽略，但 artifact 是文件系统层面的，照传不误
           path: app/desktop/target/release/bundle/msi/*.msi
           if-no-files-found: error      # 没打出 MSI 却"成功"，比失败更糟
+
+      # 让「编出来的东西真的能跑」有个证据，而不是只看编译退出码。
+      #
+      # ⚠️ 2026-10-05 重写。旧那套（`--serve --port=8891` + `/api/health` + 契约用例）
+      #    是**内嵌 HTTP 服务时代**的：`--serve` 那天一起删了、契约用例也随 tests/contract
+      #    删了、`next-smoke.mjs` 同样退役 —— 它会必然抛「服务没能起来（8891 无应答）」，
+      #    然后把后面的「传 MSI」整步跳过。v1.3.0 那次 tag 构建就是这么白跑的（30 分钟）。
+      #    现在的证据是**真窗口 + CDP**：探针自己按 VS_EXE 起 release 版，
+      #    验 origin / IPC / 10 页玻璃面 / 控制台非预期报错，跑完按精确 PID 收尾，
+      #    有失败就返回非零（2026-10-05 之前它失败也退出 0，当不了门禁）。
+      - name: 冒烟（真窗口 + CDP，10 页）
+        shell: pwsh
+        env:
+          # 探针默认按「脚本位置往上两级」找 exe（那是本机 dev 产物），CI 上显式指到 release
+          VS_EXE: ${{ github.workspace }}/app/desktop/target/release/v-synth-studio.exe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "VS_EXE = $env:VS_EXE"
+          if (-not (Test-Path $env:VS_EXE)) { throw "找不到 $env:VS_EXE" }
+          node tests/manual/cdp-window-check.mjs 9349
+          if ($LASTEXITCODE -ne 0) { throw "CDP 冒烟失败（退出码 $LASTEXITCODE）" }
 
       - name: 传 MSI 到 Release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release

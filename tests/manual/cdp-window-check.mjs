@@ -18,9 +18,21 @@
 
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdirSync, rmSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const CDP_PORT = Number(process.argv[2] ?? 0) || 9335
-const EXE = 'C:\\Users\\qingm\\Downloads\\工作站\\v-synth-studio.exe'
+/**
+ * 要验的 exe。
+ *
+ * ⚠️ 2026-10-05：原来这里写死 `C:\Users\qingm\Downloads\工作站\v-synth-studio.exe`，
+ * CI 上必然找不到（那边是 `app/desktop/target/release/` 下的 release 版）。
+ * 现在：`VS_EXE` 环境变量优先（CI 用它指 release 产物），否则按**脚本位置**推出仓库根
+ * ——本机默认还是根目录那个 exe（`build.ps1` 会把 dev 产物复制到那儿）。
+ */
+const EXE = process.env.VS_EXE
+  ? resolve(process.env.VS_EXE)
+  : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'v-synth-studio.exe')
 const PROFILE = `${process.env.TEMP}\\vsynth-ipc-check-${CDP_PORT}`
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -105,6 +117,12 @@ const app = startApp()
 let cdp = null
 const results = []
 let listenerCheck = ''
+/**
+ * ⚠️ 2026-10-05：这个脚本以前**失败也退出 0**（catch 里只打印一行），
+ * 所以它能当人工看的报告、却当不了 CI 门禁 —— 步骤永远绿。
+ * 现在有任何失败就 exit 1。
+ */
+let exitCode = 0
 
 try {
   let targets = null
@@ -181,8 +199,10 @@ try {
   }
   const failed = results.filter((r) => r.errs.length || r.glass === 0 || r.text < 50)
   console.log(`\n═══ 通过 ${results.length - failed.length} / 失败 ${failed.length} ═══`)
+  if (failed.length) exitCode = 1
 } catch (e) {
   console.log(`\n✗ 验收脚本失败：${e.message}`)
+  exitCode = 1
 } finally {
   try { cdp?.close() } catch { /* 无所谓 */ }
   try { app.kill() } catch { /* 无所谓 */ }
@@ -191,3 +211,4 @@ try {
   try { execFileSync('taskkill', ['/PID', String(app.pid), '/T', '/F'], { stdio: 'ignore' }) } catch { /* 已经没了 */ }
   rmSync(PROFILE, { recursive: true, force: true })
 }
+process.exit(exitCode)
