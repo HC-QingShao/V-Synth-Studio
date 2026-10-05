@@ -575,7 +575,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
   const saveCookie = async (raw: string) => {
     const value = raw.replace(/\s*\r?\n\s*/g, ' ').trim()
     if (value === MASK) {
-      onToast('输入框里是脱敏占位「已设置」，没有可保存的新值', 'warn')
+      onToast('输入框里显示的是占位「已设置」，不是新的 Cookie', 'warn')
       return
     }
     setBusy(true)
@@ -771,7 +771,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
             )}
 
             <Field
-              label="网易云 Cookie（兜底：发不出短信、或想直接用浏览器里那个登录态时用）"
+              label="网易云 Cookie（发不出短信、或想直接用浏览器里那个登录态时用）"
               hint="保存后不会回显真实值，只会显示「已设置」（输入框保持空白）。留空保存 = 清除。"
             >
               <TextArea
@@ -987,19 +987,17 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
           </div>
         </Panel>
 
-        {/* 许可与出处：歌词文本处理的规矩是从 163MusicLyrics 移植的 */}
+        {/* 许可与出处：歌词文本处理的规则是从 163MusicLyrics 移植的 */}
         <Credit
-          desc="歌词文本处理那套规矩移植自第三方项目，许可与出处写在这里"
+          desc="歌词文本处理规则移植自第三方项目"
           items={[
             { label: '文本处理', value: 'Apache-2.0', sub: '移植自 163MusicLyrics' },
-            { label: '取歌词', value: '自研', sub: '走明文端点，不用第三方加密链路' },
           ]}
         >
-          LRC 时间戳的多写法解析、LRC 转 SRT 的收尾规则、译文对齐的容错、空行与纯音乐判定、
-          双语 STAGGER 的组织方式，都是按{' '}
+          歌词文本处理规则（LRC 时间戳的多写法解析、LRC 转 SRT 的收尾、译文对齐的容错、
+          空行与纯音乐判定、双语行的组织方式）移植自{' '}
           <Upstream href="https://github.com/jitwxs/163MusicLyrics">jitwxs/163MusicLyrics</Upstream>
-          （Apache-2.0）的实现移植过来的，移植处都留了行内注释。取歌词的 HTTP 调用与端点选择是本程序自己写的：
-          那个项目走 weapi 加密链路，这里改用明文端点，所以不涉及它的网络代码。
+          （Apache-2.0）。
         </Credit>
       </div>
     </div>

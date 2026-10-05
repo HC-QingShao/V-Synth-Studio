@@ -528,7 +528,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
     const submit = async (i: number) => {
       const j = jobs[i]
       const r = await api.audioRun({ action: j.action, input, output: j.output, options: j.options })
-      if (!r?.jobId) throw new Error('服务端没有返回任务号')
+      if (!r?.jobId) throw new Error('任务没能启动，请重试')
       /* 多段导出时标题带上「第 n / m 段」—— 不然每一段都从头跑到尾，看着像卡住了 */
       setJobLabel(
         total > 1
@@ -641,7 +641,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
             <div className="stack">
               <Finding level="warn" title="怎么恢复">
                 格式转换、提取音轨、变调、变速、裁剪、响度标准化、读取媒体信息都需要 ffmpeg。
-                ffmpeg 随程序分发，**不需要联网下载**；这里显示未检测到，说明 tools 目录缺失或不完整
+                ffmpeg 随程序分发，不需要联网下载；这里显示未检测到，说明 tools 目录缺失或不完整
                 —— 从压缩包里把 tools 整个目录重新解压到程序根目录即可。
               </Finding>
               <div className="btn-row">
@@ -889,7 +889,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
                 <>
                   <Field
                     label="变调（半音）"
-                    hint="正数升调、负数降调；±12 半音以内精度最好。变调靠重采样加时间补偿实现，时长不变。"
+                    hint="正数升调、负数降调；±12 半音以内精度最好。变调后时长不变。"
                   >
                     <div className="audio-num-row">
                       <GlassStepper
@@ -1171,16 +1171,16 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
 
         {/* 许可与出处：这一页的活全是随包的 ffmpeg 干的 */}
         <Credit
-          desc="这一页的处理全部交给随包的 ffmpeg，许可与出处写在这里"
+          desc="这一页的处理全部由随包的 ffmpeg 完成，不需要另外安装"
           items={[
             { label: '代码', value: 'GPL v3', sub: 'FFmpeg 9.0.2（gyan.dev essentials）' },
-            { label: '用法', value: '独立进程', sub: '不链接、不修改它的代码' },
+            { label: '提供方式', value: '随包附带', sub: '离线可用，无需单独下载' },
           ]}
         >
-          转格式、变调变速、裁剪、响度与试听波形都交给随包的{' '}
+          转格式、提取音轨、变调变速、裁剪与响度标准化都由随包的{' '}
           <Upstream href="https://ffmpeg.org/">ffmpeg</Upstream>
-          ，本程序只负责拼参数、读它的输出。它是 GPL v3 的构建（gyan.dev essentials）：分发本程序时按 GPL v3 附上许可全文并给出源码地址 ——
-          源码在 ffmpeg.org/download.html，构建脚本在 gyan.dev/ffmpeg/builds。
+          完成，不需要另外安装；它的许可是 GPL v3，用的是 gyan.dev essentials 构建，
+          许可全文见仓库里的 THIRD-PARTY-NOTICES。
         </Credit>
       </div>
     </div>
@@ -1748,7 +1748,7 @@ function WaveEditor({
     noteText = `${note}；仍然可以选段、分段、导出，只是看不见波形。`
     noteTone = 'warn'
   } else if (peaks) {
-    noteText = `波形 2ms 一档；拖两端把手裁剪、点一下跳到那里、剪刀模式点波形切开。总长 ${formatDuration(duration)}。`
+    noteText = `拖两端把手裁剪、点一下跳到那里、剪刀模式点波形切开。总长 ${formatDuration(duration)}。`
   } else {
     noteText = '还没有拿到可画的波形，选段、分段、导出照常可用。'
   }

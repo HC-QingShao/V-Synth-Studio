@@ -315,7 +315,7 @@ function Tools({
   const rows = [
     { key: 'ffmpeg', name: 'ffmpeg', desc: '音视频合并、导出 WAV/MP3、变调变速、响度标准化' },
     { key: 'ytdlp', name: 'yt-dlp', desc: 'YouTube 等上千站点的解析与下载（B 站走内置解析）' },
-    { key: 'python', name: 'Python', desc: '可选：部分脚本与 yt-dlp 的模块模式会用到' },
+    { key: 'python', name: 'Python', desc: '可选：个别功能会用到' },
   ]
 
   return (
@@ -374,7 +374,7 @@ function Tools({
       </div>
       <p className="hint">
         {missing.length
-          ? `未检测到 ${missing.map((m) => (m === 'ytdlp' ? 'yt-dlp' : m)).join(' / ')}。它们随程序分发、不需要联网下载；若显示未找到，把 tools 目录重新解压到程序根目录即可。`
+          ? `未检测到 ${missing.map((m) => (m === 'ytdlp' ? 'yt-dlp' : m)).join(' / ')}。它们随程序一起分发、不需要联网下载；若显示未找到，请重新解压一次程序压缩包覆盖。`
           : '三个外部工具都齐了，音频与下载功能完整可用。'}
       </p>
     </Panel>
@@ -421,7 +421,7 @@ const SPONSORS = [
 ]
 
 /**
- * 源码许可总表（关于页）。
+ * 第三方组件许可总表（关于页）。
  *
  * 事实以 `docs/THIRD-PARTY-NOTICES.md` 为准 —— 拿不准就先查那一份，别凭印象写许可名。
  * ⚠️ 这张表和**各功能页自己那块 `Credit` 是同一批事实**：用户要求两边都留
@@ -433,101 +433,101 @@ const LICENSES: { feature: string; upstream: string; href?: string; license: str
     upstream: 'LibreSVIP 2.9.0',
     href: 'https://github.com/SoulMelody/LibreSVIP',
     license: 'Apache-2.0',
-    how: '独立进程调用 libresvip-cli.exe，不链接也不修改它的代码',
+    how: '随程序一起分发，工程格式的读写由它完成',
   },
   {
     feature: '视频解析下载',
     upstream: 'yt-dlp 2026.08.19',
     href: 'https://github.com/yt-dlp/yt-dlp',
     license: 'Unlicense',
-    how: '独立进程，读它的 JSON 输出（Unlicense 等于公有领域，无附加义务）',
+    how: '随程序一起分发；Unlicense 属公有领域，无附加义务',
   },
   {
     feature: '视频解析（扫码登录）',
     upstream: 'qrcode.react 4.2.0',
     href: 'https://github.com/zpao/qrcode.react',
     license: 'ISC',
-    how: '把登录二维码画成 SVG（纯前端渲染，不联网）；Cookie 由 Rust 直接写进本机配置，不经过前端',
+    how: '登录二维码在界面上生成，不联网；登录凭据只写进本机配置',
   },
   {
     feature: '音频处理',
     upstream: 'FFmpeg 9.0.2（gyan.dev essentials）',
     href: 'https://ffmpeg.org/',
     license: 'GPL v3',
-    how: '独立进程跑转格式 / 变调变速 / 裁剪 / 响度 / 抽音轨；分发时附 GPL v3 全文并给出源码地址',
+    how: '随程序一起分发；格式转换 / 变调变速 / 裁剪 / 响度 / 抽音轨都由它完成（GPL v3 全文随程序附带）',
   },
   {
     feature: '视频合流转码',
     upstream: 'FFmpeg 9.0.2（gyan.dev essentials）',
     href: 'https://ffmpeg.org/',
     license: 'GPL v3',
-    how: '同上，能「-c copy」就不重编码',
+    how: '与「音频处理」是同一个 FFmpeg；只换封装、不重编码时最快',
   },
   {
     feature: '音轨分离',
     upstream: 'python-audio-separator 0.39.1',
     href: 'https://github.com/nomadkaraoke/python-audio-separator',
     license: 'MIT',
-    how: '独立进程；运行时与模型都不随包分发，第一次用要先下好依赖',
+    how: '运行时与模型不随程序分发，第一次使用要先把它们下载好',
   },
   {
     feature: '音轨分离（模型）',
     upstream: 'UVR 系列 BS-RoFormer / MDX，@Anjok07 训练',
     license: '随模型自带说明',
-    how: '同上，第一次用按需下载',
+    how: '由 @Anjok07 训练，许可见模型自带的说明；第一次使用按需下载',
   },
   {
     feature: '人声转 MIDI（算法）',
     upstream: 'openvpi/GAME',
     href: 'https://github.com/openvpi/GAME',
     license: 'MIT',
-    how: '按它的算法在 Rust 里重写，没有链接或拷贝它的代码',
+    how: '扒谱算法按其公开实现编写，未使用其代码',
   },
   {
     feature: '人声转 MIDI（权重）',
     upstream: 'GAME-1.0.3-large-onnx',
     license: 'CC BY-NC-SA 4.0',
-    how: '⚠️ 非商业 —— 不随包分发、由界面按需下载；带着它就不能用于商业用途',
+    how: '非商业许可：不随程序分发，由界面按需下载；用它产出的结果不得用于商业用途',
   },
   {
     feature: '人声转 MIDI（推理运行时）',
     upstream: 'ONNX Runtime 1.23.2（ort crate）',
     href: 'https://github.com/microsoft/onnxruntime',
     license: 'MIT',
-    how: '运行时才加载 onnxruntime.dll（优先借音轨分离那份），不静态链接、不随包分发',
+    how: '不随程序分发，需要时按需下载',
   },
   {
     feature: '歌词处理',
     upstream: '163MusicLyrics',
     href: 'https://github.com/jitwxs/163MusicLyrics',
     license: 'Apache-2.0',
-    how: '时间戳多写法解析 / LRC 转 SRT 收尾 / 译文对齐等按它移植，移植处都有行内注释；取歌词的 HTTP 是本程序自研',
+    how: '歌词文本的处理规则（多写法时间戳、LRC 转 SRT、译文对齐）移植自它',
   },
   {
     feature: '文字 PV（编辑器）',
     upstream: 'JIZURA v0.9.0 · © 2026 hakoniwa',
     href: 'https://github.com/852wa/JIZURA',
     license: 'MIT',
-    how: 'iframe 同源嵌入作者发布的单文件构建产物，界面与功能未改；唯一的改动是把字体来源从 Google Fonts 换成本机文件',
+    how: '使用作者发布的原始版本，界面与功能没有改动；字体改为随程序内置（离线可用）',
   },
   {
     feature: '文字 PV（随包字体）',
     upstream: 'Google Fonts 12 个家族',
     license: 'SIL OFL 1.1',
-    how: '原样随包分发 woff2 子集，未修改字形（OFL 的保留字体名称条款照旧适用）',
+    how: '随程序内置字体子集，字形未修改（SIL OFL 1.1）',
   },
   {
     feature: '界面素材',
     upstream: '@ttqtt/liquid-glass-react',
     href: 'https://github.com/Tsdsj/liquid-glass-react',
     license: 'MIT',
-    how: '玻璃材质、配色、字号、间距、圆角与动效；按 Apple 设计语言做的独立组件库，不是 Apple 官方产品，也不含 Apple 的字体或图标素材',
+    how: '玻璃材质、配色、字号、间距、圆角与动效来自它（独立的第三方组件库，非 Apple 官方产品，也不含 Apple 素材）',
   },
   {
     feature: '汉字读音',
     upstream: 'pinyin-data',
     license: 'MIT',
-    how: 'app/data/pinyin.json 的读音数据来源，运行时只读这个 JSON',
+    how: '汉字读音数据来源',
   },
 ]
 
@@ -602,7 +602,7 @@ function About({
         </div>
       </Panel>
 
-      {/* 关于作者 → 作者的话 → 感谢名单 → 源码许可总表，顺序是用户定的：
+      {/* 关于作者 → 作者的话 → 感谢名单 → 第三方组件许可总表，顺序是用户定的：
           人名在前、致谢在后，许可垫底。别把许可挪回前面。 */}
       <Panel>
         <PanelHead
@@ -641,8 +641,7 @@ function About({
           </Button>
         </div>
         <p className="hint">
-          哔哩哔哩 / 抖音 / Q 群三个按钮在系统默认浏览器里打开（和资源库、上游链接走同一条路）；
-          Q 群那个是加入群聊的链接，装了 QQ 会直接拉起它。邮箱按钮点一下复制到剪贴板。
+          邮箱按钮点一下复制到剪贴板；其余按钮在系统默认浏览器里打开。
         </p>
       </Panel>
 
@@ -667,7 +666,7 @@ function About({
       {/* 全量许可清单：所有用到第三方开源项目的功能在这儿各占一行。
           各功能页自己那块 `Credit` 仍然保留（用户要求两边都留），改一处要同步另一处。 */}
       <Panel>
-        <PanelHead title="源码许可总表" desc="所有用到第三方开源项目的功能，按功能逐项列出" />
+        <PanelHead title="第三方组件许可" desc="所有用到第三方开源项目的功能，按功能逐项列出" />
         <div className="lic-list">
           {LICENSES.map((l) => (
             <div className="lic-row" key={l.feature}>
@@ -685,11 +684,9 @@ function About({
           ))}
         </div>
         <p className="hint">
-          本程序自身以 <strong>GPL-3.0</strong> 授权（版权归 QingMu39）：可以自由使用、修改、再分发，
-          但再分发时必须同样以 GPL-3.0 开放源码。它用 Rust 写：Tauri 2（Apache-2.0 / MIT）与各 crate
-          静态链接进 exe，界面跑在系统自带的 WebView2 Runtime 上；上面这张总表与许可全文随仓库的
-          docs/THIRD-PARTY-NOTICES.md 一起分发。
-          早期格式转换用过 UtaFormatix3，相关代码已全部删除，不再需要署名。
+          本程序自身以 <strong>GPL-3.0</strong> 授权（版权归 QingMu39）：可自由使用、修改、再分发，
+          再分发时需同样以 GPL-3.0 开放源码。界面运行在系统自带的 WebView2 上。
+          各组件许可全文与更多合规说明见仓库里的 docs/THIRD-PARTY-NOTICES.md。
         </p>
       </Panel>
     </>

@@ -296,7 +296,7 @@ export function Convert({ state, onToast }: PageProps) {
         <Panel>
           <PanelHead
             title="来源工程"
-            desc="把工程文件拖进来，或点「选择文件」按路径挑；两条路拿到的都是本机路径，工程只在本机处理、不出这台机器"
+            desc="把工程文件拖进来，或点「选择文件」挑；工程只在本机处理、不出这台机器"
             extra={<Chip>{availableCount} 种格式可用</Chip>}
           />
           <div className="stack">
@@ -306,9 +306,7 @@ export function Convert({ state, onToast }: PageProps) {
             <div className="convert-drop" data-over={dragging ? 'true' : undefined}>
               <Icon name="upload" size={22} />
               <span className="convert-drop-title">把工程文件拖到这里</span>
-              <span className="convert-drop-note">
-                拖到窗口任意位置都算数；松手后直接拿到磁盘上的真路径，转换时后端自己读
-              </span>
+              <span className="convert-drop-note">拖到窗口任意位置都算数</span>
             </div>
 
             <div className="btn-row">
@@ -355,7 +353,7 @@ export function Convert({ state, onToast }: PageProps) {
         <Panel>
           <PanelHead title="目标格式" desc="转换后要拿去哪个编辑器继续做" />
           {groups.length === 0 ? (
-            <p className="muted">还没有拿到格式表。</p>
+            <p className="muted">还没有读到可用的格式。</p>
           ) : (
             <div className="convert-formats">
               {groups.map(([group, list]) => (
@@ -422,7 +420,7 @@ export function Convert({ state, onToast }: PageProps) {
 
             <Field
               label="文件名模板"
-              hint="可用变量：{name} 原文件名（后端目前只认这一个；{format} / {index} / {track} / {date} 填了会原样留在文件名里）"
+              hint="可用变量：{name} = 原文件名（其它形如 {xxx} 的内容会原样保留）"
             >
               <TextInput
                 value={nameTemplate}
@@ -493,7 +491,7 @@ export function Convert({ state, onToast }: PageProps) {
               </section>
 
               <section className="convert-opt-group">
-                <p className="group-label">效果处理（中间件，默认全关；开了才动工程）</p>
+                <p className="group-label">效果处理（默认全关；开了才动工程）</p>
                 <div className="convert-opt-grid">
                   {MIDDLEWARE_SWITCHES.map(([key, label, desc]) => (
                     <SwitchRow
@@ -647,7 +645,7 @@ export function Convert({ state, onToast }: PageProps) {
               </Button>
             </div>
             <p className="hint convert-note">
-              全部处理在本机完成：工程文件只交给本机的 Rust 后端读盘，不联网、不出这台机器
+              全部在本机完成：不联网、文件不出这台机器
             </p>
           </div>
 
@@ -667,8 +665,7 @@ export function Convert({ state, onToast }: PageProps) {
               <p className="hint">
                 输出目录：{effectiveOutDir}
                 <br />
-                后台只回任务日志、不回逐文件的输出清单，所以这里没有旧页面那张「文件 / 轨 / 音符 /
-                大小」的表；每个文件写出了什么、多大，都记在上面的日志里。
+                每个文件写出了什么、多大，都记在上面的日志里。
               </p>
             </div>
           ) : null}
@@ -676,18 +673,16 @@ export function Convert({ state, onToast }: PageProps) {
 
         {/* 许可与出处：四十来种工程格式的读写都是 LibreSVIP 做的 */}
         <Credit
-          desc="工程格式的读写全部交给第三方的 LibreSVIP，许可与出处写在这里"
+          desc="工程格式的读写由第三方的 LibreSVIP 完成"
           items={[
             { label: '代码', value: 'Apache-2.0', sub: 'LibreSVIP 2.9.0' },
-            { label: '用法', value: '独立进程', sub: 'libresvip-cli.exe proj convert' },
+            { label: '分发', value: '随包分发', sub: '离线可用，不用另装' },
           ]}
         >
-          转格式这一步是{' '}
+          工程格式的读写由{' '}
           <Upstream href="https://github.com/SoulMelody/LibreSVIP">LibreSVIP</Upstream>
-          （Apache-2.0）做的：本程序写一个中间文件、调它的命令行、读它的输出，
-          不链接也不修改它的代码，所以四十来种格式的读写都由它负责，本程序只管认扩展名、拼参数。
-          它自己还打包了一份 Python 运行时和一批依赖，各自的许可随它在
-          tools/libresvip/libresvip-cli/_internal/ 下的 *.dist-info/licenses/ 里。
+          （Apache-2.0）完成：四十来种格式都归它，随程序一起分发，离线可用。
+          它自带一份 Python 运行时和一批依赖，各自的许可随包附带。
         </Credit>
       </div>
     </div>

@@ -232,7 +232,7 @@ export function Resources({ onToast }: PageProps) {
       if (!res?.jobId) {
         setChecking(false)
         setCheckNote('')
-        onToast('后端还没接上链接校验（check_resources 返回待实现），暂时无法检查', 'err')
+        onToast('链接校验还没做好，暂时无法检查', 'err')
         return
       }
       start(res.jobId, {
@@ -301,7 +301,7 @@ export function Resources({ onToast }: PageProps) {
 
   const copy = async (url: string) => {
     try {
-      if (!navigator.clipboard?.writeText) throw new Error('当前环境不提供剪贴板接口')
+      if (!navigator.clipboard?.writeText) throw new Error('当前环境用不了剪贴板')
       await navigator.clipboard.writeText(url)
       onToast('链接已复制', 'ok')
     } catch (e) {
@@ -381,7 +381,7 @@ export function Resources({ onToast }: PageProps) {
             />
             <Stat label="通过率" value={`${summary.passRate}%`} sub={`${summary.ok} 可达`} />
             <Stat label="存疑" value={summary.warn} sub="多为反爬拦截，不妨碍正常打开" />
-            <Stat label="失效" value={summary.dead} sub={summary.dead ? '应尽快处理' : '没有失效条目'} />
+            <Stat label="失效" value={summary.dead} sub={summary.dead ? '这些链接可能已打不开' : '没有失效条目'} />
           </div>
         </Panel>
       )}
@@ -414,9 +414,7 @@ export function Resources({ onToast }: PageProps) {
           <div className="stack">
             <p className="finding-title">资源库读取失败</p>
             <p className="finding-text">{loadErr}</p>
-            <p className="muted">
-              如果 <code>app/data/resources.json</code> 还没生成，等它写好后点下面重试即可。
-            </p>
+            <p className="muted">资源库数据没能读出来，稍后点下面重试即可。</p>
             <div className="btn-row">
               <Button icon="refresh" onClick={() => void load(true)}>
                 重试
@@ -431,9 +429,7 @@ export function Resources({ onToast }: PageProps) {
           <div className="empty">
             <Icon name="library" size={28} />
             <p className="finding-title">资源库还是空的</p>
-            <p className="muted">
-              <code>app/data/resources.json</code> 里还没有条目，或文件尚未生成。点「重新载入」再试一次。
-            </p>
+            <p className="muted">资源库里还没有条目。点「重新载入」再试一次。</p>
             <Button icon="refresh" onClick={() => void load(true)}>
               重新载入
             </Button>

@@ -21,7 +21,7 @@ const QUICK: { id: string; title: string; desc: string }[] = [
   {
     id: 'video',
     title: 'MV 解析下载',
-    desc: 'B 站原生解析（含 WBI 签名、大会员画质、弹幕字幕）+ yt-dlp 覆盖 YouTube 等站点',
+    desc: 'B 站视频解析下载（含大会员画质、弹幕与字幕）；YouTube 等上千个站点由 yt-dlp 支持',
   },
   {
     id: 'svsep',
@@ -66,8 +66,7 @@ function computeChecks(state: AppState | null): Check[] {
       id: 'ytdlp',
       level: 'info',
       title: '未找到 yt-dlp',
-      detail:
-        'B 站解析是本程序原生实现的，不受影响；但 YouTube 及其它上千个站点需要它才能解析。',
+      detail: '没有它，YouTube 等上千个站点无法解析（B 站不受影响）。',
     })
   }
   return out
@@ -86,7 +85,7 @@ interface Packs {
 }
 
 function packStat(v: boolean | null, installed: string, missing: string) {
-  if (v === null) return { value: '检测中', sub: '正在读取后端状态…' }
+  if (v === null) return { value: '检测中', sub: '正在读取状态…' }
   return { value: v ? '已安装' : '未安装', sub: v ? installed : missing }
 }
 
@@ -145,7 +144,7 @@ export function Dashboard({
     return (
       <Panel>
         <p className="muted">
-          正在读取环境状态…（后端要挨个探测 ffmpeg / yt-dlp 的版本，通常 2–3 秒）
+          正在检查环境…（要读取 ffmpeg / yt-dlp 版本，通常 2–3 秒）
         </p>
       </Panel>
     )
@@ -232,7 +231,7 @@ export function Dashboard({
         <div className="tool-list">
           <ToolRow label="ffmpeg" desc="音视频合并、导出 WAV/MP3、变调变速" info={state?.tools?.ffmpeg} onToast={onToast} />
           <ToolRow label="yt-dlp" desc="YouTube 等上千站点的解析与下载" info={state?.tools?.ytdlp} onToast={onToast} />
-          <ToolRow label="Python" desc="可选：部分脚本与 yt-dlp 的模块模式" info={state?.tools?.python} onToast={onToast} />
+          <ToolRow label="Python" desc="可选：部分功能会用到它" info={state?.tools?.python} onToast={onToast} />
         </div>
       </Panel>
     </>

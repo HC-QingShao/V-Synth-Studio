@@ -541,7 +541,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
           <PanelHead title="参数" desc="只有「去噪步数」值得反复试，其余照默认就行" />
           <Field
             label="去噪步数"
-            hint={`上游默认 8。耗时几乎与它成正比 —— 32 步大约是 8 步的四倍。${
+            hint={`默认 8 步。耗时几乎与它成正比 —— 32 步大约是 8 步的四倍。${
               estimate > 0 ? `按当前设置估约 ${humanSecs(estimate)}。` : ''
             }`}
           >
@@ -576,7 +576,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
 
           <Field
             label="线程数"
-            hint="本机实测 4 最快（每步：1 线程 2.66s / 4 线程 1.04s / 8 线程 3.30s）—— 图窄，线程开多了反而被超订拖慢"
+            hint="线程不是越多越快，4 左右通常最快；开太多反而更慢"
           >
             <TextInput
               type="number"
@@ -596,7 +596,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
             label="推理方式"
             hint={
               cuda?.ok
-                ? '这台机器能用 GPU。CUDA 与 CPU 差别很大：segmenter 的每一步都是大矩阵乘，正是显卡擅长的。'
+                ? '这台机器能用 GPU，扒谱会明显更快。'
                 : st
                   ? `GPU 暂不可用：${cuda?.detail ?? ''}`
                   : '正在探这台机器能不能用 GPU…'
@@ -615,7 +615,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
                 onToast(
                   cuda?.ok
                     ? '这一格现在选不了。'
-                    : `GPU 现在用不了：${cuda?.detail ?? '正在探测'}。要用 GPU 请先在「音轨分离」里下完整套运行时（那 12 个 CUDA 组件在它里面，装了就不用再下别的）。`,
+                    : `GPU 现在用不了：${cuda?.detail ?? '正在探测'}。要用 GPU 请先在「音轨分离」里把运行时下全（GPU 需要的东西都在它里面，装了就不用再下别的）。`,
                   'warn',
                 )
               }}
@@ -687,11 +687,11 @@ export function Midi({ onToast, onNavigate }: PageProps) {
           )}
 
           {!ready && st && (
-            <Finding level="warn" title="第一次用要先下模型（不随包发）">
-              三个 ONNX 图要下 <strong>{formatBytes(st.models.zipBytes)}</strong>
-              （解开后 {formatBytes(st.models.extractBytes)}）。权重许可是{' '}
+            <Finding level="warn" title="第一次用要先下模型">
+              模型要下 <strong>{formatBytes(st.models.zipBytes)}</strong>
+              （解开后 {formatBytes(st.models.extractBytes)}）。模型权重许可是{' '}
               <strong>{st.license}</strong>
-              ，所以要自己下、不随安装包分发 —— 点下面的按钮从官方 release 取。
+              ，不能随安装包分发、要自己下 —— 点下面的按钮从官方发布取。
               {st.models.partBytes > 0 && (
                 <>
                   {' '}
@@ -809,7 +809,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
 
           {estimate > 0 && !running && (
             <p className="hint">
-              ⚠️ 本机纯 CPU，实测<strong>约 10 秒换 1 秒音频</strong> —— 3 分钟干声就是半小时左右。
+              ⚠️ 纯 CPU 下大约<strong> 10 秒换 1 秒音频</strong> —— 3 分钟干声就是半小时左右。
               嫌慢就把「去噪步数」调小。
             </p>
           )}
@@ -827,10 +827,10 @@ export function Midi({ onToast, onNavigate }: PageProps) {
                 `local` = 绿色版两层同一路径，没有第二层可回落，所以那边不用说话。 */}
             {st?.models.ready && st.models.origin === 'bundled' && (
               <p className="hint">
-                引擎现在用的是「随包自带」那一层 <code>{st.models.dir}</code>，不是下载来的。
-                下面的删除只清可写目录里的下载物，
-                <strong>不动随包的安装内容</strong>，所以删完状态还是「就绪」、
-                下载按钮也不会出现（要试下载流程得手工把那一层挪走）。
+                引擎现在用的是随程序自带的那份模型 <code>{st.models.dir}</code>，不是下载来的。
+                下面的删除只会清掉下载下来的那份，
+                <strong>不动随程序自带的内容</strong>，所以删完状态还是「就绪」、
+                下载按钮也不会出现。
               </p>
             )}
             {armDelete ? (
@@ -839,7 +839,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
                   要删掉：GAME 模型
                   {st ? `（解压后 ${formatBytes(st.models.extractBytes)}）` : ''}
                   {st && !st.runtime.borrowed
-                    ? `、ONNX Runtime 动态库（${formatBytes(st.runtime.dllBytes)}）`
+                    ? `、运行库（${formatBytes(st.runtime.dllBytes)}）`
                     : ''}
                   。删完就扒不了谱了，得重新下
                   {st
@@ -865,7 +865,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
             ) : (
               <>
                 <p className="hint">
-                  下好的模型与动态库占了
+                  下好的模型与运行库占了
                   {st
                     ? ` 约 ${formatBytes(
                         st.models.extractBytes + (st.runtime.borrowed ? 0 : st.runtime.dllBytes),
@@ -992,7 +992,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
             )}
             {result.seconds && (
               <p className="hint">
-                特征 {result.seconds.encoder?.toFixed(1)}s · 去噪{' '}
+                特征提取 {result.seconds.encoder?.toFixed(1)}s · 去噪{' '}
                 {result.seconds.segmenter?.toFixed(1)}s · 判音高{' '}
                 {result.seconds.estimator?.toFixed(1)}s
               </p>
@@ -1001,17 +1001,17 @@ export function Midi({ onToast, onNavigate }: PageProps) {
         )}
 
         <Panel>
-          <PanelHead title="许可与出处" desc="模型与代码是两套许可，界面上必须写清" />
+          <PanelHead title="许可与出处" desc="模型与代码是两套许可" />
           <div className="midi-stats">
             <Stat label="代码" value="MIT" sub="openvpi/GAME" />
-            <Stat label="权重" value="CC BY-NC-SA 4.0" sub="非商业 —— 不随包分发" />
+            <Stat label="权重" value="CC BY-NC-SA 4.0" sub="非商业 —— 需自行下载" />
           </div>
           <p className="hint">
-            模型是官方 ONNX release（
+            模型来自官方发布（
             <a href={st?.source ?? 'https://github.com/openvpi/GAME'} target="_blank" rel="noreferrer">
               {st?.source ?? 'github.com/openvpi/GAME'}
             </a>
-            ）。推理、解码、切片与 MIDI 写出全部在本进程里用 Rust 实现，没有 Python 子进程。
+            ）。扒谱全部在这台电脑上算完，音频不外发。
           </p>
           {st && (
             <div className="btn-row">

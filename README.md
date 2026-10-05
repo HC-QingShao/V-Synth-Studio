@@ -20,7 +20,9 @@
 ## 安装
 
 到 **[Releases](https://github.com/QingMu39-Gao/V-Synth-Studio/releases/latest)** 下载最新的
-`V-Synth-Studio_x.y.z_x64_zh-CN.msi`，双击安装。装完直接能用，不联网也行。
+`V-Synth-Studio_x.y.zbeta_x64_zh-CN.msi`，双击安装。装完直接能用，不联网也行。
+
+> 文件名里的 `beta` 表示这是测试版。程序界面左下角也写着版本号（如 `1.3.1beta`）。
 
 > 安装包没有代码签名，第一次运行会看到一次 SmartScreen 提示：
 > 点「更多信息」→「仍要运行」即可。

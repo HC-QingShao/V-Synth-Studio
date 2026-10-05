@@ -67,7 +67,7 @@ const ENGINES = [
 ]
 
 /** 这两条是按本机（AMD RX 580，纯 CPU）实测写的；有 CUDA 的机器会快一个数量级 */
-const ESTIMATE_NOTE = '按本机纯 CPU 实测估的时长；装了 NVIDIA 显卡会快很多'
+const ESTIMATE_NOTE = '按纯 CPU 的经验值估的时长；装了 NVIDIA 显卡会快很多'
 
 /** 轮询间隔（毫秒） */
 const POLL_STATUS = 2000
@@ -539,7 +539,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
           </div>
           {!runtimeReady && st && (
             <Finding level="warn" title="分离引擎还没装">
-              运行时（Python + torch + 后端程序）与模型都不随程序分发，要下两次：
+              离线分离要用的运行时与模型都不随程序分发，要下两次：
               运行时压缩包约 {DL_RUNTIME_ZIP}、解压后 7.4 GB
               {!modelsOk && <>，模型压缩包约 {DL_MODELS_ZIP}、解压后 731 MB</>}。
               {needBytes > 0 && (
@@ -553,8 +553,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
               {!st.runtime?.downloadUrl && (
                 <>
                   {' '}
-                  ⚠️ 现在还没有配置下载地址（<code>svsep.rs</code> 里的 <code>RUNTIME_URL</code> 是空的），
-                  点了会明确报一句「还没配置下载地址」。
+                  ⚠️ 现在还没有可用的下载地址，点了会提示「还没配置下载地址」。
                 </>
               )}
             </Finding>
@@ -567,7 +566,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
               {!st.models?.downloadUrl && (
                 <>
                   {' '}
-                  ⚠️ 现在还没有配置下载地址（<code>svsep.rs</code> 里的 <code>MODEL_URL</code> 是空的）。
+                  ⚠️ 现在还没有可用的下载地址，点了会提示「还没配置下载地址」。
                 </>
               )}
             </Finding>
@@ -961,7 +960,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
 
         {/* 许可与出处：离线引擎是别人的项目，许可就摆在它旁边 */}
         <Credit
-          desc="离线分离用的是第三方引擎，许可与出处写在这里"
+          desc="离线分离用的是第三方引擎"
           tags={
             <>
               <Chip tone="accent">B站炽阳001</Chip>
@@ -973,12 +972,12 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
             { label: '模型', value: 'UVR', sub: 'BS-RoFormer / MDX，@Anjok07 训练' },
           ]}
         >
-          本功能为三改（或许吧）。离线引擎是{' '}
+          离线引擎是{' '}
           <Upstream href="https://github.com/nomadkaraoke/python-audio-separator">
             nomadkaraoke/python-audio-separator
           </Upstream>
-          （audio-separator，MIT，作者 Andrew Beveridge）：运行时与模型都不随程序打包，第一次用要先下好依赖，
-          本程序只负责调它、读它的输出。它调用的 UVR 系列模型由 @Anjok07 训练，许可见模型自己带的那份说明。
+          （audio-separator，MIT，作者 Andrew Beveridge）：运行时与模型都不随程序打包，第一次用要先下好依赖。
+          它调用的 UVR 系列模型由 @Anjok07 训练，许可见模型自己带的那份说明。
         </Credit>
       </div>
     </div>

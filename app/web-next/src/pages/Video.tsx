@@ -444,7 +444,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
         src: 'ytdlp',
         note: both
           ? `预览这条是「有音有画」的整段流（${both.resolution || both.formatId || '默认'}）。`
-          : '这个站点只给了分开的视频轨 / 音频轨，播放时两个元素会对齐；直链有时会被站点限速，卡就先下载。',
+          : '这个站点只给了分开的视频轨 / 音频轨，播放时画面与声音会自动对齐；直链有时会被站点限速，卡就先下载。',
       }
     }
     if (durl) {
@@ -651,7 +651,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
     try {
       const r = await api.downloadVideo(item.payload)
       jobId = r.jobId
-      if (!jobId) throw new Error('服务端没有返回任务号')
+      if (!jobId) throw new Error('任务没能启动，请重试')
     } catch (e) {
       const msg = errText(e)
       patch(item.uid, { status: 'error', error: msg, message: msg })
@@ -832,7 +832,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
       <Panel>
         <PanelHead
           title="解析视频"
-          desc="B 站原生解析（分P / 合集 / 番剧 / 大会员画质），其它站点走 yt-dlp"
+          desc="B 站支持分P / 合集 / 番剧 / 大会员画质，其它站点走 yt-dlp"
           extra={<Chip>回车即解析</Chip>}
         />
         <div className="stack">
@@ -867,7 +867,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
           )}
           {state && !state.tools?.ytdlp?.available && (
             <Finding level="info" title="未安装 yt-dlp">
-              B 站解析是本程序原生实现的，不受影响；YouTube 等其它上千个站点需要 yt-dlp 才能解析。
+              B 站不受影响；YouTube 等其它上千个站点需要 yt-dlp 才能解析。
               <br />
               yt-dlp 随程序分发，不需要联网下载；若这里显示未检测到，从压缩包里把 tools
               目录重新解压到程序根目录即可。
@@ -879,7 +879,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
       {/* ══════════════════════ 解析中 / 失败 / 空态 ══════════════════════ */}
       {parsing && (
         <Panel>
-          <p className="muted">正在解析视频信息…（B 站要签名取流，稍等几秒）</p>
+          <p className="muted">正在解析视频信息…（B 站要多等几秒）</p>
         </Panel>
       )}
 
@@ -1264,7 +1264,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                     <span className="field-label">可选格式</span>
                     <Chip>{`${ytFormats.length} 条`}</Chip>
                     <span className="spacer" />
-                    <span className="video-note">由 yt-dlp 列出，选择会作为 -f 参数</span>
+                    <span className="video-note">由 yt-dlp 列出，选哪条就下哪条</span>
                   </div>
                   {ytFormats.length ? (
                     <List>
@@ -1294,7 +1294,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                       yt-dlp 没有列出可用格式。
                     </Finding>
                   )}
-                  <p className="video-note">「仅音频」模式不传格式号，由 yt-dlp 自己挑 bestaudio。</p>
+                  <p className="video-note">「仅音频」模式由 yt-dlp 自动挑音质最好的一条音频轨。</p>
                   {info.subtitles?.length ? (
                     <Finding level="info" title="官方字幕">
                       {`有官方字幕：${info.subtitles.join('、')}。勾选「下载官方字幕」后会按站点语言内嵌。`}
@@ -1416,14 +1416,14 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
           />
           <SwitchRow
             label="下载官方字幕"
-            desc="B 站存成 .srt；yt-dlp 走 --write-subs 内嵌字幕"
+            desc="B 站存成 .srt；其它站点下内嵌字幕"
             checked={settings.downloadSubs}
             onChange={(v) => setSetting('downloadSubs', v)}
           />
 
           <Field
             label="保存到子目录（可选）"
-            hint="可用变量：{title} 标题、{uploader} UP主、{date} 发布日期、{p} 分P号、{quality} 画质。文件名仍按视频标题命名（服务端决定），这里只控制放在哪个子目录里。"
+            hint="可用变量：{title} 标题、{uploader} UP主、{date} 发布日期、{p} 分P号、{quality} 画质。文件名仍按视频标题命名，这里只控制放在哪个子目录里。"
           >
             <TextInput
               value={settings.subDir}
@@ -1437,7 +1437,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
               label="音频转码格式"
               hint={
                 state?.tools?.ffmpeg?.available
-                  ? '转码由 yt-dlp 调用 ffmpeg 完成。'
+                  ? '转码会用到 ffmpeg。'
                   : '注意：转码需要 ffmpeg，现在还没装，先保持「不转码」也能下到音频。'
               }
             >
@@ -1465,7 +1465,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
             </Button>
           </div>
           <p className="video-note video-center">
-            下载由本地服务完成，不会上传任何东西；解析与下载都走 B 站官方接口。
+            下载全部在本机完成，不会上传任何东西；解析与下载都走 B 站官方接口。
           </p>
         </div>
       </Panel>
@@ -1522,14 +1522,14 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
         items={[
           { label: '解析下载', value: 'Unlicense', sub: 'yt-dlp 2026.08.19' },
           { label: '合流转码', value: 'GPL v3', sub: 'FFmpeg 9.0.2（gyan.dev）' },
-          { label: 'B 站解析', value: '自研', sub: '不走第三方解析库' },
+          { label: 'B 站解析', value: '本机完成', sub: '登录信息只存在本机' },
         ]}
       >
         B 站以外的站点交给 <Upstream href="https://github.com/yt-dlp/yt-dlp">yt-dlp</Upstream>
-        （独立进程，读它的 JSON 输出；它是 Unlicense，等于公有领域）；音视频合流、抽音轨、转码交给随包的{' '}
+        （Unlicense，等同公有领域）；音视频合流、抽音轨、转码交给随包的{' '}
         <Upstream href="https://ffmpeg.org/">ffmpeg</Upstream>
-        （GPL v3 构建，能「-c copy」就不重编码）。B 站那条路是本程序自己写的：
-        画质与音轨的取址、登录态与大会员画质都不经过第三方。
+        （GPL v3 构建）。B 站的画质、音轨与登录信息都在本机处理，不经过第三方解析服务；
+        许可全文见仓库里的 THIRD-PARTY-NOTICES。
       </Credit>
     </>
   )

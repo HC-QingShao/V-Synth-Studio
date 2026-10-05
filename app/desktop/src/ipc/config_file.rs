@@ -17,11 +17,16 @@ use serde_json::{json, Value};
 /// 对外显示的版本号。
 ///
 /// Cargo 的 `version` 必须是合法 semver（`1.3.0`），但那个字符串给人看太啰嗦。
-/// 界面上要的是 `1.3Beta`，所以单独列一个常量 —— **改版本号时五处都要改**：
+/// 界面上要的是 `1.3.1beta` 这种写法，所以单独列一个常量 —— **改版本号时五处都要改**：
 /// 这里、`Cargo.toml`、`tauri.conf.json`、`app/web-next/package.json`，
 /// 以及两条锁文件记录（跑 `cargo update -p v-synth-studio --precise <版本>` 与
 /// `npm install --package-lock-only` 让它们自己跟上，别手改）。
-pub const APP_VERSION: &str = "1.3Beta";
+///
+/// ⚠️ **这里可以带 `beta` 后缀，那四处不行**：Cargo / npm / MSI 的 ProductVersion 都只吃
+/// 合法 semver（`1.3.1`），`1.3.1beta` 不是合法 semver。所以「带 beta」这件事分两层：
+/// 界面上是 `APP_VERSION`（自由字符串，想怎么写就怎么写），
+/// 安装包文件名由 CI 在打包后改名补上 beta（见 `.github/workflows/build-msi.yml`）。
+pub const APP_VERSION: &str = "1.3.1beta";
 
 /// 作者标识。出现在「关于」里，也散落在源码注释中作为出处水印。
 pub const AUTHOR_TAG: &str = "QingMu39";

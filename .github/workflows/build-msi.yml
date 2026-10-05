@@ -216,6 +216,26 @@ jobs:
         # -NoCopy：CI 不需要把 exe 复制到仓库根目录（那是给本机启动器用的）
         run: ./app/desktop/build.ps1 -Release -Bundle -NoCopy
 
+      # MSI 文件名带 beta（用户要的「安装包名称也带 beta」）。
+      #
+      # ⚠️ 只能在**文件名**上做：MSI 的 ProductVersion 字段只接受纯数字 `x.y.z`
+      #    （Windows Installer 的硬规矩），`1.3.1beta` 那种不是合法 semver，
+      #    写进 tauri.conf.json 会让 WiX 直接报错。所以版本号写 `1.3.1`、
+      #    文件名在这里补 `beta` —— 界面上显示的版本号另有其处
+      #    （`config_file.rs` 的 APP_VERSION，它是自由字符串，就是 `1.3.1beta`）。
+      - name: MSI 文件名加 beta
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = @(Get-ChildItem 'app/desktop/target/release/bundle/msi/*.msi')
+          if ($msi.Count -ne 1) { throw "期望恰好一个 MSI，实际 $($msi.Count) 个" }
+          $old = $msi[0]
+          # 名字形如 V-Synth-Studio_1.3.1_x64_zh-CN.msi → 在版本段后面补 beta
+          $new = $old.Name -replace '^(V-Synth-Studio_[0-9]+\.[0-9]+\.[0-9]+)_', '$1beta_'
+          if ($new -eq $old.Name) { throw "文件名里没找到版本段，改不了名：$($old.Name)" }
+          Rename-Item -LiteralPath $old.FullName -NewName $new
+          Write-Host "$($old.Name)  →  $new"
+
       # ⚠️ 产物**先**传成 build artifact，再跑冒烟：这样万一冒烟红了，MSI 仍然能在
       #    Actions 页面下载到（少一次「白等 30 分钟什么都没拿到」）。传 Release 仍在冒烟之后。
       - name: 传 MSI（build artifact）

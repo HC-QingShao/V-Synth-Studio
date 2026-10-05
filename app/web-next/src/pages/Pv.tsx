@@ -392,13 +392,13 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
       const doc = await waitForEditor(frame, isAlive)
       if (!isAlive()) return
       if (!doc) {
-        fail('编辑器没能加载：/vendor/jizura/ 下的文件缺失或损坏。重新解压一份完整程序即可恢复。')
+        fail('编辑器没能加载：内置编辑器文件缺失或损坏。重新解压一份完整程序即可恢复。')
         return
       }
 
       const win = frame.contentWindow as JizuraWindow | null
       if (!win?.document?.getElementById) {
-        fail('编辑器载入失败：拿不到它的文档。多半是 vendor/jizura 被删了或改坏了，重新解压一份完整程序即可恢复。')
+        fail('编辑器载入失败：内置编辑器没能启动。多半是程序文件被删或损坏，重新解压一份完整程序即可恢复。')
         return
       }
 
@@ -414,7 +414,7 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
 
       // 接管它的保存（导出 MP4 / PNG 序列 / 附带的 WAV 都走 J.saveFile）—— 用户就能选目录了
       if (!hookSave(win)) {
-        onToast('没能接管导出的保存路径（JIZURA 的 saveFile 一直没出现），导出会落到系统下载目录', 'err')
+        onToast('这次没能让你选保存目录，导出会落到系统下载目录', 'err')
       }
 
       // 歌词从歌词页留在配置里的那份来（`config.json` 的 `pvPendingLyrics`）
@@ -435,7 +435,7 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
       if (res.ok) {
         setStatus(`已把歌词填进编辑器（${text.split('\n').length} 行）。`)
       } else {
-        fail(`歌词填写可能没成功（填进去 ${res.got} / 应为 ${res.want} 字）：${res.why ?? '读回的值不一致'}`)
+        fail(`歌词填写可能没成功（填进去 ${res.got} / 应为 ${res.want} 字）：${res.why ?? '编辑器里的内容没对上'}`)
       }
     })()
 
@@ -487,8 +487,8 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
         onToast('歌词已导入编辑器', 'ok')
       } else {
         // 旧前端这里只改状态条；新前端的规矩是任何失败都要能被看到（状态条也可能被忽略）
-        onToast(`导入后填写可能没成功（${r.got} / 应为 ${r.want} 字）：${r.why ?? '读回值不一致'}`, 'err')
-        setStatus(`导入后填写可能没成功（${r.got} / 应为 ${r.want} 字）：${r.why ?? '读回值不一致'}`)
+        onToast(`导入后填写可能没成功（${r.got} / 应为 ${r.want} 字）：${r.why ?? '编辑器里的内容没对上'}`, 'err')
+        setStatus(`导入后填写可能没成功（${r.got} / 应为 ${r.want} 字）：${r.why ?? '编辑器里的内容没对上'}`)
       }
     } catch (e) {
       setStatus(`导入失败：${errText(e)}`)
