@@ -72,7 +72,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           ./app/desktop/fetch-tools.ps1 -Only tools
-          if ($LASTEXITCODE -ne 0) { throw "fetch-tools.ps1 -Only tools 失败（exit $LASTEXITCODE）" }
+          # ⚠️ 判据用 $?，**别用 $LASTEXITCODE** —— 脚本成功时不一定 `exit`，
+          #    那种情况下 $LASTEXITCODE 是 $null 而不是 0，而 `$null -ne 0` 为真，
+          #    于是成功会被判成失败（2026-10-05 CI 实测踩到，见下面「打包」那步的注释）。
+          if (-not $?) { throw 'fetch-tools.ps1 -Only tools 失败' }
 
       # ⚠️ 判「齐不齐」必须核对**代码真去找的那几个文件**，不能只看目录在不在
       #    —— 半途失败的解压会留下看似完整的空壳，要到用户点「工程转换」才现形。
@@ -114,7 +117,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           ./tools/fetch-jizura-fonts.ps1
-          if ($LASTEXITCODE -ne 0) { throw "fetch-jizura-fonts.ps1 失败（exit $LASTEXITCODE）" }
+          if (-not $?) { throw 'fetch-jizura-fonts.ps1 失败' }
 
       # 判据是「fonts.css 里引用的每个文件都在盘上」+「文件数没少一大截」，
       # 而不是「fonts\ 目录存在」—— 缺一半字体时文字 PV 页只会少字体，不报错。
@@ -164,7 +167,12 @@ jobs:
             'jizura' { ./tools/zip-assets.ps1 -Src 'app\web\vendor\jizura' -Name jizura -Out $out -Force }
             default  { ./tools/zip-assets.ps1 -Out $out -Force }
           }
-          if ($LASTEXITCODE -ne 0) { throw "zip-assets.ps1 失败（exit $LASTEXITCODE）" }
+          # ⚠️⚠️ 判据必须是 $?，不能用 $LASTEXITCODE。`zip-assets.ps1` 成功时**不 `exit`**，
+          #      所以调用方看到的 $LASTEXITCODE 是 **$null 而不是 0** —— 而 PowerShell 里
+          #      `$null -ne 0` 是**真**，于是「两个 zip 都打出来了」也会被判成失败。
+          #      2026-10-05 实测栽在这一行：日志里 tools.zip 129.2MB / jizura.zip 51.9MB
+          #      明明都在，紧接着就是 `throw "zip-assets.ps1 失败（exit ）"`（exit 后面空白）。
+          if (-not $?) { throw 'zip-assets.ps1 失败' }
           foreach ($z in Get-ChildItem "$out\*.zip") {
             Write-Host ("  {0}  {1:N1} MB" -f $z.Name, ($z.Length / 1MB))
           }
