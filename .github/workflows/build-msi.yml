@@ -1,4 +1,9 @@
 # 首次注册：这个文件先前没被 Actions 索引到，2026-10-02 空提交一次强制重新解析。
+#   ⚠️ 2026-10-05 补充（仓库重建后再踩一次，结论更准）：**空提交救不了**。
+#      新仓库首次推送后，`GET /repos/…/actions/workflows` 回 `total_count = 0`，
+#      Actions 页也是空的（但文件在树上、Actions 权限是开的、编辑器不报语法错）。
+#      必须**改到这个文件本身**（路径进 `.github/workflows/**`）才会被重新解析注册 ——
+#      而且只有被改动的那一个文件会注册，所以同一次推送里的每个 workflow 都要碰一下。
 # 编译 + 打包 Windows 安装包（MSI）
 #
 # 手动跑：Actions → 打包 Windows (MSI) → Run workflow
