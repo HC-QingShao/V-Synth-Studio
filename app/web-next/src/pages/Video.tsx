@@ -407,7 +407,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
   const ytFormats = (info.formats ?? []).filter((f) => f.isVideo)
   /* ⚠️ 字段不符（已核实，留原样）：currentPage 就是后端 pages[] 里的一项，而 pages[] 的每个元素
      只有 cid / page / title / durationSec / width / height（bili.rs:394-419），冻结夹具
-     （tests/contract/fixtures/video-parse-bili.json）里的 currentPage 同样没有 cover。
+     里面没有 cover。
      所以这一截回退实际恒为 undefined —— 不崩，但永远不生效。没有删它、也没改运行逻辑，
      只加了个窄断言让它编译，怎么处理交给知道契约那边的人。 */
   const cover = info.cover || (parsed?.currentPage as { cover?: string } | undefined)?.cover || info.thumbnail

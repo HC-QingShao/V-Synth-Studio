@@ -106,9 +106,9 @@ LGPL 只要求附许可全文并允许用户替换该组件，不要求源码要
 
 代价是失去 H.264/H.265 **编码**能力 —— 但本程序不做视频编码，没有实际损失。
 
-> 换之前建议先跑一遍 `tests/contract/verify.mjs` 和音频页的转换/变调/裁剪，
-> 确认新构建带齐了 `libmp3lame` / `libopus` / `libvorbis` 这些音频编码器
-> （LGPL 构建通常都带）。
+> 换之前先核对编码器：`tools\ffmpeg\bin\ffmpeg.exe -encoders` 里要有
+> `libmp3lame` / `libopus` / `libvorbis`（LGPL 构建通常都带），
+> 再跑一遍音频页的转换 / 变调 / 裁剪与视频页的合流确认没退化。
 
 ---
 

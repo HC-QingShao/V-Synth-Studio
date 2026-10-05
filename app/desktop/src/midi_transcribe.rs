@@ -285,8 +285,9 @@ fn probe_cuda(dll: Option<&Path>) -> CudaInfo {
        `Empty reply from server`、`HTTP 000`），没有 500、没有 JSON、没有日志，
        `Get-Process` 里进程还活得好好的（那是 tokio 的 worker 线程 panic 了，
        不是进程崩了）—— 看起来像「路由没注册」或「网络出问题」。
-       ⇒ 遇到「某个接口连回复都没有」，**去抓 `--serve` 进程的 stderr**，
-       别盯着路由表看。
+       ⇒ 遇到「某条 IPC 命令**永远不返回**」（前端 invoke 一直挂着、别的命令却正常），
+        去翻程序日志（`<可写目录>/app.log`，或从控制台起时看 stderr）—— 别盯着命令注册表，
+        注册表里明明有它、代码也没写错。
 
        加载一次就够（`ort::init_from` 内部是 `OnceLock`，重复调用无害），所以
        这里用 `RUNTIME_LOADED` 只做一次；`/api/midi/status` 是 2 秒轮询的。 */
