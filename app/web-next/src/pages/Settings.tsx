@@ -397,7 +397,7 @@ const SPONSORS = [
   'Desire Control',
   '浅唱教主',
   '老钱',
-  '我是len的帽子',
+  '三无',
   '入さん',
   'ゆりかごから墓場まで',
   '小偷人机在线逃跑',
@@ -413,6 +413,9 @@ const SPONSORS = [
   '神野冬花',
   '落款未名',
   '酒韵星回',
+  '凌宇',
+  '界兔',
+  '绝望病',
 ]
 
 /**
@@ -624,12 +627,20 @@ function About({
           >
             抖音
           </Button>
+          <Button
+            size="sm"
+            icon="users"
+            onClick={() => openInBrowser('https://qm.qq.com/q/1oM0jFK7Va')}
+          >
+            Q 群 · 清沐的小窝
+          </Button>
           <Button size="sm" icon="mail" onClick={copyMail}>
             {AUTHOR_MAIL}
           </Button>
         </div>
         <p className="hint">
-          前两个按钮在系统默认浏览器里打开（和资源库、上游链接走同一条路）；邮箱按钮点一下复制到剪贴板。
+          哔哩哔哩 / 抖音 / Q 群三个按钮在系统默认浏览器里打开（和资源库、上游链接走同一条路）；
+          Q 群那个是加入群聊的链接，装了 QQ 会直接拉起它。邮箱按钮点一下复制到剪贴板。
         </p>
       </Panel>
 
