@@ -685,8 +685,10 @@ function About({
           ))}
         </div>
         <p className="hint">
-          本程序自身是 Rust 写的：Tauri 2（Apache-2.0 / MIT）与各 crate 静态链接进 exe，界面跑在系统自带的
-          WebView2 Runtime 上；许可全文与逐项说明随仓库的 docs/THIRD-PARTY-NOTICES.md 一起分发。
+          本程序自身以 <strong>GPL-3.0</strong> 授权（版权归 QingMu39）：可以自由使用、修改、再分发，
+          但再分发时必须同样以 GPL-3.0 开放源码。它用 Rust 写：Tauri 2（Apache-2.0 / MIT）与各 crate
+          静态链接进 exe，界面跑在系统自带的 WebView2 Runtime 上；上面这张总表与许可全文随仓库的
+          docs/THIRD-PARTY-NOTICES.md 一起分发。
           早期格式转换用过 UtaFormatix3，相关代码已全部删除，不再需要署名。
         </p>
       </Panel>

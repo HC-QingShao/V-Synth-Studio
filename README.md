@@ -1,5 +1,11 @@
 # V-Synth-Studio —— **一个专为P主制作的工作站。**
 
+> ## ⚠️ 完全测试版（Beta）
+>
+> **全部功能都还在测试与调整中**：可能有 bug、接口可能改动、极端情况下可能丢数据。
+> **用之前请先备份工程文件**，别把它当成唯一的工作副本。
+> 遇到问题欢迎到 Q 群（设置 → 关于）或 [Issues](https://github.com/QingMu39-Gao/V-Synth-Studio/issues) 反馈。
+
 - **工程转换**：40 种工程格式互转。内置 LibreSVIP CLI。
 - **视频解析**：B 站原生解析 + yt-dlp 兜底。可选下封面 / 弹幕 / 字幕；多线程分块下载；试听先缓存到本机再播（同一支看第二次瞬时）。
 - **音轨分离**：拆人声 / 伴奏 / 鼓 / 贝斯 / 钢琴 / 其它。在线 MVSEP 或内嵌引擎。
@@ -33,6 +39,17 @@
 | CeVIO / ACE / DeepVocal | `.ccs` `.acep` `.dv` `.dspx` |
 | 通用交换 | `.mid` `.musicxml` `.ufdata` |
 | 歌词字幕 | `.lrc` `.ass` `.srt` `.svg` |
+
+---
+
+## 许可
+
+**GPL-3.0**（GNU 通用公共许可证第 3 版）—— 全文见 [`LICENSE`](LICENSE)。
+
+可以自由使用、修改、再分发；**再分发（含修改版）时必须同样以 GPL-3.0 开放源码**。
+
+随包分发的外部工具（FFmpeg / LibreSVIP / yt-dlp / JIZURA 与字体）**各自独立授权**、
+不属于本许可证覆盖范围，逐项说明见 [`docs/THIRD-PARTY-NOTICES.md`](docs/THIRD-PARTY-NOTICES.md)。
 
 ---
 
