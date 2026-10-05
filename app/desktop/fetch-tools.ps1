@@ -60,8 +60,12 @@ if (-not $Zip) { $Zip = Join-Path $root 'data\.cache' }
 # 没传之前，本脚本在**干净机器**上会失败，在开发机上则因为文件已存在而直接跳过
 # （所以本机不受影响）。jizura.zip 没有上游兜底，没传就一定失败。
 # 仓库地址取自 `git remote get-url origin`（HTTPS 与 SSH 两种写法都认）；
-# 没有远端时用下面这个备选值，**那时你要把它改成实际地址**。
-$repo      = 'QingMu39/V-Synth-Studio'
+# 没有远端时（例如从网页下载 zip、没有 .git 的那种）用下面这个备选值。
+# ⚠️ 2026-10-05 修：这里原来写的是 'QingMu39/V-Synth-Studio'，**少了 -Gao** ——
+#    真实的 GitHub 账号是「QingMu39-Gao」。所以「没有远端」那条路会去下一个不存在的
+#    地址、静默退回三个上游（慢得多）。在干净沙盒里实测抓到的。
+#    ⚠️ 以后改账号 / 改仓库名，这里要跟着改。
+$repo      = 'QingMu39-Gao/V-Synth-Studio'
 # 附件所在的 Release tag。⚠️ **不能用 `v` 开头的 tag**：工作流是 `on.push.tags: ['v[0-9]*']`，
 # 用 `v…` 建这个附件的 Release 会顺手触发一次没用的 CI 构建（现在叫 assets-v1 就是为避开它）。
 $assetsTag = 'assets-v1'
@@ -114,9 +118,18 @@ function Invoke-Download([string]$Url, [string]$Out) {
     for ($i = 1; $i -le 3; $i++) {
         # --speed-limit/--speed-time：真的卡死（<2KB/s 持续 30 秒）才断开重来。
         # 别把限速调高：这台机器上 gyan.dev 实测只有 ~12KB/s，高限速会误杀慢速但有效的下载。
+        # ⚠️ 必须临时把 $ErrorActionPreference 放回 Continue：curl 会往 stderr 写进度，
+        #    而 PS 5.1 把原生命令的 stderr 变成 **NativeCommandError 终止错误** ——
+        #    脚本会在第一次重试之前就死掉（写成 2>&1 再接 Out-Null 也挡不住）。CI 上跑的是
+        #    pwsh 7（那边 stderr 就是普通输出）所以看不出来，用户机器上是 5.1。
+        #    2026-10-05 在干净沙盒里实测：ffmpeg 那一步刚打印完 URL 就 exit 1。
+        $eap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         & $curl -L --fail --connect-timeout 20 --speed-limit 2048 --speed-time 30 -o $Out $Url 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $Out) -and (Get-Item $Out).Length -gt 0) { return }
-        Say "  第 $i 次失败（curl 退出码 $LASTEXITCODE），重试…"
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = $eap
+        if ($code -eq 0 -and (Test-Path $Out) -and (Get-Item $Out).Length -gt 0) { return }
+        Say "  第 $i 次失败（curl 退出码 $code），重试…"
         Start-Sleep -Seconds 3
     }
     throw "下载失败（试了 3 次）：$Url"
