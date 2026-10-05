@@ -275,25 +275,35 @@ if ($Only -in 'all', 'jizura') {
 # 缺什么现在就说，别等打出来的安装包在用户机器上缺文件。
 Say ""
 Say "校验"
+# ⚠️ 校验必须**跟着 -Only 走**。2026-10-05 在 CI 上实测踩到：「-Only tools」时压根没去补
+#    jizura，这一段却照样校验字体目录 ⇒ 干净机器上永远「不齐」+ exit 1，
+#    于是「云端只打 tools.zip」这条路整个走不通。
+#    开发机上看不出来 —— 字体早就在那儿了，本地跑 -Only tools 照样打印「全部齐了」。
+$checkTools = $Only -in 'all', 'tools'
+$checkJizura = $Only -in 'all', 'jizura'
 $bad = @()
-$fFfmpeg = Join-Path $root 'tools\ffmpeg\bin\ffmpeg.exe'
-if (Test-Path $fFfmpeg) {
-    Say "  ffmpeg    : $((& $fFfmpeg -version 2>&1 | Select-Object -First 1))"
-} else { $bad += 'tools\ffmpeg\bin\ffmpeg.exe' }
-if (Test-Path (Join-Path $root 'tools\ffmpeg\bin\ffprobe.exe')) { Say "  ffprobe   : 在" } else { $bad += 'tools\ffmpeg\bin\ffprobe.exe' }
-$fYtdlp = Join-Path $root 'tools\yt-dlp.exe'
-if (Test-Path $fYtdlp) {
-    Say "  yt-dlp    : $((& $fYtdlp --version 2>&1 | Select-Object -First 1))"
-} else { $bad += 'tools\yt-dlp.exe' }
-$plug = Join-Path $root 'tools\libresvip\libresvip-cli\_internal\libresvip\plugins'
-if ((Test-Path $plug) -and (Get-ChildItem $plug -Directory).Count -gt 0) {
-    Say "  LibreSVIP : 在（$((Get-ChildItem $plug -Directory).Count) 个插件）"
-} else { $bad += 'tools\libresvip\libresvip-cli\（或它的插件目录是空的）' }
-$vFonts = Join-Path $root 'app\web\vendor\jizura\fonts'
-$nFont = if (Test-Path $vFonts) { (Get-ChildItem $vFonts -File -Filter '*.woff2' | Measure-Object).Count } else { 0 }
-if ($nFont -gt 100) {
-    Say "  JIZURA    : 在（$nFont 个 woff2 字体）"
-} else { $bad += "app\web\vendor\jizura\fonts\（只有 $nFont 个 woff2，PV 页会缺字）" }
+if ($checkTools) {
+    $fFfmpeg = Join-Path $root 'tools\ffmpeg\bin\ffmpeg.exe'
+    if (Test-Path $fFfmpeg) {
+        Say "  ffmpeg    : $((& $fFfmpeg -version 2>&1 | Select-Object -First 1))"
+    } else { $bad += 'tools\ffmpeg\bin\ffmpeg.exe' }
+    if (Test-Path (Join-Path $root 'tools\ffmpeg\bin\ffprobe.exe')) { Say "  ffprobe   : 在" } else { $bad += 'tools\ffmpeg\bin\ffprobe.exe' }
+    $fYtdlp = Join-Path $root 'tools\yt-dlp.exe'
+    if (Test-Path $fYtdlp) {
+        Say "  yt-dlp    : $((& $fYtdlp --version 2>&1 | Select-Object -First 1))"
+    } else { $bad += 'tools\yt-dlp.exe' }
+    $plug = Join-Path $root 'tools\libresvip\libresvip-cli\_internal\libresvip\plugins'
+    if ((Test-Path $plug) -and (Get-ChildItem $plug -Directory).Count -gt 0) {
+        Say "  LibreSVIP : 在（$((Get-ChildItem $plug -Directory).Count) 个插件）"
+    } else { $bad += 'tools\libresvip\libresvip-cli\（或它的插件目录是空的）' }
+}
+if ($checkJizura) {
+    $vFonts = Join-Path $root 'app\web\vendor\jizura\fonts'
+    $nFont = if (Test-Path $vFonts) { (Get-ChildItem $vFonts -File -Filter '*.woff2' | Measure-Object).Count } else { 0 }
+    if ($nFont -gt 100) {
+        Say "  JIZURA    : 在（$nFont 个 woff2 字体）"
+    } else { $bad += "app\web\vendor\jizura\fonts\（只有 $nFont 个 woff2，PV 页会缺字）" }
+}
 
 Say ""
 if ($bad.Count) {
