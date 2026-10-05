@@ -226,26 +226,62 @@ jobs:
           path: app/desktop/target/release/bundle/msi/*.msi
           if-no-files-found: error      # 没打出 MSI 却"成功"，比失败更糟
 
-      # 让「编出来的东西真的能跑」有个证据，而不是只看编译退出码。
+      # 让「编出来的东西真的能装、装出来是对的」有个证据，而不是只看编译退出码。
       #
-      # ⚠️ 2026-10-05 重写。旧那套（`--serve --port=8891` + `/api/health` + 契约用例）
-      #    是**内嵌 HTTP 服务时代**的：`--serve` 那天一起删了、契约用例也随 tests/contract
-      #    删了、`next-smoke.mjs` 同样退役 —— 它会必然抛「服务没能起来（8891 无应答）」，
-      #    然后把后面的「传 MSI」整步跳过。v1.3.0 那次 tag 构建就是这么白跑的（30 分钟）。
-      #    现在的证据是**真窗口 + CDP**：探针自己按 VS_EXE 起 release 版，
-      #    验 origin / IPC / 10 页玻璃面 / 控制台非预期报错，跑完按精确 PID 收尾，
-      #    有失败就返回非零（2026-10-05 之前它失败也退出 0，当不了门禁）。
-      - name: 冒烟（真窗口 + CDP，10 页）
+      # ⚠️ 2026-10-05 改了两轮，两轮的教训都留在这儿：
+      #
+      #  ① 第一版（内嵌 HTTP 服务时代）：`--serve --port=8891` + `/api/health` + 契约用例。
+      #     `--serve` 那天一起删了、契约用例也随 tests/contract 删了、next-smoke.mjs 退役 ——
+      #     它必然抛「服务没能起来（8891 无应答）」，还把后面的「传 MSI」整步跳过。
+      #
+      #  ② 第二版（真窗口 + CDP）：在 GitHub 托管的 Windows runner 上**起不来** ——
+      #     agent 跑在服务会话（session 0），没有交互桌面，WebView2 建不出窗口。
+      #     实测日志：VS_EXE 路径正确，34 秒内 CDP 9349 一直无应答。
+      #     **真窗口验证留在开发机上手动跑**（`node tests\manual\cdp-window-check.mjs 9349`），
+      #     别往 CI 里搬。
+      #
+      #  ③ 现在这版：**读 MSI 自己的 File 表**（WindowsInstaller COM）—— 不需要桌面、
+      #     不安装任何东西、秒级。核对「代码真去找的那几个文件」在不在、总量对不对，
+      #     正是 AGENTS.md 那条「『打包好了』≠『装机装得上』」的自动化：
+      #     `bundle.resources` 少打包是**静默**的，缺了要到用户手里才现形。
+      - name: 冒烟（读 MSI 表：装出来的布局对不对）
         shell: pwsh
-        env:
-          # 探针默认按「脚本位置往上两级」找 exe（那是本机 dev 产物），CI 上显式指到 release
-          VS_EXE: ${{ github.workspace }}/app/desktop/target/release/v-synth-studio.exe
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "VS_EXE = $env:VS_EXE"
-          if (-not (Test-Path $env:VS_EXE)) { throw "找不到 $env:VS_EXE" }
-          node tests/manual/cdp-window-check.mjs 9349
-          if ($LASTEXITCODE -ne 0) { throw "CDP 冒烟失败（退出码 $LASTEXITCODE）" }
+          $msi = @(Get-ChildItem 'app/desktop/target/release/bundle/msi/*.msi')
+          if ($msi.Count -ne 1) { throw "期望恰好一个 MSI，实际 $($msi.Count) 个" }
+          $msi = $msi[0].FullName
+          Write-Host ("MSI: {0}   {1:N1} MB（压缩后）" -f $msi, ((Get-Item $msi).Length / 1MB))
+
+          # ⚠️ 两条姿势（项目里踩过）：SQL 的列名要**反引号**；
+          #    InvokeMember 的每个返回值都要 $null = 接住，否则会混进函数输出。
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msi, 0))
+          $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT `File`, `FileName`, `FileSize` FROM `File`'))
+          $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+
+          $names = New-Object System.Collections.Generic.List[string]
+          $total = 0
+          while ($true) {
+            $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+            if (-not $rec) { break }
+            $fn = [string]$rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, 2)
+            $total += [int]$rec.GetType().InvokeMember('IntegerData', 'GetProperty', $null, $rec, 3)
+            if ($fn -match '\|') { $fn = ($fn -split '\|')[-1] }   # FileName 是「短名|长名」
+            $names.Add($fn)
+          }
+          Write-Host ("File 表：{0} 个文件，{1:N1} MB（未压缩）" -f $names.Count, ($total / 1MB))
+
+          # 这几个就是后端真正去找的文件（resolve_paths / detect_tools / libresvip::cli_path）
+          $need = 'v-synth-studio.exe', 'index.html', 'resources.json', 'pinyin.json',
+                  'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'libresvip-cli.exe'
+          $miss = @($need | Where-Object { -not $names.Contains($_) })
+          if ($miss.Count) { throw "MSI 里少了：$($miss -join '、') —— bundle.resources 少打包是静默的" }
+
+          # 阈值按实测定（留足余量）：tools 1,385 + jizura 2,338 + app\web 14 + 程序本体 + WiX 那几件
+          if ($names.Count -lt 3000) { throw "MSI 里只有 $($names.Count) 个文件，明显少打包了" }
+          if ($total -lt 300MB) { throw "MSI 内容只有 $([math]::Round($total / 1MB, 1)) MB，明显少打包了" }
+          Write-Host '布局与总量都对 ✓'
 
       - name: 传 MSI 到 Release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release
