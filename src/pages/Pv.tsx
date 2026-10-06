@@ -8,6 +8,7 @@ import {errText, formatBytes} from '@/lib/format'
 import type {PageProps} from './types'
 import './Pv.css'
 import {translate} from '@/lib/i18n'
+import {useI18n} from '@/lib/i18n'
 
 /**
  * 文字 PV：把歌词做成动态歌词视频（JIZURA）。
@@ -251,6 +252,7 @@ interface PendingSave {
 /* ══════════════════════════════════════════════════════════════ 页面 ══ */
 
 export function Pv({state, onNavigate, onToast}: PageProps) {
+    const {t} = useI18n()
     const [status, setStatus] = useState('正在载入编辑器…')
     const [importing, setImporting] = useState(false)
     const frameRef = useRef<HTMLIFrameElement>(null)
@@ -509,7 +511,7 @@ export function Pv({state, onNavigate, onToast}: PageProps) {
                     ref={frameRef}
                     className="pv-frame"
                     src={SRC}
-                    title={translate("JIZURA 文字 PV 编辑器")}
+                    title={t("JIZURA 文字 PV 编辑器")}
                     allow="autoplay; clipboard-write; fullscreen"
                 />
             </div>
