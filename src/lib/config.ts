@@ -178,17 +178,19 @@ export function ensureConfig(): Promise<AppConfig> {
 
 let pending: Record<string, unknown> = {}
 let timer: number | null = null
+let writeGeneration = 0
 
 async function flush() {
     timer = null
     const patch = pending
     pending = {}
+    const generation = writeGeneration
     if (!Object.keys(patch).length) return
     try {
         const r = await call<ConfigReply>('set_config', {patch})
         /* 后端回的是**打码后**的完整配置，用它替掉本地那份 —— 这样 Cookie 类的键
            在内存里也不会留明文。（打码的值原样提交回来时后端会跳过，不会反向覆盖。） */
-        if (r?.config) {
+        if (r?.config && generation === writeGeneration) {
             snapshot = r.config
             emit()
         }
@@ -202,6 +204,7 @@ async function flush() {
  */
 export function saveConfig(patch: Record<string, unknown>): void {
     snapshot = {...snapshot, ...patch}
+    writeGeneration += 1
     emit()
     pending = {...pending, ...patch}
     if (timer !== null) window.clearTimeout(timer)
