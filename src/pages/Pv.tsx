@@ -7,7 +7,6 @@ import {Panel} from '@/components/Panel'
 import {errText, formatBytes} from '@/lib/format'
 import type {PageProps} from './types'
 import './Pv.css'
-import {translate} from '@/lib/i18n'
 import {useI18n} from '@/lib/i18n'
 
 /**
