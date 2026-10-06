@@ -16,7 +16,6 @@ import {useJob} from '@/lib/useJob'
 import type {FormatInfo, Job} from '@/lib/types'
 import type {PageProps} from './types'
 import './Convert.css'
-import {translate} from '@/lib/i18n'
 import {useI18n} from '@/lib/i18n'
 
 /**
