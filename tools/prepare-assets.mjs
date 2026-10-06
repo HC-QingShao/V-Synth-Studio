@@ -14,6 +14,9 @@
  *   `prepare-assets.mjs`（build） 缺件退出 1 —— 打包少一件是静默的，必须拦住。
  * `VSS_FETCH_OPTIONAL_TOOLS` / `VSS_FETCH_OPTIONAL_FONTS` 可单独放行某个来源（国内直连
  * GitHub / Google Fonts 常不通，编码期又用不到 → 用它换一个能起来的开发环境）。
+ *
+ * 三步来源与 `--local` 见 `fetch_tools.mjs` 的头注释；`--local` / `VSS_ASSETS_LOCAL`
+ * 由这里**原样转发**给两个补齐脚本，所以「完全不联网」是这两个入口都支持的。
  */
 
 import process from 'node:process'
@@ -26,9 +29,12 @@ import {main as fetchJizura} from './fetch_jizura_fonts.mjs'
 // 所以检测与重跑放在入口，而不是只放在 fetch_jizura 自己那儿。
 ensureFetchProxy()
 
+// 转发的参数：`dev` 与两个脚本都不认识的旗标会被各自的 parseArgs 忽略，无害。
+const ARGV = process.argv.slice(2)
+
 const STEPS = [
-  {name: 'tools', what: '工具（ffmpeg / yt-dlp / LibreSVIP / onnxruntime）', run: () => fetchTools([])},
-  {name: 'jizura', what: 'JIZURA 页面与字体', run: () => fetchJizura([])},
+  {name: 'tools', what: '工具（ffmpeg / yt-dlp / LibreSVIP / onnxruntime）', run: () => fetchTools(ARGV)},
+  {name: 'jizura', what: 'JIZURA 页面与字体', run: () => fetchJizura(ARGV)},
 ]
 
 /** 允许失败的来源 —— **只为方便开发**：国内直连 GitHub / Google Fonts 常不通，

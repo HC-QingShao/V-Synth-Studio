@@ -5,12 +5,22 @@
  *     node tools/fetch_jizura_fonts.mjs
  *     node tools/fetch_jizura_fonts.mjs --only Dela+Gothic+One   # 只抓一个家族（调试）
  *     node tools/fetch_jizura_fonts.mjs --force                  # 连 CSS 缓存一起重抓
+ *     node tools/fetch_jizura_fonts.mjs --local <目录>           # 只用 <目录> 里的 jizura.zip，不联网
  *
  * 干三件事：
  *   1. 从上游取 `index.html` 与 `LICENSE`（`852wa/JIZURA`，按 assets.mjs 钉的 commit），
  *      并给 `index.html` 打 3 处补丁：把它的 Google Fonts 引用换成自托管的 `fonts.css`
  *   2. 用现代浏览器 UA 取 `fonts.googleapis.com/css2?family=…`（不加 UA 会给 ttf 而非 woff2）
  *   3. 下 CSS 引用的每个 `fonts.gstatic.com` 上的 woff2，URL 改写成相对路径，合并进 `fonts.css`
+ *
+ * ── 三条来源，按这个顺序试 ──────────────────────────────────────────
+ *
+ *   1. `--local <目录>` / `VSS_ASSETS_LOCAL`：那里的 `jizura.zip`，**不联网**；
+ *   2. 自建归档（`assets.mjs::SELF_HOST_BASE`，布局与本仓库一致，境内直连可用）；
+ *   3. 上游（GitHub 取两个文件 + Google Fonts 抓 2335 个字体）。
+ *
+ * 产物已经齐了就直接跳过 —— 这一步在境内要跑很久，而 `public/vendor/jizura/` 是
+ * 生成物、不随源码走，重复跑没有意义。要重来加 `--force`。
  *
  * ── 两条硬约束 ─────────────────────────────────────────────────────
  *
@@ -28,7 +38,8 @@ import path from 'node:path'
 import process from 'node:process'
 
 import * as assets from './assets.mjs'
-import {HERE, ensureFetchProxy, fetchBuffer, isFile, mkdirp, say, isMain} from './lib.mjs'
+import {HERE, ensureFetchProxy, fetchBuffer, isFile, mkdirp, rmdirIf, say, isMain} from './lib.mjs'
+import {extractAny, obtainArchive} from './archive.mjs'
 import {verify} from './fetch_tools.mjs'
 
 // 从表里取落点，不自己拼 —— 「jizura 在哪儿」只有一处定义。
@@ -254,22 +265,62 @@ async function pool(items, limit, worker, onDone) {
 }
 
 function parseArgs(argv) {
-  const a = {only: null, force: false}
+  const a = {only: null, force: false, local: null}
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--force') a.force = true
     else if (argv[i] === '--only') a.only = argv[++i]
+    else if (argv[i] === '--local') a.local = argv[++i]
   }
   return a
 }
 
 export async function main(argv = process.argv.slice(2)) {
   const a = parseArgs(argv)
+  const local = a.local || (process.env.VSS_ASSETS_LOCAL || '').trim() || null
 
   const problems = assets.selfCheck()
   if (problems.length) {
     say('assets.mjs 自检没过：')
     for (const item of problems) say(`  - ${item}`)
     return 1
+  }
+
+  /* 已经齐了就跳过：这一步在境内要跑十几分钟（2335 个字体），而 `public/vendor/jizura/`
+     是生成物。`--only` 是调试用，不能跳过（它要重写 fonts.css.debug）。 */
+  if (!a.force && !a.only && verify([JIZURA], HERE).length === 0) {
+    say(`已经齐了，跳过（--force 可重来）→ ${DEST}`)
+    return 0
+  }
+
+  /* 归档优先：上游在 GitHub 与 Google Fonts，境内直连常不通。解完仍要按表核一遍 ——
+     归档是别人打的那一份，可能过期。 */
+  const tmp = path.join(HERE, 'src-tauri', 'target', 'vss-cache', 'tmp')
+  mkdirp(tmp)
+  const zip = await obtainArchive({
+    file: assets.SELF_HOST_ARCHIVE.jizura,
+    tmp,
+    localDir: local,
+    url: assets.selfHostUrl('jizura'),
+  })
+  if (zip) {
+    const ex = path.join(tmp, 'jizura-archive')
+    extractAny(zip, ex, tmp)
+    // 归档带一层 `jizura/` 壳，与 assets.mjs 里 jizura 那条的 `strip` 对应
+    const src = isFile(path.join(ex, 'jizura', 'index.html')) ? path.join(ex, 'jizura') : ex
+    fs.cpSync(src, DEST, {recursive: true, force: true})
+    rmdirIf(ex)
+    const left = verify([JIZURA], HERE)
+    if (left.length === 0) {
+      say(`归档补齐完成 → ${DEST}`)
+      return 0
+    }
+    if (local) {
+      throw new Error(
+        `本地归档不完整，缺：${left.join('、')}\n` +
+        `  归档是别人打的那一份，缺件说明它过期了；不想离线就撤掉 --local / VSS_ASSETS_LOCAL。`
+      )
+    }
+    say(`归档不完整（还缺 ${left.join('、')}），回上游`)
   }
 
   const proxy = process.env.VSYNTH_FONT_PROXY

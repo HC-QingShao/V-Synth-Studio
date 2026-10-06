@@ -6,12 +6,22 @@
  *     node tools/fetch_tools.mjs --only ffmpeg        # 只补一件
  *     node tools/fetch_tools.mjs --force
  *     node tools/fetch_tools.mjs --root <目录>        # 补到别处（验证用）
+ *     node tools/fetch_tools.mjs --local <目录>       # 只用 <目录> 里的 tools.zip，不联网
  *
  * 这个仓库只放源码。`tools/`（ffmpeg + yt-dlp + LibreSVIP CLI + onnxruntime，
  * 约 200MB）不入库，但它由 tauri.conf.json 的 `bundle.resources` 打进安装包，
  * 缺了程序就没有音频转换 / MV 下载 / 工程格式互转 / 人声转 MIDI。
  *
  * 各件产物**互相独立**：各自一个上游、各自判「缺不缺」。URL 见 `UPSTREAM`（按平台分列）。
+ *
+ * ── 三条来源，按这个顺序试 ──────────────────────────────────────────
+ *
+ *   1. `--local <目录>` / `VSS_ASSETS_LOCAL`：那里的 `tools.zip`，**不联网**；
+ *   2. 自建归档（`assets.mjs::SELF_HOST_BASE`，布局与本仓库一致，境内直连可用）；
+ *   3. 上游各发布页（`UPSTREAM`，GitHub，境内常不通）。
+ *
+ * ⚠️ 归档里可能缺件（旧归档就没有 onnxruntime），所以解完要**重新判一次**，
+ * 剩下的回上游补 —— 不能让「归档解过了」被当成「齐了」。
  *
  * ⚠️ 「运行期去哪儿找」只在 `src-tauri/src/artifact/mod.rs` 那张表里写一次。
  * 下面 `verify()` 列的是「打包前必须存在」的文件，与 `build.rs` 的 MUST_HAVE 对应 ——
@@ -26,7 +36,7 @@ import {spawnSync} from 'node:child_process'
 
 import * as assets from './assets.mjs'
 import {HERE, copyFile, download, isDir, isFile, mkdirp, rmrf, say, walkFiles, isMain} from './lib.mjs'
-import {archiveSuffix, extractAny, findOne} from './archive.mjs'
+import {archiveSuffix, extractAny, findOne, obtainArchive} from './archive.mjs'
 
 // ── 平台 ─────────────────────────────────────────────────────────────
 // 三端各取各的上游二进制，落点形状一致（`tools/ffmpeg/bin/ffmpeg`…），
@@ -146,16 +156,42 @@ function installOnnxruntime(ex, base) {
   if (isFile(src)) copyFile(src, path.join(dstDir, shared))
 }
 
-export async function fetchTools(tmp, force, root, only = null) {
+export async function fetchTools(tmp, force, root, only = null, local = null) {
   const base = destOf(assets.byId('tools'), root)
   mkdirp(base)
 
   const todo = only === null ? Object.keys(PARTS) : Object.keys(PARTS).filter((n) => only.includes(n))
-  const missing = todo.filter((name) => force || !isFile(path.join(base, needRel(name))))
+  let missing = todo.filter((name) => force || !isFile(path.join(base, needRel(name))))
   if (missing.length === 0) {
     say(`  ${todo.join(' / ')} 都已在，跳过`)
     return
   }
+
+  /* 先试归档（一次补齐整件，且是境内可达/本地的来源）。解完必须重新判一次：
+     归档可能缺件（旧归档没有 onnxruntime），而「解过了」不等于「齐了」。 */
+  const zip = await obtainArchive({
+    file: assets.SELF_HOST_ARCHIVE.tools,
+    tmp,
+    localDir: local,
+    url: assets.selfHostUrl('tools'),
+  })
+  if (zip) {
+    say(`  从归档解到 ${base}`)
+    extractAny(zip, base, tmp)
+    missing = todo.filter((name) => force || !isFile(path.join(base, needRel(name))))
+    if (missing.length === 0) {
+      say(`  ${todo.join(' / ')} 都齐了`)
+      return
+    }
+    if (local) {
+      throw new Error(
+        `本地归档里缺：${missing.join('、')}\n` +
+        `  归档是别人打的那一份，缺件说明它过期了；不想离线就撤掉 --local / VSS_ASSETS_LOCAL。`
+      )
+    }
+    say(`  归档里还缺 ${missing.join('、')}，回上游补`)
+  }
+
   say(`  缺：${missing.join('、')}`)
 
   const failed = []
@@ -240,11 +276,12 @@ export function verify(selected, root) {
 
 // ── 主流程 ──────────────────────────────────────────────────────────
 function parseArgs(argv) {
-  const a = {only: 'all', force: false, root: null}
+  const a = {only: 'all', force: false, root: null, local: null}
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--force') a.force = true
     else if (argv[i] === '--only') a.only = argv[++i]
     else if (argv[i] === '--root') a.root = argv[++i]
+    else if (argv[i] === '--local') a.local = argv[++i]
   }
   return a
 }
@@ -252,7 +289,9 @@ function parseArgs(argv) {
 export async function main(argv = process.argv.slice(2)) {
   const a = parseArgs(argv)
   const root = a.root ? path.resolve(a.root) : HERE
+  const local = a.local || (process.env.VSS_ASSETS_LOCAL || '').trim() || null
   if (a.root) say(`程序根（--root）：${root}`)
+  if (local) say(`本地归档目录（--local）：${local}`)
 
   const problems = assets.selfCheck()
   if (problems.length) {
@@ -274,7 +313,7 @@ export async function main(argv = process.argv.slice(2)) {
   mkdirp(tmp)
 
   say('补齐 tools/')
-  await fetchTools(tmp, a.force, root, want.length === 1 && want[0] === 'all' ? null : want)
+  await fetchTools(tmp, a.force, root, want.length === 1 && want[0] === 'all' ? null : want, local)
 
   say('')
   say('校验')

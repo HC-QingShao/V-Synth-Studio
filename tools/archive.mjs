@@ -18,7 +18,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import {fileURLToPath} from 'node:url'
-import {isFile, mkdirp, rmdirIf, say, walkFiles} from './lib.mjs'
+import {download, isFile, mkdirp, rmdirIf, say, walkFiles} from './lib.mjs'
 
 /** 解压之后必须存在的东西写在表里，解压本身只负责「别炸、别越界」。 */
 function safeJoin(base, name) {
@@ -172,6 +172,34 @@ export function findOne(where, filename) {
     if (path.basename(f) === filename) return f
   }
   return null
+}
+
+/**
+ * 取一份**自建归档**（`tools.zip` / `jizura.zip`）：本地目录 → 自建地址 → 回 `null`（走上游）。
+ *
+ * ⚠️ 给了 `localDir` 就是明确要求走本地（离线打包）：那里没有这个 zip 要**报错**，
+ * 不能静默回上游 —— 那会让「离线」这件事看起来做到了，而实际在联网。
+ *
+ * 自建地址失败只回 `null` 不抛：它本来就是退路，取不到该继续走上游。
+ */
+export async function obtainArchive({file, tmp, localDir, url}) {
+  if (localDir) {
+    const p = path.join(localDir, file)
+    if (!isFile(p)) {
+      throw new Error(`本地归档目录里没有 ${file}：${p}\n  --local / VSS_ASSETS_LOCAL 指的是「存着归档的目录」。`)
+    }
+    say(`  用本地归档：${p}`)
+    return p
+  }
+  if (!url) return null
+  const out = path.join(tmp, file)
+  try {
+    await download(url, out, {tries: 1})
+    return out
+  } catch (e) {
+    say(`  自建归档取不到（${e.constructor.name}: ${e.message}），回上游`)
+    return null
+  }
 }
 
 // 自测入口：`node tools/archive.mjs --selftest`

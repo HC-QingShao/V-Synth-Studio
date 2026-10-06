@@ -53,6 +53,11 @@ data/midi/
 # ⚠️ 只忽略 jizura 这一层，别写成 public/vendor/（以后往里加别的东西不被连坐）。
 public/vendor/jizura/*
 
+# ── 自建归档（`tools/pack_archives.mjs` 的产物）────────────────────────────
+# `资料归档/tools.zip` 与 `jizura.zip`：几百 MB，由人手工传到 CDN，供别的机器 /
+# 境内不翻墙的人补齐。它是**分发物**，不是源码，也不该进包（随包内容另有路径）。
+/资料归档/
+
 # Python
 __pycache__/
 

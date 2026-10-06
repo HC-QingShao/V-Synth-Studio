@@ -31,6 +31,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import process from 'node:process'
 import {HERE} from './lib.mjs'
 
 export const MB = 1024 * 1024
@@ -58,6 +59,28 @@ export const UPSTREAM_JIZURA_FILES = ['zh-hans/index.html', 'LICENSE']
 // 用 `github.com/<repo>/raw/<sha>/<path>`：`raw.githubusercontent.com` 在境内直连不通。
 export const UPSTREAM_JIZURA_URL =
   `https://github.com/${UPSTREAM_JIZURA_REPO}/raw/${UPSTREAM_JIZURA_SHA}/`
+
+// ── 自建分发点：两块随包产物的第二条来源 ─────────────────────────────
+// `tools/` 与 `public/vendor/jizura/` 的上游是 GitHub 与 Google Fonts，境内直连常不通，
+// 而它们又是打包必需的（缺了不报错，只是功能悄悄少一块）。所以除上游之外还认一份
+// **我们自己打的归档**，布局与本仓库一致（`tools/pack_archives.mjs` 产出的就是它），
+// 放在已经托管 models / runtime 的那个 CDN 目录里。
+//
+// ⚠️ 归档是**退路、不是替代**：它由人手工上传，会随网盘状态失效；上游才是权威。
+// 完全不联网（用别人拷来的归档）用 `--local <目录>` 或 `VSS_ASSETS_LOCAL=<目录>`；
+// 换托管地址用 `VSS_ASSETS_URL`。
+export const SELF_HOST_BASE =
+  (process.env.VSS_ASSETS_URL || '').trim() ||
+  'https://1856610041.cdn.123clouddisk.com/1856610041/V-Synth-Studio'
+
+/** 自建归档的文件名（键与 [`ARTIFACTS`] 的 id 对应）。 */
+export const SELF_HOST_ARCHIVE = {tools: 'tools.zip', jizura: 'jizura.zip'}
+
+/** 某件产物的自建归档地址（没配就回 `null`，调用方只走上游）。 */
+export function selfHostUrl(id) {
+  const file = SELF_HOST_ARCHIVE[id]
+  return file ? `${SELF_HOST_BASE}/${file}` : null
+}
 
 /**
  * zip 里的一棵子树：从 `src` 收，条目名加前缀 `prefix`。
