@@ -14,6 +14,7 @@ import {downloadBytes, extractedBytes, installLabel, type InstallStep, useInstal
 import type {PageProps} from './types'
 import './Svsep.css'
 import {translate} from '@/lib/i18n'
+import {useI18n} from '@/lib/i18n'
 
 /**
  * 音轨分离 —— 在线（MVSEP）与离线（内嵌引擎）两条路。
@@ -185,6 +186,7 @@ function ResultTracks({
 /* ════════════════════════════════════════════════════════ 主组件 ══ */
 
 export function Svsep({onNavigate, onToast}: PageProps) {
+    const {t} = useI18n()
     const [st, setSt] = useState<SvsepStatus | null>(null)
     const [backend, setBackend] = useState<Record<string, unknown> | null>(null)
     /**
@@ -650,9 +652,9 @@ export function Svsep({onNavigate, onToast}: PageProps) {
             <div className="svsep-col">
                 <Panel>
                     <PanelHead
-                        title={translate("音频素材")}
+                        title={t("音频素材")}
                         desc="交给分离引擎"
-                        extra={file ? <Chip tone="ok">{translate("已选")}</Chip> : <Chip>{translate("未选")}</Chip>}
+                        extra={file ? <Chip tone="ok">{t("已选")}</Chip> : <Chip>{t("未选")}</Chip>}
                     />
                     {/*
             系统「打开」对话框（`pick_paths`），**不画自制的虚线落区** ——
@@ -690,7 +692,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                 </Panel>
 
                 <Panel>
-                    <PanelHead title={translate("分离模式")} desc="两种引擎产出不同"/>
+                    <PanelHead title={t("分离模式")} desc="两种引擎产出不同"/>
                     <div className="choice-grid">
                         {ENGINES.map((e) => (
                             <button
@@ -702,7 +704,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                             >
                 <span className="choice-head">
                   <span className="choice-label">{e.name}</span>
-                    {engine === e.id && <Chip tone="accent">{translate("已选")}</Chip>}
+                    {engine === e.id && <Chip tone="accent">{t("已选")}</Chip>}
                 </span>
                                 <span className="choice-desc">{e.desc}</span>
                                 <span className="svsep-cost">{e.cost}</span>
@@ -730,10 +732,10 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                 </Panel>
 
                 <Panel>
-                    <PanelHead title={translate("分离完做什么")}/>
+                    <PanelHead title={t("分离完做什么")}/>
                     <ol className="svsep-steps">
-                        <li>{translate("在右边试听每一轨，确认分得干净。")}</li>
-                        <li>{translate("「下载」存到系统下载目录；也可点「打开输出目录」直接看。")}</li>
+                        <li>{t("在右边试听每一轨，确认分得干净。")}</li>
+                        <li>{t("「下载」存到系统下载目录；也可点「打开输出目录」直接看。")}</li>
                         <li>
                             要变调、变速、转格式，把它带回
                             <button type="button" className="dep-link" onClick={() => onNavigate('audio')}>
@@ -760,8 +762,8 @@ export function Svsep({onNavigate, onToast}: PageProps) {
             <div className="svsep-col">
                 <Panel>
                     <PanelHead
-                        title={translate("离线引擎")}
-                        extra={running ? <Chip tone="ok">{translate("运行中")}</Chip> : <Chip>{translate("空闲")}</Chip>}
+                        title={t("离线引擎")}
+                        extra={running ? <Chip tone="ok">{t("运行中")}</Chip> : <Chip>{t("空闲")}</Chip>}
                     />
                     <div className="svsep-stats">
                         <Stat
@@ -817,7 +819,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                         </DownloadProgress>
                     )}
                     {installError && (
-                        <Finding level="warn" title={translate("安装失败")}>
+                        <Finding level="warn" title={t("安装失败")}>
                             {installError}
                         </Finding>
                     )}
@@ -825,7 +827,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                     {dl?.delete?.active && (
                         <div className="dep-progress">
                             <div className="dep-progress-head">
-                                <span>{translate("正在删除依赖文件…")}</span>
+                                <span>{t("正在删除依赖文件…")}</span>
                                 <span className="dim">{dl.delete.files} 个 / {formatBytes(dl.delete.bytes)}</span>
                             </div>
                             <ProgressBar pct={null}/>
@@ -859,9 +861,9 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                选 GPU 时后端会顺手把没下的加速包下上（A 卡 / 核显）。 */}
                     <div className="btn-row">
                         <div className="svsep-infer">
-                            <span className="dim">{translate("推理方式")}</span>
+                            <span className="dim">{t("推理方式")}</span>
                             <GlassSegmentedControl
-                                aria-label={translate("推理方式")}
+                                aria-label={t("推理方式")}
                                 items={INFER_MODES}
                                 value={inferMode}
                                 onValueChange={(v: string) => void doSetInfer(asInferMode(v))}
@@ -876,7 +878,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                         </Button>
                     </div>
                     {st?.dml?.nvidia && (
-                        <p className="hint">{translate("检测到 NVIDIA 显卡：选 GPU（或自动）就走 CUDA，不需要加速包。")}</p>
+                        <p className="hint">{t("检测到 NVIDIA 显卡：选 GPU（或自动）就走 CUDA，不需要加速包。")}</p>
                     )}
                     {/* 上次暂停过（或者上次下载到一半被关掉了）：状态里只有一句「有半个包」，
               而用户真正需要知道的是「再点就是接着下，已经下过的那部分还在」 */}
@@ -901,7 +903,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                                 要删掉：运行时（解压后 {formatBytes(extractedBytes(st?.runtime))}）、模型（解压后{' '}
                                 {formatBytes(extractedBytes(st?.models))}）、分离引擎自带的 ffmpeg。
                                 删完离线分离就用不了了，得重新下 <strong>约 {formatBytes(allBytes)}</strong>。
-                                已经分离出来的音频<strong>{translate("不会被删")}</strong>。
+                                已经分离出来的音频<strong>{t("不会被删")}</strong>。
                             </>
                         }
                         idleText={
@@ -912,12 +914,12 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                         }
                     />
                     {st?.lastError && (
-                        <Finding level="warn" title={translate("上次启动失败")}>
+                        <Finding level="warn" title={t("上次启动失败")}>
                             {st.lastError}
                         </Finding>
                     )}
                     {err && (
-                        <Finding level="warn" title={translate("读不到分离状态")}>
+                        <Finding level="warn" title={t("读不到分离状态")}>
                             {err}
                         </Finding>
                     )}
@@ -925,17 +927,17 @@ export function Svsep({onNavigate, onToast}: PageProps) {
 
                 <Panel>
                     <PanelHead
-                        title={translate("分离进度")}
+                        title={t("分离进度")}
                         extra={
                             task ? (
                                 <JobStatusChip status={svsepTaskStatus(task.status)}/>
                             ) : (
-                                <Chip>{translate("待提交")}</Chip>
+                                <Chip>{t("待提交")}</Chip>
                             )
                         }
                     />
                     {!task ? (
-                        <p className="empty">{translate("左边选好文件与模式，点「开始分离」。")}</p>
+                        <p className="empty">{t("左边选好文件与模式，点「开始分离」。")}</p>
                     ) : (
                         <>
                             <div className="dep-progress">
@@ -950,12 +952,12 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                                     百分比是按时间估的，会停在 90% 再跳到 100%；「已用时 N 秒」才是真信息。
                                 </p>
                             )}
-                            {task.error && <Finding level="warn" title={translate("分离失败")}>{task.error}</Finding>}
+                            {task.error && <Finding level="warn" title={t("分离失败")}>{task.error}</Finding>}
                             {/* ⚠️ 上游把「处理失败」也标成 done：`separator_engine` 吞掉异常、回一个空结果，
                  于是任务收场是「完成 100%」而 `outputs` 是空的。不单独处理的话界面什么都不显示，
                  看着就是「点了没反应」—— 读不出音频时就是这个下场。 */}
                             {task.status === 'done' && outputs.length === 0 && (
-                                <Finding level="warn" title={translate("没有分离出结果")}>
+                                <Finding level="warn" title={t("没有分离出结果")}>
                                     引擎读不出这段音频，换个文件或换个格式再试。
                                 </Finding>
                             )}
@@ -987,11 +989,11 @@ export function Svsep({onNavigate, onToast}: PageProps) {
 
                 <Panel>
                     <PanelHead
-                        title={translate("在线分离：MVSEP")}
+                        title={t("在线分离：MVSEP")}
                         desc="效果最好；音频会上传到 MVSEP 服务器"
-                        extra={<Chip tone="warn">{translate("需上传")}</Chip>}
+                        extra={<Chip tone="warn">{t("需上传")}</Chip>}
                     />
-                    <Finding level="warn" title={translate("隐私提示")}>
+                    <Finding level="warn" title={t("隐私提示")}>
                         上传的音频会发到 MVSEP 的服务器；介意就用离线引擎。
                     </Finding>
                     <p className="svsep-url">{MVSEP_URL}</p>
@@ -1007,7 +1009,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
 
                 {queues && (queues.uvr || queues.roformer) && (
                     <Panel>
-                        <PanelHead title={translate("引擎队列")} desc="本地任务是串行的，一次只跑一个"/>
+                        <PanelHead title={t("引擎队列")} desc="本地任务是串行的，一次只跑一个"/>
                         <div className="svsep-stats">
                             <Stat
                                 label="二轨（UVR）"
@@ -1028,7 +1030,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                     desc="离线分离用的是第三方引擎"
                     tags={
                         <>
-                            <Chip tone="accent">{translate("B站炽阳001")}</Chip>
+                            <Chip tone="accent">{t("B站炽阳001")}</Chip>
                             <Chip>UVR5</Chip>
                         </>
                     }
@@ -1055,12 +1057,12 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                     onOpenChange={(o) => {
                         if (!o) closeDirAsk(false)
                     }}
-                    title={translate("选运行时的存放位置")}
+                    title={t("选运行时的存放位置")}
                     description={`要下 ${formatBytes(downloadBytes(st?.runtime))}，解开后占 ${formatBytes(extractedBytes(st?.runtime))}`}
                 >
                     <p className="hint">默认位置：{dirAsk?.writableDefault}</p>
                     {dirAsk && !dirAsk.rootWritable && (
-                        <p className="hint">{translate("程序目录不可写，所以要另选一个位置。")}</p>
+                        <p className="hint">{t("程序目录不可写，所以要另选一个位置。")}</p>
                     )}
                     <div className="dir-actions">
                         <span className="spacer"/>
