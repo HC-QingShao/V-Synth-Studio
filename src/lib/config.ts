@@ -39,6 +39,11 @@ export interface AppConfig {
     pvSentLyrics?: string
     /** 人声转 MIDI 的输出目录 */
     midiOutDir?: string
+    /* 背景壁纸：`""` 静态图 / `"we:current"` 跟随 WE 当前壁纸 / `"we:<id>"` 固定一张。
+       `wallpaperPaused` 暂停动画；`weDir` 手动指定的 WE 目录（自动找不到时才用）。 */
+    wallpaper?: string
+    wallpaperPaused?: boolean
+    weDir?: string
 
     [k: string]: unknown
 }

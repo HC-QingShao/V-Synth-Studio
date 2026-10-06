@@ -9,6 +9,7 @@ import {BackdropToneProvider, GlassProvider, ScrollEdge, useGlassPolicy,} from '
 import {levelMaterial, levelTransparency, useGlassLevel} from '@/lib/useGlass'
 import {useNavLens} from '@/lib/useNavLens'
 import {materialOptions} from '@/components/Glass'
+import {WallpaperLayer} from '@/components/WallpaperLayer'
 /*
  * 页面**按需加载**：首屏只拿外壳，访问哪一页才拉哪一包
  * （各页那 8 份 CSS 也跟着分包，不再一次性压在 `index.css` 后面）。
@@ -205,6 +206,9 @@ export default function App() {
             enableSvgAuto={material === 'liquid'}
         >
             <ToneScope>
+                {/* 背景壁纸（最底层，`body::before` 的替代品）。放这里而不是放页面里：
+                    它整站只有一份，换页不该重建 —— 场景壁纸重建一次要几秒。 */}
+                <WallpaperLayer/>
                 <div className="app">
                     {/* 平栏的代价：内容会从它下面经过。库的 ScrollEdge 就是治这个的
               （它的注释：「不是装饰、不是色块，只在内容真的从浮动 UI 下面经过时出现」）。

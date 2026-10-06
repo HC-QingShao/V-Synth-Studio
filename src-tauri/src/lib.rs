@@ -20,6 +20,7 @@ mod midi_transcribe;
 mod net;
 mod platform;
 mod svsep;
+mod wallpaper;
 
 /// 追加一行日志到 `<可写目录>/app.log`。
 ///
@@ -188,6 +189,9 @@ pub fn run() {
             ipc::tools::tools_detect,
             ipc::tools::tools_launch,
             ipc::tools::artifacts_status,
+            /* ── 背景壁纸（只读用户自己的 Wallpaper Engine 库）── */
+            ipc::wallpaper::wallpaper_scan,
+            ipc::wallpaper::wallpaper_pkg,
             /* ── 工程转换 ── */
             ipc::convert::convert_collect,
             ipc::convert::convert_inspect,

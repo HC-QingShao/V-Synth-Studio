@@ -78,6 +78,15 @@ pub fn default_config() -> Value {
            为什么要给用户选：那一坨 4.7 GB / 解压后 7.4 GB，装在 C 盘紧张的人身上是灾难；
            而安装版默认落在 Program Files 下**根本写不进去**（见 `svsep::runtime_base`）。 */
         "svsepRuntimeDir": "",
+        /* 背景壁纸（背景层）：
+             `""`            静态图（默认，就是 `public/img/bg/` 那两张）
+             `"we:current"`  跟随 Wallpaper Engine 当前正在用的那张
+             `"we:<id>"`     固定用库里某一张（id 是工坊 id 或项目目录名）
+           `wallpaperPaused` 暂停动画（壁纸那层停帧，静态图照常）——性能不好时的一键开关。
+           `weDir` 手动指定的 Wallpaper Engine 目录（自动找不到时才需要）。 */
+        "wallpaper": "",
+        "wallpaperPaused": false,
+        "weDir": "",
         /* 显卡加速（DirectML）**没有开关**：它由推理方式推出来
            （`svsep::apply_infer_mode`），两者本来就是一件事。这里只留一个说明，
            别再加 `svsepDml` / `svsepDmlSix` 那种键 —— 多一个键就多一处要同步的判据。 */

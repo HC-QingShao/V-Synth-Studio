@@ -5,6 +5,7 @@ import type {PageProps, ToastFn} from './types'
 import {Button} from '@/components/Button'
 import {Field, TextInput} from '@/components/Field'
 import {Chip, GlassPanel, Panel, PanelHead, Stat} from '@/components/Panel'
+import {Wallpaper} from '@/components/WallpaperSettings'
 import {Upstream} from '@/components/Credit'
 import {GlassSlider} from '@ttqtt/liquid-glass-react'
 import {GLASS_LEVELS, type GlassLevel, useGlassLevel} from '@/lib/useGlass'
@@ -24,6 +25,7 @@ import './Settings.css'
 
 const SECTIONS = [
     {id: 'appearance', label: '外观'},
+    {id: 'wallpaper', label: '壁纸'},
     {id: 'paths', label: '路径'},
     {id: 'tools', label: '外部工具'},
     {id: 'about', label: '关于'},
@@ -113,6 +115,9 @@ export function Settings({
             <div className="stack-lg settings-body">
                 {section === 'appearance' && (
                     <Appearance theme={theme} onThemeChange={onThemeChange}/>
+                )}
+                {section === 'wallpaper' && (
+                    <Wallpaper onToast={onToast}/>
                 )}
                 {section === 'paths' && (
                     <Paths cfg={cfg} state={state} onSave={save} onToast={onToast}/>
