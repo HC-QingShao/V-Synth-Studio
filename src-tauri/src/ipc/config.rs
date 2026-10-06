@@ -112,7 +112,15 @@ fn legacy_value(raw: &str) -> Value {
 /// ⚠️ 脱敏字段（以 `Cookie` 结尾的键）收到占位串 `已设置` 时**跳过不写**：
 /// 前端拿到的是打码后的值，原样提交回来是正常行为，不能把真值覆盖掉。
 fn set_config_inner(st: &super::AppState, patch: Value) -> Result<Value, String> {
-    let mut cfg = st.config_snapshot();
+    // Serialize read-modify-write operations through the in-memory config lock.
+    // Without this, two concurrent set_config calls can both read the same old
+    // snapshot, save different patches, and let the later disk write silently
+    // erase the earlier change.
+    let mut guard = st
+        .config
+        .lock()
+        .map_err(|_| "配置锁坏了".to_string())?;
+    let mut cfg = guard.clone();
     if let (Some(dst), Some(src)) = (cfg.as_object_mut(), patch.as_object()) {
         for (k, v) in src {
             if k.ends_with("Cookie") && v.as_str() == Some(super::config_file::MASKED) {
@@ -121,11 +129,11 @@ fn set_config_inner(st: &super::AppState, patch: Value) -> Result<Value, String>
             dst.insert(k.clone(), v.clone());
         }
     }
+
     super::config_file::save_config(&st.writable, &cfg)
         .map_err(|e| format!("保存配置失败：{e}"))?;
-    if let Ok(mut guard) = st.config.lock() {
-        *guard = cfg.clone();
-    }
+    *guard = cfg.clone();
+
     // 回显也要打码：不然刚保存完 Cookie，明文就从响应里漏回前端了
     Ok(serde_json::json!({ "config": super::config_file::mask_secrets(&cfg) }))
 }
