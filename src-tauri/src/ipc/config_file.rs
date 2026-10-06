@@ -78,11 +78,9 @@ pub fn default_config() -> Value {
            为什么要给用户选：那一坨 4.7 GB / 解压后 7.4 GB，装在 C 盘紧张的人身上是灾难；
            而安装版默认落在 Program Files 下**根本写不进去**（见 `svsep::runtime_base`）。 */
         "svsepRuntimeDir": "",
-        /* 显卡加速（DirectML）：`auto`（默认，非 N 卡就开）/ `on` / `off`；
-           `svsepDmlSix` = 六轨（RoFormer）也走 DirectML —— 上游怕爆显存写死了 False，
-           我们替它打开这条路，界面必须提示「建议显存 ≥ 8 GB」。 */
-        "svsepDml": "auto",
-        "svsepDmlSix": false,
+        /* 显卡加速（DirectML）**没有开关**：它由推理方式推出来
+           （`svsep::apply_infer_mode`），两者本来就是一件事。这里只留一个说明，
+           别再加 `svsepDml` / `svsepDmlSix` 那种键 —— 多一个键就多一处要同步的判据。 */
     })
 }
 

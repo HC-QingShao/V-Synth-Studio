@@ -394,6 +394,14 @@ pub async fn svsep_set_runtime_dir(st: super::St<'_>, dir: String) -> Cmd {
 /// 自己的五轮重试就够。所以它**不抢** `DL_ACTIVE`，界面也不该拿它当大包显示。
 #[tauri::command]
 pub async fn svsep_dml_download(st: super::St<'_>) -> Cmd {
+    start_dml_download(st.inner())
+}
+
+/// 下加速包（24 MB）的**唯一入口**。
+///
+/// 两个地方用它：用户在「安装扩展包」的链条里走到那一步，以及选了 GPU 推理时的
+/// 自动补装（见 `svsep_set_inference`）。回包是「开始了」，不是「下完了」。
+fn start_dml_download(st: &Arc<super::AppState>) -> Result<Value, String> {
     if DL_ACTIVE.load(Ordering::Relaxed) == 1 {
         let now = DL_KIND.lock().ok().and_then(|k| *k).unwrap_or("包");
         return Err(format!("{now}正在下载中，等它下完再下加速包。"));
@@ -401,8 +409,8 @@ pub async fn svsep_dml_download(st: super::St<'_>) -> Cmd {
     if DEL_ACTIVE.load(Ordering::Relaxed) {
         return Err("正在删除依赖文件，等它删完再下".into());
     }
-    let root = st.inner().root.clone();
-    let state = st.inner().clone();
+    let root = st.root.clone();
+    let state = Arc::clone(st);
     if let Ok(mut k) = DL_KIND.lock() {
         *k = Some("dml");
     }
@@ -423,8 +431,7 @@ pub async fn svsep_dml_download(st: super::St<'_>) -> Cmd {
         let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, None);
         let res = crate::svsep::download_dml(&root, &ctl, note_progress).await;
         if res.is_ok() {
-            let (mode, six) = dml_settings(&state);
-            crate::svsep::apply_dml(&root, &mode, six);
+            crate::svsep::apply_infer_mode(&root, &state.svsep.data());
         }
         DL_ACTIVE.store(0, Ordering::Relaxed);
         if let Ok(mut k) = DL_KIND.lock() {
@@ -437,66 +444,6 @@ pub async fn svsep_dml_download(st: super::St<'_>) -> Cmd {
         }
     });
     Ok(json!({ "started": true }))
-}
-
-/// directml 的设置怎么读（`auto` / `on` / `off` + 六轨开关）。
-fn dml_settings(st: &super::AppState) -> (String, bool) {
-    let cfg = st.config_snapshot();
-    let mode = cfg
-        .get("svsepDml")
-        .and_then(Value::as_str)
-        .unwrap_or("auto")
-        .to_string();
-    let six = cfg
-        .get("svsepDmlSix")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    (mode, six)
-}
-
-/// 开 / 关显卡加速，以及「六轨也用」。
-///
-/// ⚠️ 六轨那条是**改上游 Python 的一行硬编码**（上游怕爆显存写死了 False）。
-/// 显存不够时是整个任务失败、不是自动退回 CPU —— 界面上必须写清「建议显存 ≥ 8 GB」。
-#[tauri::command]
-pub async fn svsep_set_dml(st: super::St<'_>, mode: Option<String>, six: Option<bool>) -> Cmd {
-    if st.inner().svsep.probe().await {
-        return Err("分离服务正跑着，先停掉再改加速设置".into());
-    }
-    let (mut cur_mode, mut cur_six) = dml_settings(&st.inner());
-    if let Some(m) = mode {
-        let m = m.trim().to_lowercase();
-        if !["auto", "on", "off"].contains(&m.as_str()) {
-            return Err(format!("不认识的模式：{m}（只能是 auto / on / off）"));
-        }
-        cur_mode = m;
-    }
-    if let Some(s) = six {
-        cur_six = s;
-    }
-    if cur_mode != "off" && !crate::svsep::dml_installed(&st.inner().root) {
-        return Err("还没下加速包。先点「安装扩展包」，或者单独下这个 24 MB 的包。".into());
-    }
-    let mut cfg = st.config_snapshot();
-    let Some(map) = cfg.as_object_mut() else {
-        return Err("配置文件坏了（不是一个 JSON 对象）".into());
-    };
-    map.insert("svsepDml".to_string(), json!(cur_mode));
-    map.insert("svsepDmlSix".to_string(), json!(cur_six));
-    super::config_file::save_config(&st.writable, &cfg)
-        .map_err(|e| format!("保存配置失败：{e}"))?;
-    if let Ok(mut g) = st.config.lock() {
-        *g = cfg;
-    }
-    let (active, six_ok) = crate::svsep::apply_dml(&st.inner().root, &cur_mode, cur_six);
-    Ok(json!({
-        "mode": cur_mode,
-        "six": cur_six,
-        "active": active,
-        "sixActive": six_ok,
-        "installed": crate::svsep::dml_installed(&st.inner().root),
-        "nvidia": crate::svsep::nvidia_present(),
-    }))
 }
 
 /// 暂停下载：`.part` 留着，下次点「继续下载」带 Range 接着下。
@@ -774,42 +721,108 @@ pub async fn svsep_backend_status(st: super::St<'_>) -> Cmd {
 
 /// 推理方式：自动 / GPU / CPU。
 ///
-/// 服务在跑就问它（它会顺手探一下硬件，给出 `badge` / `hardware`）；**服务没跑
-/// 就读盘**上的 `<数据目录>/inference_settings.json` —— 任务一结束服务就自动关
-/// 了（`auto_stop_when_idle`），可这个设置项在界面上得一直看得见、改得动。
+/// 服务在跑就问它（它会顺手探一下硬件，给出 `badge` / `detail`）；**服务没跑
+/// 就读盘**上的 `inference_settings.json` —— 任务一结束服务就自动关了
+/// （`auto_stop_when_idle`），可这个设置项在界面上得一直看得见、改得动。
+///
+/// ⚠️ 回包里的 `mode` **一律换成用户选的那个**（不是交给引擎的那个）：自动档在有
+/// N 卡时会以 `gpu` 交给引擎（见 `engine_mode`），照上游的回包写会把界面从「自动」
+/// 翻成「GPU」—— 用户没动过设置，按钮自己跳了。
 #[tauri::command]
 pub async fn svsep_inference_get(st: super::St<'_>) -> Cmd {
+    let user = crate::svsep::read_infer_mode(&st.inner().svsep.data());
     if st.inner().svsep.probe().await {
         if let Ok(v) = st.inner().svsep.get("/api/inference-settings").await {
-            return Ok(v);
+            return Ok(stamp_user_mode(v, &user));
         }
     }
-    let mode = read_infer_mode(&st.inner().svsep);
-    Ok(infer_reply(&mode, true))
+    Ok(infer_reply(&user, true))
 }
 
 /// 设置推理方式。`{ mode: "auto" | "cpu" | "gpu" }`
+///
+/// 三件事一起做，顺序不能换：写盘（服务没起来时下次启动读它）→ 落到运行时上
+/// （加速包该开该关，见 `crate::svsep::apply_infer_mode`）→ 告诉正在跑的服务
+/// （它把 mode 缓存在进程内存里，光改文件它不认）。
 #[tauri::command]
 pub async fn svsep_set_inference(st: super::St<'_>, mode: String) -> Cmd {
-    if !["auto", "cpu", "gpu"].contains(&mode.trim().to_ascii_lowercase().as_str()) {
-        return Err("无效模式，请选择 auto / cpu / gpu".into());
+    /* 认不出的值在这里就回错，别悄悄当 `auto` —— 这条命令只有界面在调，收到怪值
+       说明前端或调用方写错了，静默兜底会把这种错藏起来。 */
+    let raw = mode.trim().to_ascii_lowercase();
+    if !["auto", "cpu", "gpu"].contains(&raw.as_str()) {
+        return Err(format!("无效模式：{mode}（只能是 auto / cpu / gpu）"));
     }
-    let mode = normalize_mode(&mode);
-    write_infer_mode(&st.inner().svsep, &mode)?;
-    /* 服务在跑就再告诉它一声：它把 mode 缓存在进程内存里（`inference_settings.py`
-    的 `_cached_mode`），光改文件它不认。它没起来、或者答错了都不影响结果 ——
-    下次启动读的就是这个文件。 */
+    let mode = crate::svsep::normalize_infer_mode(&raw);
+    crate::svsep::write_infer_mode(&st.inner().svsep.data(), &mode)?;
+    crate::svsep::apply_infer_mode(&st.inner().root, &st.inner().svsep.data());
+
+    /* 选了 GPU 但加速包还没下（A 卡 / 核显）→ 顺手开始下：24 MB，界面上有现成的
+       进度条（`dl.kind == "dml"`）。N 卡不需要它（那份 CUDA 在运行时里）。
+       ⚠️ 失败不阻断：设置已经存下来了，下不动只是这次没生效。 */
+    let mut dml_downloading = false;
+    if mode == "gpu"
+        && !crate::svsep::nvidia_present()
+        && !crate::svsep::dml_installed(&st.inner().root)
+    {
+        dml_downloading = start_dml_download(st.inner()).is_ok();
+    }
+
     if st.inner().svsep.probe().await {
         if let Ok(v) = st
             .inner()
             .svsep
-            .post_json("/api/inference-settings", &json!({ "mode": mode }))
+            .post_json(
+                "/api/inference-settings",
+                &json!({ "mode": engine_mode(&mode) }),
+            )
             .await
         {
-            return Ok(v);
+            return Ok(with_dml_flag(stamp_user_mode(v, &mode), dml_downloading));
         }
     }
-    Ok(infer_reply(&mode, true))
+    Ok(with_dml_flag(infer_reply(&mode, true), dml_downloading))
+}
+
+/// 交给引擎的那个 mode。
+///
+/// ⚠️ **自动档 + 有 N 卡 = `gpu`**：上游 `resolve_plan()` 的自动分支要求
+/// `onnx_cuda` 为真才走 CUDA，而「torch 认得 CUDA、onnxruntime 没暴露 CUDA provider」
+/// 时它会一路落到最底下的 CPU（两个 `elif` 都带 `not torch_cuda`）—— 而 N 卡用户的
+/// 「自动」意图显然是走 GPU。`gpu` 分支还会在真不可用时给出能照做的提示
+/// （装 CUDA 运行库 / 装 DirectML），比静悄悄用 CPU 强。
+///
+/// A 卡不动：那边自动档本来就靠 `hw.mode == "dml"` 生效，而 DML 由
+/// `apply_infer_mode` 挂上（装了包就挂）。
+fn engine_mode(user: &str) -> &'static str {
+    match user {
+        "cpu" => "cpu",
+        "gpu" => "gpu",
+        _ => {
+            if crate::svsep::nvidia_present() {
+                "gpu"
+            } else {
+                "auto"
+            }
+        }
+    }
+}
+
+/// 把上游回包里的 `mode` 换回用户选的那个（其余字段原样透传）。
+fn stamp_user_mode(mut v: Value, user: &str) -> Value {
+    if let Some(o) = v.as_object_mut() {
+        o.insert("mode".into(), json!(user));
+    }
+    v
+}
+
+/// 标一下「加速包正在下」——界面据此把进度条挂到下载状态上。
+fn with_dml_flag(mut v: Value, downloading: bool) -> Value {
+    if downloading {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("dmlDownloading".into(), json!(true));
+        }
+    }
+    v
 }
 
 /* ══════════════════════════════ 小工具 ══════════════════════════════ */
@@ -884,42 +897,9 @@ async fn auto_stop_when_idle(st: Arc<super::AppState>) {
     st.svsep.stop();
 }
 
-/// 推理方式的设置文件 —— 上游存的就是 `<数据目录>/inference_settings.json`
-/// （`inference_settings.py::_SETTINGS_PATH`）。
-fn inference_file(svsep: &crate::svsep::Svsep) -> std::path::PathBuf {
-    svsep.data().join("inference_settings.json")
-}
-
-/// 读盘上的推理方式（没有文件、文件坏了都算 `auto`，跟上游一致）。
-fn read_infer_mode(svsep: &crate::svsep::Svsep) -> String {
-    std::fs::read_to_string(inference_file(svsep))
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.get("mode").and_then(Value::as_str).map(str::to_string))
-        .map(|m| normalize_mode(&m))
-        .unwrap_or_else(|| "auto".to_string())
-}
-
-/// 认不出的一律回 `auto`（上游的 `VALID_MODES` 也只有这三个）。
-fn normalize_mode(m: &str) -> String {
-    let m = m.trim().to_ascii_lowercase();
-    if ["auto", "cpu", "gpu"].contains(&m.as_str()) {
-        m
-    } else {
-        "auto".to_string()
-    }
-}
-
-/// 写盘上的推理方式。格式跟上游 `set_mode()` 一样（`{"mode": …}`、两空格缩进），
-/// 这样服务和界面谁先谁后写都不会打架。
-fn write_infer_mode(svsep: &crate::svsep::Svsep, mode: &str) -> Result<(), String> {
-    let path = inference_file(svsep);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败：{e}"))?;
-    }
-    let body = serde_json::to_string_pretty(&json!({ "mode": mode })).unwrap_or_default();
-    std::fs::write(&path, body).map_err(|e| format!("写推理设置失败：{e}"))
-}
+/// 推理方式的读写全在 `crate::svsep`（`read_infer_mode` / `write_infer_mode` /
+/// `apply_infer_mode`）—— 启动路径（`ipc/state.rs`）也要用同一份，放在这一层
+/// 它就得被 import 两次，判据也会分叉。
 
 /// 服务没跑时给界面的回包 —— 键跟上游 `public_settings()` 对得上，`offline`
 /// 让界面知道这不是现探的硬件。
@@ -981,10 +961,11 @@ mod tests {
 
     #[test]
     fn inference_mode_falls_back_to_auto() {
-        assert_eq!(normalize_mode("GPU"), "gpu");
-        assert_eq!(normalize_mode(" cpu "), "cpu");
-        assert_eq!(normalize_mode("cuda"), "auto");
-        assert_eq!(normalize_mode(""), "auto");
+        use crate::svsep::normalize_infer_mode;
+        assert_eq!(normalize_infer_mode("GPU"), "gpu");
+        assert_eq!(normalize_infer_mode(" cpu "), "cpu");
+        assert_eq!(normalize_infer_mode("cuda"), "auto");
+        assert_eq!(normalize_infer_mode(""), "auto");
         assert!(infer_badge("gpu").starts_with("GPU"));
     }
 

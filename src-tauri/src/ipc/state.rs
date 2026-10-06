@@ -98,20 +98,11 @@ impl AppState {
                 .and_then(Value::as_str)
                 .unwrap_or(""),
         );
-        /* 显卡加速（DirectML）按配置生效：改 `._pth` 里那一行 + 六轨补丁。
+        /* 加速包（DirectML）按**推理方式**生效：改 `._pth` 里那一行、并复位六轨补丁。
         ⚠️ 必须在 `init_runtime_base` **之后** —— 那两个文件都在运行时目录里，
         而运行时目录刚刚才定下来。 */
-        crate::svsep::apply_dml(
-            &paths.root,
-            config
-                .get("svsepDml")
-                .and_then(Value::as_str)
-                .unwrap_or("auto"),
-            config
-                .get("svsepDmlSix")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        );
+        let svsep_data = crate::svsep::data_dir(&paths.root, &paths.writable, paths.installed);
+        crate::svsep::apply_infer_mode(&paths.root, &svsep_data);
         let svsep =
             crate::svsep::Svsep::new(paths.root.clone(), paths.writable.clone(), paths.installed);
         /*

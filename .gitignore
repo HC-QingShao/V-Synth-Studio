@@ -14,6 +14,9 @@ dist-ssr
 # `tsc -b` 的增量编译信息（tsconfig.app.tsbuildinfo 等）：每次构建都重写，
 # 内容随机器与时间变，入库只会制造无意义的 diff。
 *.tsbuildinfo
+# 绿色版的 exe：把 `src-tauri/target/release/v-synth-studio.exe` 拷到程序根目录就是
+# 绿色版（`resolve_paths` 认的是「这一层有没有 data/resources.json」）。产物不入库。
+/v-synth-studio.exe
 
 # ── 运行期状态（data/ 里的只读数据仍入库，只排除程序自己写的那几个）──
 # config.json 是**用户偏好 + 登录 Cookie 的唯一真相**，程序首次运行自己生成。

@@ -396,6 +396,71 @@ pub fn apply_dml(root: &Path, mode: &str, six: bool) -> (bool, bool) {
     (active, six_ok)
 }
 
+/* ── 推理方式（自动 / GPU / CPU）：加速包该不该生效由它推出来 ─────────────── */
+
+/// 推理方式的设置文件（上游 `inference_settings.py::_SETTINGS_PATH`）。
+pub fn inference_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("inference_settings.json")
+}
+
+/// 读盘上的推理方式。没有文件、文件坏了、值认不出，一律 `auto` —— 与上游
+/// `_load_raw()` 同一套判据（服务和界面谁先写都不打架）。
+pub fn read_infer_mode(data_dir: &Path) -> String {
+    std::fs::read_to_string(inference_file(data_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("mode").and_then(Value::as_str).map(str::to_string))
+        .map(|m| normalize_infer_mode(&m))
+        .unwrap_or_else(|| "auto".to_string())
+}
+
+/// 认不出的一律回 `auto`（上游的 `VALID_MODES` 也只有这三个）。
+pub fn normalize_infer_mode(m: &str) -> String {
+    let m = m.trim().to_ascii_lowercase();
+    if ["auto", "cpu", "gpu"].contains(&m.as_str()) {
+        m
+    } else {
+        "auto".to_string()
+    }
+}
+
+/// 写盘上的推理方式。格式跟上游 `set_mode()` 一样（`{"mode": …}`、两空格缩进）。
+pub fn write_infer_mode(data_dir: &Path, mode: &str) -> Result<(), String> {
+    let path = inference_file(data_dir);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败：{e}"))?;
+    }
+    let body = serde_json::to_string_pretty(&json!({ "mode": mode })).unwrap_or_default();
+    std::fs::write(&path, body).map_err(|e| format!("写推理设置失败：{e}"))
+}
+
+/// 推理方式 → 加速包（DirectML）该不该生效，并落到 `._pth` 上。返回是否生效。
+///
+/// **由推理方式推出来，不再单开开关** —— 两者本来就是一件事，分开摆只会让用户
+/// 在两处做同一个决定。
+///
+/// - `cpu`：关掉。DirectML 那份 ORT 里没有 CUDA，开着会把 `import onnxruntime`
+///   顶成 DML 版，连「纯 CPU」用的都不是原来那一份。
+/// - `gpu`：N 卡关（CUDA 才是快的那个），A 卡 / 核显开。
+/// - `auto`：装了包、且这台机器没有 N 卡才开。
+///
+/// ⚠️ 六轨补丁一律传 `false`：上游说 RoFormer 走 DirectML 容易 OOM，而显存不够时是
+/// **整个任务失败**（不是退回 CPU）。这里顺手把它关回去，老用户开过的也一并复位。
+pub fn apply_infer_mode(root: &Path, data_dir: &Path) -> bool {
+    let want = match read_infer_mode(data_dir).as_str() {
+        "cpu" => "off",
+        "gpu" => {
+            if nvidia_present() {
+                "off"
+            } else {
+                "on"
+            }
+        }
+        _ => "auto",
+    };
+    apply_dml(root, want, false).0
+}
+
 /// 下 DirectML 加速包（24 MB）→ 解到 `<运行时>/dml` → 立刻生效。
 ///
 /// 24 MB 没必要走那套支持续传的大包机制（`.part` + 记号 + 五轮重试都在

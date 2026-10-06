@@ -6,9 +6,8 @@ import {Icon} from '@/components/Icon'
 import {Chip, Finding, Panel, PanelHead, ProgressBar, Stat} from '@/components/Panel'
 import {DangerZone, DownloadProgress} from '@/components/Dependency'
 import {JobStatusChip, svsepTaskStatus} from '@/components/Job'
-import {GlassDialog, GlassSegmentedControl, GlassSwitch} from '@ttqtt/liquid-glass-react'
+import {GlassDialog, GlassSegmentedControl} from '@ttqtt/liquid-glass-react'
 import {DropHint, useFilePick} from '@/components/FilePick'
-import {getConfig} from '@/lib/config'
 import {baseName, errText, formatBytes} from '@/lib/format'
 import {POLL_STATUS, useStatusPoll} from '@/lib/polling'
 import {downloadBytes, extractedBytes, installLabel, type InstallStep, useInstaller,} from '@/lib/useInstaller'
@@ -206,8 +205,9 @@ export function Svsep({onNavigate, onToast}: PageProps) {
     const [dirInfo, setDirInfo] = useState<SvsepRuntimeDir | null>(null)
     const [dirAsk, setDirAsk] = useState<SvsepRuntimeDir | null>(null)
     const dirAskResolve = useRef<((ok: boolean) => void) | null>(null)
-    /* 六轨也走 DirectML —— 后端状态里没有这一项，读配置里的 `svsepDmlSix` 当镜像 */
-    const [sixDml, setSixDml] = useState(() => Boolean(getConfig()['svsepDmlSix']))
+    /* 六轨（RoFormer）不再提供「也用显卡」的开关：上游说它走 DirectML 容易 OOM，
+       而显存不够时是**整个任务失败**（不是退回 CPU）。后端每次都会把那一行复位成
+       上游的 False —— 老用户开过的也一并收回去。 */
 
     /** 拉一次总体状态。失败**不弹 toast**（轮询失败会刷屏），把错误放进 err 显示 */
     const [err, setErr] = useState<string | null>(null)
@@ -392,13 +392,27 @@ export function Svsep({onNavigate, onToast}: PageProps) {
         }
     }, [])
 
+    /**
+     * 改推理方式。
+     *
+     * 加速包（DirectML）跟着这一档走，所以这里没有第二个开关：后端写完盘就把
+     * `._pth` 调好 —— 选 GPU 时若加速包还没下（A 卡 / 核显），它会顺手开始下，
+     * 进度走下面那条现成的进度条（`dl.kind == 'dml'`）。
+     */
     const doSetInfer = async (m: InferMode) => {
         const prev = inferMode
         setInferMode(m) // 先把按钮点亮，别让网络往返卡住手感
         try {
             const v = await api.svsepSetInference(m)
-            setInferMode(asInferMode(v.mode ?? m))
-            onToast(`推理方式：${INFER_LABEL[m]}（下次分离生效）`, 'ok')
+            setInferMode(asInferMode((v.mode as string) ?? m))
+            /* 选了 GPU 而加速包还没下：后端已经在下了（24 MB），说一声 —— 用户得知道
+               接下来那几十秒在干嘛，进度条就在下面。 */
+            onToast(
+                v.dmlDownloading
+                    ? '推理方式：GPU（正在下载显卡加速包，下完自动生效）'
+                    : `推理方式：${INFER_LABEL[m]}（下次分离生效）`,
+                'ok',
+            )
         } catch (e) {
             setInferMode(prev) // 没存下来就把按钮弹回去
             onToast(errText(e), 'err')
@@ -509,22 +523,6 @@ export function Svsep({onNavigate, onToast}: PageProps) {
         try {
             await api.svsepStopDownload()
             onToast('已停止下载，半个包也删掉了，下次从头下', 'info')
-        } catch (e) {
-            onToast(errText(e), 'err')
-        }
-    }
-
-    /**
-     * 开 / 关显卡加速（以及「六轨也用」）。
-     *
-     * ⚠️ 只传要改的那一项，另一项由后端从配置里读 —— 传全量的话，两个开关几乎同时
-     * 被点时会互相盖掉。回包是权威值（`six` 会被它纠正），照它写回本地镜像。
-     */
-    const doSetDml = async (patch: { mode?: 'auto' | 'on' | 'off'; six?: boolean }) => {
-        try {
-            const r = await api.svsepSetDml(patch)
-            setSixDml(r.six)
-            void refresh()
         } catch (e) {
             onToast(errText(e), 'err')
         }
@@ -851,45 +849,14 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                         </div>
                     )}
 
-                    {/* ── 显卡加速（DirectML：A 卡 / 核显）───────────────
-              只在装了加速包（或者正在装它）之后出现 —— 没装的时候摆一排开关，
-              用户点了只会拿到一句「还没下加速包」。 */}
-                    {(st?.dml?.installed || installer.stepKey === 'dml') && (
-                        <>
-                            {/* ⚠️ 这两行用 `.btn-row` 而不是自己造类名：面板里的行距只认
-                  `.field` / `.btn-row` / `.drop-hint` 这三种（见 `index.css`），
-                  用别的容器两行会贴在一起。 */}
-                            <div className="btn-row">
-                                <span className="field-label">显卡加速（A 卡 / 核显）</span>
-                                <span className="spacer"/>
-                                <GlassSwitch
-                                    aria-label="显卡加速"
-                                    checked={!!st?.dml?.active}
-                                    disabled={!st?.dml?.installed || installer.installing || !!dl?.active}
-                                    onCheckedChange={(on) => void doSetDml({mode: on ? 'on' : 'off'})}
-                                />
-                            </div>
-                            {st?.dml?.nvidia && <p className="hint">检测到 NVIDIA 显卡，自动走 CUDA（更快）</p>}
-                            <div className="btn-row">
-                                <span className="field-label">六轨也用显卡</span>
-                                <span className="spacer"/>
-                                <GlassSwitch
-                                    aria-label="六轨也用显卡"
-                                    checked={sixDml}
-                                    disabled={!st?.dml?.installed || installer.installing || !!dl?.active}
-                                    onCheckedChange={(on) => void doSetDml({six: on})}
-                                />
-                            </div>
-                            <p className="hint">
-                                DirectML 跑六轨容易爆显存，建议显存 ≥ 8 GB；爆了就把它关掉。
-                            </p>
-                        </>
-                    )}
-
+                    {/* 推理方式（自动 / GPU / CPU）：原版软件在标题栏上就有这个三选一。
+               服务开着时改它立刻转给 Python（它清了引擎单例，下个任务按新方式来）；
+               服务关着时写盘上的 `inference_settings.json`，下次分离读它。
+               ⛔ 别再加「显卡加速」「六轨也用」那种开关：加速包该不该生效**由这一档
+               推出来**（后端 `svsep::apply_infer_mode`）—— 分成两处，用户就得在两处
+               做同一个决定，还可能出现「选了 GPU 但加速没开」这种自相矛盾的状态。
+               选 GPU 时后端会顺手把没下的加速包下上（A 卡 / 核显）。 */}
                     <div className="btn-row">
-                        {/* 推理方式（自动 / GPU / CPU）：原版软件在标题栏上就有这个三选一。
-                服务开着时改它立刻转给 Python（它清了引擎单例，下个任务按新方式来）；
-                服务关着时写盘上的 `inference_settings.json`，下次分离读它。 */}
                         <div className="svsep-infer">
                             <span className="dim">推理方式</span>
                             <GlassSegmentedControl
@@ -907,6 +874,9 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                             输出目录
                         </Button>
                     </div>
+                    {st?.dml?.nvidia && (
+                        <p className="hint">检测到 NVIDIA 显卡：选 GPU（或自动）就走 CUDA，不需要加速包。</p>
+                    )}
                     {/* 上次暂停过（或者上次下载到一半被关掉了）：状态里只有一句「有半个包」，
               而用户真正需要知道的是「再点就是接着下，已经下过的那部分还在」 */}
                     {dl?.resumable && !dl.active && (

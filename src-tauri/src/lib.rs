@@ -224,7 +224,6 @@ pub fn run() {
             ipc::svsep::svsep_runtime_dir,
             ipc::svsep::svsep_set_runtime_dir,
             ipc::svsep::svsep_dml_download,
-            ipc::svsep::svsep_set_dml,
             ipc::svsep::svsep_download_pause,
             ipc::svsep::svsep_download_stop,
             ipc::svsep::svsep_deps_delete,

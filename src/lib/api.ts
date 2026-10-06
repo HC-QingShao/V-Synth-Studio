@@ -70,14 +70,6 @@ export const api = {
      */
     svsepDmlDownload: () => call<{ started: boolean }>('svsep_dml_download'),
     /**
-     * 开 / 关显卡加速，以及「六轨也用」。
-     *
-     * ⚠️ 有 NVIDIA 显卡时**不要**自动打开：DirectML 那份 ORT 里没有 CUDA，
-     * 给 N 卡机器开它反而更慢。这件事由后端探（`dml.nvidia`），前端不猜。
-     */
-    svsepSetDml: (patch: { mode?: 'auto' | 'on' | 'off'; six?: boolean }) =>
-        call<SvsepDmlState>('svsep_set_dml', {mode: patch.mode, six: patch.six}),
-    /**
      * 暂停下载：`.part` 留着，下次点下载会带 `Range` 接着下。
      *
      * 不是立刻停 —— 后端是在下一块数据到达时才收手，所以按完按钮界面还会走一两秒。
@@ -118,10 +110,13 @@ export const api = {
      * 分离服务在跑就问它（它顺手探硬件、给 badge）；**服务没跑就读盘**上的
      * `inference_settings.json` —— 任务一结束服务会自动关，可这个开关得一直能用。
      * 回包键跟上游 `public_settings()` 一致：`{mode, effective_mode, badge, detail, offline?}`。
+     *
+     * ⚠️ 加速包（DirectML）**没有单独的开关**：它跟着这一档走。选 `gpu` 时若还没下，
+     * 后端会顺手开始下并在回包里带 `dmlDownloading: true`（进度走 `svsepStatus().download`）。
      */
     svsepInference: () => call<Record<string, unknown>>('svsep_inference_get'),
     svsepSetInference: (mode: 'auto' | 'cpu' | 'gpu') =>
-        call<Record<string, unknown>>('svsep_set_inference', {mode}),
+        call<Record<string, unknown> & { dmlDownloading?: boolean }>('svsep_set_inference', {mode}),
 
     /* ── 人声转 MIDI（原生 Rust，无子进程）──────────────────── */
     /**
@@ -712,16 +707,6 @@ export interface SvsepDml {
     dir: string
     /** 压缩包体积（24 MB 上下） */
     zipBytes: number
-}
-
-/** `svsep_set_dml` 的回包 —— 比状态里那一块多一个「六轨补丁生效没」 */
-export interface SvsepDmlState {
-    mode: 'auto' | 'on' | 'off'
-    six: boolean
-    active: boolean
-    sixActive: boolean
-    installed: boolean
-    nvidia: boolean
 }
 
 /**
