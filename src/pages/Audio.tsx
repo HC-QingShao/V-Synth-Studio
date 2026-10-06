@@ -18,7 +18,6 @@ import {useJob} from '@/lib/useJob'
 import type {Job} from '@/lib/types'
 import type {PageProps} from './types'
 import './Audio.css'
-import {translate} from '@/lib/i18n'
 import {useI18n} from '@/lib/i18n'
 
 /**
