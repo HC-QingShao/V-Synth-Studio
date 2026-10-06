@@ -7,6 +7,7 @@ import {Panel} from '@/components/Panel'
 import {errText, formatBytes} from '@/lib/format'
 import type {PageProps} from './types'
 import './Pv.css'
+import {translate} from '@/lib/i18n'
 
 /**
  * 文字 PV：把歌词做成动态歌词视频（JIZURA）。
@@ -508,7 +509,7 @@ export function Pv({state, onNavigate, onToast}: PageProps) {
                     ref={frameRef}
                     className="pv-frame"
                     src={SRC}
-                    title="JIZURA 文字 PV 编辑器"
+                    title={translate("JIZURA 文字 PV 编辑器")}
                     allow="autoplay; clipboard-write; fullscreen"
                 />
             </div>
