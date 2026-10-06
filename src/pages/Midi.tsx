@@ -161,6 +161,7 @@ function TranscribeResult({result, preview, taskId}: {
     preview: MidiNote[]
     taskId: string | null
 }) {
+    const {t} = useI18n()
     return (
         <Panel>
             <PanelHead
