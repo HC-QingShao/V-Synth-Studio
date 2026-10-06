@@ -13,6 +13,7 @@ import {Chip, Panel, PanelHead} from '@/components/Panel'
 import type {PageProps, ToastTone} from './types'
 import './Lyrics.css'
 import {translate} from '@/lib/i18n'
+import {useI18n} from '@/lib/i18n'
 
 /**
  * 歌词（网易云专区）：搜歌 → 取歌词 → 导出 LRC / SRT → 下载封面 / 歌曲 → 带去「文字 PV」。
@@ -172,6 +173,7 @@ const fmtDuration = (sec?: number): string =>
 /* ══════════════════════════════════════════════════════════════════ 视图 ══ */
 
 export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) {
+    const {t} = useI18n()
     const config = state?.config ?? {}
 
     const [keyword, setKeyword] = useState('')
@@ -609,7 +611,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
             {/* ── 左栏：取词的三个入口 ─────────────────────────────── */}
             <div className="lyrics-col">
                 <Panel>
-                    <PanelHead title={translate("搜索歌曲")} desc="点一条取歌词"/>
+                    <PanelHead title={t("搜索歌曲")} desc="点一条取歌词"/>
                     <div className="stack">
                         <Field
                             label="关键词"
@@ -618,7 +620,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                             <div className="input-group">
                                 <TextInput
                                     value={keyword}
-                                    placeholder={translate("歌名 / 歌手，回车搜索（例如：千本桜）")}
+                                    placeholder={t("歌名 / 歌手，回车搜索（例如：千本桜）")}
                                     onChange={(e) => setKeyword(e.target.value)}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') void doSearch()
@@ -633,9 +635,9 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                         {searchErr && <p className="lyrics-error">{searchErr}</p>}
 
                         {hits === null ? (
-                            <p className="hint">{translate("搜到的歌会列在这里。")}</p>
+                            <p className="hint">{t("搜到的歌会列在这里。")}</p>
                         ) : hits.length === 0 ? (
-                            <p className="hint">{translate("没有结果。换个关键词再试，或者直接把歌曲链接粘到下面。")}</p>
+                            <p className="hint">{t("没有结果。换个关键词再试，或者直接把歌曲链接粘到下面。")}</p>
                         ) : (
                             <div className="lyrics-results">
                                 {hits.map((s, i) => (
@@ -654,8 +656,8 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                       </span>
                     </span>
                                         {feeLabel(s.fee) && <Chip tone="warn">{feeLabel(s.fee)}</Chip>}
-                                        {s.playable === true && <Chip tone="ok">{translate("能下载")}</Chip>}
-                                        {s.playable === false && <Chip tone="err">{translate("不能下载")}</Chip>}
+                                        {s.playable === true && <Chip tone="ok">{t("能下载")}</Chip>}
+                                        {s.playable === false && <Chip tone="err">{t("不能下载")}</Chip>}
                                         {!!s.durationSec && <Chip>{fmtDuration(s.durationSec)}</Chip>}
                                     </button>
                                 ))}
@@ -665,7 +667,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                 </Panel>
 
                 <Panel>
-                    <PanelHead title={translate("粘贴链接")} desc="不想搜就复制链接过来；手上有 LRC 文件也可以直接读"/>
+                    <PanelHead title={t("粘贴链接")} desc="不想搜就复制链接过来；手上有 LRC 文件也可以直接读"/>
                     <div className="stack">
                         <Field
                             label="歌曲链接 / ID"
@@ -674,7 +676,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                             <div className="input-group">
                                 <TextInput
                                     value={url}
-                                    placeholder={translate("粘贴歌曲链接，例如 https://music.163.com/#/song?id=186016")}
+                                    placeholder={t("粘贴歌曲链接，例如 https://music.163.com/#/song?id=186016")}
                                     onChange={(e) => setUrl(e.target.value)}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') void doParseLink()
@@ -695,13 +697,13 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                             </Button>
                             <DropHint dragging={dragging} busy={droppingLrc} text=".lrc 文件也可以直接拖进这个窗口"/>
                         </Field>
-                        {importing && <p className="hint">{translate("正在读取本地歌词…")}</p>}
+                        {importing && <p className="hint">{t("正在读取本地歌词…")}</p>}
                     </div>
                 </Panel>
 
                 <Panel>
                     <PanelHead
-                        title={translate("登录")}
+                        title={t("登录")}
                         desc="手机号验证码，或者填浏览器里的 Cookie"
                         extra={
                             <div className="lyrics-controls">
@@ -730,7 +732,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                                     maxLength={11}
                                     autoComplete="off"
                                     value={phone}
-                                    placeholder={translate("11 位手机号，不用填 +86")}
+                                    placeholder={t("11 位手机号，不用填 +86")}
                                     onChange={(e) => setPhone(e.target.value)}
                                 />
                                 <Button
@@ -749,7 +751,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                                     maxLength={10}
                                     autoComplete="off"
                                     value={captcha}
-                                    placeholder={translate("手机收到的短信验证码")}
+                                    placeholder={t("手机收到的短信验证码")}
                                     onChange={(e) => setCaptcha(e.target.value)}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') void doLogin()
@@ -776,7 +778,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                                 rows={3}
                                 spellCheck={false}
                                 value={neteaseCookie}
-                                placeholder={translate("MUSIC_U=...　（怎么拿见下面的步骤说明）")}
+                                placeholder={t("MUSIC_U=...　（怎么拿见下面的步骤说明）")}
                                 onChange={(e) => setNeteaseCookie(e.target.value)}
                             />
                             <span className="lyrics-controls">
@@ -798,11 +800,11 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                 </Button>
               </span>
                         </Field>
-                        <p className="lyrics-login-msg">{translate("⚠ 等同于账号登录态，别分享、别截图")}</p>
+                        <p className="lyrics-login-msg">{t("⚠ 等同于账号登录态，别分享、别截图")}</p>
 
                         {/* 怎么拿 Cookie：用户基本都不知道，写细一点，能照着做 */}
                         <details className="lyrics-help">
-                            <summary>{translate("怎么拿到 Cookie？（点开看步骤）")}</summary>
+                            <summary>{t("怎么拿到 Cookie？（点开看步骤）")}</summary>
                             <div className="lyrics-help-body">
                                 <ol>
                                     <li>
@@ -815,12 +817,12 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                                         切到 <strong>Application</strong> 标签（中文界面是「应用程序」，在顶部一排里）。
                                     </li>
                                     <li>
-                                        左边展开 <strong>Cookies</strong>{translate(" → 点 ")}<code>https://music.163.com</code>。
+                                        左边展开 <strong>Cookies</strong>{t(" → 点 ")}<code>https://music.163.com</code>。
                                     </li>
                                     <li>
                                         在列表里找到名为 <code>MUSIC_U</code> 的那一行，双击 Value 那一格，全选复制。
                                     </li>
-                                    <li>{translate("回到这里粘进上面的框，点「保存」。")}</li>
+                                    <li>{t("回到这里粘进上面的框，点「保存」。")}</li>
                                 </ol>
                                 <p className="lyrics-login-msg">
                                     只复制 MUSIC_U 那一格的值，或把整行 Cookie 粘进来。
@@ -842,9 +844,9 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
             <div className="lyrics-col">
                 <Panel>
                     <PanelHead
-                        title={translate("歌词预览")}
+                        title={t("歌词预览")}
                         desc="原文与译文分开显示"
-                        extra={<GlassSegmentedControl aria-label={translate("预览方式")} items={MODES} value={mode}
+                        extra={<GlassSegmentedControl aria-label={t("预览方式")} items={MODES} value={mode}
                                                       onValueChange={setMode}/>}
                     />
                     <div className="stack">
@@ -873,7 +875,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                                 </div>
                             </div>
                         ) : (
-                            <p className="hint">{translate("还没有选中歌曲。")}</p>
+                            <p className="hint">{t("还没有选中歌曲。")}</p>
                         )}
 
                         {previewErr && <p className="lyrics-error">{previewErr}</p>}
@@ -901,7 +903,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                 </Panel>
 
                 <Panel>
-                    <PanelHead title={translate("保存")} desc="LRC 给播放器，SRT 给剪辑 / 字幕"/>
+                    <PanelHead title={t("保存")} desc="LRC 给播放器，SRT 给剪辑 / 字幕"/>
                     <div className="stack">
                         <Field
                             label="格式"
@@ -909,7 +911,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                         >
               <span className="lyrics-controls">
                 <GlassSegmentedControl
-                    aria-label={translate("导出格式")}
+                    aria-label={t("导出格式")}
                     items={[
                         {value: 'lrc', label: 'LRC'},
                         {value: 'srt', label: 'SRT'},
@@ -918,8 +920,8 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                     onValueChange={setFormat}
                 />
                 <span className="spacer"/>
-                <span className="field-hint">{translate("双语")}</span>
-                <GlassSwitch aria-label={translate("双语导出")} checked={bilingual} onCheckedChange={setBilingual}/>
+                <span className="field-hint">{t("双语")}</span>
+                <GlassSwitch aria-label={t("双语导出")} checked={bilingual} onCheckedChange={setBilingual}/>
               </span>
                         </Field>
 
@@ -929,7 +931,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                         >
                             <DirectoryInput
                                 value={outDir}
-                                placeholder={translate("歌词保存目录…")}
+                                placeholder={t("歌词保存目录…")}
                                 onChange={(v) => {
                                     flags.current.edited = true
                                     setOutDir(v)
@@ -943,7 +945,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                         >
                             <TextInput
                                 value={name}
-                                placeholder={translate("文件名（默认：歌名 - 歌手）")}
+                                placeholder={t("文件名（默认：歌名 - 歌手）")}
                                 onChange={(e) => setName(e.target.value)}
                             />
                         </Field>
