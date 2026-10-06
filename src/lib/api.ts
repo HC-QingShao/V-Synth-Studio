@@ -152,6 +152,17 @@ export const api = {
      */
     midiDeleteDeps: () => call<{ files: number; bytes: number; note: string }>('midi_deps_delete'),
     /**
+     * 读推理方式（自动 / GPU / CPU）与这台机器的显卡现状。
+     *
+     * 回包与 `midiStatus().device` **同源**，单开一条是为了让那一格能独立刷新。
+     */
+    midiDevice: () => call<MidiDevice>('midi_device_get'),
+    /**
+     * 写推理方式。**盘上记的是意愿，不是硬件现状** —— 所以后端不校验这台机器能不能用
+     * GPU，界面按 `device.cuda.ok` 拦。真跑起来用不了时引擎自己退回 CPU 并写进任务日志。
+     */
+    midiSetDevice: (mode: MidiDeviceMode) => call<MidiDevice>('midi_device_set', {mode}),
+    /**
      * 提交一次扒谱。传的是**本机音频路径**，不是文件字节 ——
      * 音频本来就在用户盘上，多传一遍只是把同一份数据从磁盘搬到磁盘。
      *
@@ -855,12 +866,36 @@ export interface MidiDownload {
     resumable: boolean
 }
 
+/** 推理方式（自动 / GPU / CPU）。落盘在 `<可写>/midi/midi_settings.json`。 */
+export type MidiDeviceMode = 'auto' | 'gpu' | 'cpu'
+
+/**
+ * 推理方式的现状 —— `midi_device_get` / `midi_device_set` 的回包，也是
+ * `midi_status().device` 那一块。
+ */
+export interface MidiDevice {
+    mode: MidiDeviceMode
+    cuda: {
+        /**
+         * ⚠️ 报的是「CUDA **建得出会话**」（后端真拿一张 1×1 的图试过），**不是**「保证跑得完」。
+         * GPU 那一格能不能选**只看这个值**：`navigator.gpu`、显卡名字之类都与 ONNX Runtime 无关。
+         */
+        ok: boolean
+        /** 后端算好的一句话，`!ok` 时直接显示给用户，界面别自己另编一套 */
+        detail: string
+    }
+    /** 选了 GPU 但当前用不上时后端给的话术；空串 = 没有要说的 */
+    note: string
+}
+
 export interface MidiStatus {
     runtime: MidiRuntime
     models: MidiModels
     license: string
     source: string
     download: MidiDownload
+    /** 推理方式与显卡现状（与 `midiDevice()` 同源） */
+    device: MidiDevice
     /** 正在跑的那次任务 id；null = 空闲（同时只允许一个） */
     running: string | null
 }

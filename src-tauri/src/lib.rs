@@ -237,6 +237,8 @@ pub fn run() {
             ipc::svsep::svsep_open_output,
             /* ── 人声转 MIDI ── */
             ipc::midi::midi_status,
+            ipc::midi::midi_device_get,
+            ipc::midi::midi_device_set,
             ipc::midi::midi_models_download,
             ipc::midi::midi_download_stop,
             ipc::midi::midi_deps_delete,

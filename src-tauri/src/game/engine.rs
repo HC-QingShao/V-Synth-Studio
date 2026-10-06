@@ -6,8 +6,9 @@
 //!
 //! 需要两样东西：
 //!
-//! * **ONNX Runtime 动态库** —— 直接复用音轨分离运行时里那份
-//!   `runtime/Lib/site-packages/onnxruntime/capi/onnxruntime.dll`，不额外下载。
+//! * **ONNX Runtime 动态库** —— 随包在 `tools/onnxruntime/`，也可以借用音轨分离
+//!   运行时里那份（`runtime/Lib/site-packages/onnxruntime/capi/onnxruntime.dll`，
+//!   那份是 GPU 构建）。挑哪一份由 `midi_transcribe::runtime_dll` 定。
 //! * **三个模型图** —— `encoder.onnx` / `segmenter.onnx` / `estimator.onnx`，
 //!   权重是 CC BY-NC-SA 4.0（非商业），所以**不进仓库、不随包分发**，
 //!   由用户在界面上点一下从官方 release 下载。
@@ -24,6 +25,7 @@ use ort::value::Value as OrtValue;
 
 use super::algo;
 use super::midi::Note;
+use crate::midi_transcribe::Device;
 
 /// 一个音符。`pitch` 是**半音值**（A4 = 69），写 MIDI 时才取整 —— 保留小数
 /// 是为了界面能显示「偏高/偏低多少音分」。
@@ -44,6 +46,8 @@ pub struct Options {
     pub language: i64,
     /// 每个 ONNX 会话的 intra-op 线程数。见 `ort_session` 的注释。
     pub threads: usize,
+    /// 推理方式。只有 `Gpu` 会去挂 CUDA，其余一律纯 CPU。
+    pub device: Device,
 }
 
 impl Default for Options {
@@ -52,6 +56,7 @@ impl Default for Options {
             steps: algo::D3PM_STEPS,
             language: 4,
             threads: 4,
+            device: Device::Auto,
         }
     }
 }
@@ -70,22 +75,40 @@ pub struct Report {
     pub estimator_seconds: f64,
     /// D3PM 每一步的边界数，出问题时是唯一的现场记录
     pub per_step: Vec<usize>,
-    /// 这次用的执行后端。恒为 `"CPU"`（不挂执行后端），留着是为了结果文件里的字段稳定。
+    /// 这一次**实际**用的执行后端：`"CPU"` 或 `"CUDA"`。
+    ///
+    /// ⚠️ 报的是「三个会话都建成了的那个后端」—— GPU 路上任何一张图建不出来都会
+    /// 整条退回 CPU，这时这里就是 `"CPU"`，而 ORT 的原话在任务日志里
+    /// （见 `build_sessions`）。
     pub backend: &'static str,
 }
 
 /// 建一个 ONNX 会话。
 ///
-/// **必须显式指定 CPU provider**：不指定的话 ORT 会按自身默认去挑后端，
-/// 结果依机器而定（失败或静默降级两种结果都很难查）。
+/// **必须显式指定 provider**：不指定的话 ORT 会按自身默认去挑后端，结果依机器
+/// 而定（失败或静默降级两种结果都很难查）。`gpu = false` 时只挂 CPU —— 随包的
+/// `onnxruntime.dll` 是 CUDA 构建，不指定就会去加载 CUDA，在没有 N 卡的机器上
+/// 失败或悄悄降级。
 ///
 /// 线程数也是显式设的：这个图偏窄，**ORT 按核数自己选的那个默认值反而最慢**
 /// —— 8 核上 T=300 的单步 segmenter：1 线程 2.66 s、4 线程 1.04 s、8 线程 3.30 s。
-fn ort_session(path: &Path, name: &str, threads: usize) -> Result<Session, String> {
-    let mut builder = Session::builder()
-        .map_err(|e| format!("{name}: {e}"))?
-        .with_execution_providers([ort::ep::CPU::default().build()])
-        .map_err(|e| format!("{name}: CPU provider: {e}"))?;
+fn ort_session(path: &Path, name: &str, threads: usize, gpu: bool) -> Result<Session, String> {
+    let mut builder = Session::builder().map_err(|e| format!("{name}: {e}"))?;
+    if gpu {
+        /* CUDA 在前、CPU 在后。⛔ 别去掉 `error_on_failure()`：默认是 `fail_silently`，
+        那样 CUDA 注册不上时会悄悄给一个 CPU 会话，界面显示在用 GPU、其实一直在 CPU
+        上慢慢跑（这一格恰是用户专门去解锁的，报错比装死好）。 */
+        builder = builder
+            .with_execution_providers([
+                ort::ep::CUDA::default().build().error_on_failure(),
+                ort::ep::CPU::default().build(),
+            ])
+            .map_err(|e| format!("{name}: CUDA provider: {e}"))?;
+    } else {
+        builder = builder
+            .with_execution_providers([ort::ep::CPU::default().build()])
+            .map_err(|e| format!("{name}: CPU provider: {e}"))?;
+    }
     builder = builder
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
         .map_err(|e| format!("{name}: 优化级别: {e}"))?;
@@ -97,18 +120,50 @@ fn ort_session(path: &Path, name: &str, threads: usize) -> Result<Session, Strin
         .map_err(|e| format!("{name}: 载入 {} 失败：{e}", path.display()))
 }
 
-/// 建三个会话（encoder / segmenter / estimator）。
+/// 建三个会话（encoder / segmenter / estimator），返回 `(enc, seg, est, 实际后端)`。
+///
+/// **GPU 建不出来就整条退回 CPU**，不让整首转录音失败：解锁 GPU 的代价只是装过
+/// 音轨分离，驱动太老、显卡太旧、显存不够都会让 CUDA 建会话失败。退回时把 ORT 的
+/// 原话写进任务日志 —— 界面显示 CPU，日志里查得到为什么。
 fn build_sessions(
     models_dir: &Path,
     threads: usize,
+    device: Device,
 ) -> Result<(Session, Session, Session, &'static str), String> {
     let enc = models_dir.join("encoder.onnx");
     let seg = models_dir.join("segmenter.onnx");
     let est = models_dir.join("estimator.onnx");
+    if device != Device::Gpu {
+        return Ok((
+            ort_session(&enc, "encoder", threads, false)?,
+            ort_session(&seg, "segmenter", threads, false)?,
+            ort_session(&est, "estimator", threads, false)?,
+            "CPU",
+        ));
+    }
+    /* GPU 这三张图**顺序**建、失败就停：要的正是第一个失败原因，三张一起建会让
+    后面两张白等十几秒 CUDA 初始化。 */
+    let mut built = Vec::with_capacity(3);
+    let mut why: Option<String> = None;
+    for (p, name) in [(&enc, "encoder"), (&seg, "segmenter"), (&est, "estimator")] {
+        match ort_session(p, name, threads, true) {
+            Ok(s) => built.push(s),
+            Err(e) => {
+                why = Some(e);
+                break;
+            }
+        }
+    }
+    if let Ok([a, b, c]) = <[Session; 3]>::try_from(built) {
+        return Ok((a, b, c, "CUDA"));
+    }
+    if let Some(why) = why {
+        crate::log_line(&format!("人声转 MIDI：CUDA 建会话失败，这一首改用 CPU —— {why}"));
+    }
     Ok((
-        ort_session(&enc, "encoder", threads)?,
-        ort_session(&seg, "segmenter", threads)?,
-        ort_session(&est, "estimator", threads)?,
+        ort_session(&enc, "encoder", threads, false)?,
+        ort_session(&seg, "segmenter", threads, false)?,
+        ort_session(&est, "estimator", threads, false)?,
         "CPU",
     ))
 }
@@ -138,7 +193,7 @@ pub fn transcribe(
     load_runtime(dll)?;
 
     progress("正在载入模型…", 0.0);
-    let (mut enc, mut seg, mut est, backend) = build_sessions(models_dir, opts.threads)?;
+    let (mut enc, mut seg, mut est, backend) = build_sessions(models_dir, opts.threads, opts.device)?;
 
     // 官方导出的图里随机数节点是图内自带的（`RandomUniformLike`），但验证用的
     // 注入版把它改成了名为 `rnd` 的图输入。两种都要能跑：有 `rnd` 就自己抽随机

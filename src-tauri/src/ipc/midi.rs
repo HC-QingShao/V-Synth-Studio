@@ -71,6 +71,49 @@ pub async fn midi_status(st: super::St<'_>) -> Cmd {
     Ok(v)
 }
 
+/* ══════════════════════════════════ 推理方式 ══════════════════════════════════ */
+
+/// 现在选的推理方式，以及这台机器能不能用 GPU。
+///
+/// 内容与 `midi_status` 里的 `device` 一节**同源**（都出自 `mt::device_status`）。
+/// 单开一条是为了让设置页那一格能独立刷新 —— 用户刚装完音轨分离，不必等整个
+/// 状态对象重新拉一遍。
+///
+/// ⚠️ `cuda.ok` 报的是「CUDA **建得出会话**」，不是「保证跑得完」：真跑起来失败时
+/// `engine::build_sessions` 会整条退回 CPU，原因写在任务日志里。
+#[tauri::command]
+pub async fn midi_device_get(st: super::St<'_>) -> Cmd {
+    Ok(device_payload(&st.inner().root, &st.inner().writable))
+}
+
+/// 设置推理方式。`{ mode: "auto" | "cpu" | "gpu" }`
+///
+/// ⛔ **不校验「GPU 到底能不能用」**：盘上记的是用户的意愿，不是硬件现状。硬拦下来
+/// 会出现「换台机器就得重设一次」这种莫名其妙的限制；真用不了时引擎自己会退回 CPU。
+/// 界面负责在**选不了的时候**把那一格锁住，后端不重复一遍这个判断。
+#[tauri::command]
+pub async fn midi_device_set(st: super::St<'_>, mode: String) -> Cmd {
+    let m = mode.trim().to_ascii_lowercase();
+    if !["auto", "cpu", "gpu"].contains(&m.as_str()) {
+        return Err(format!("不认识的推理方式：{mode}（只能是 auto / cpu / gpu）"));
+    }
+    let dev = mt::Device::parse(&m);
+    mt::write_device(&st.inner().writable, dev).map_err(|e| format!("写推理方式失败：{e}"))?;
+    crate::log_line(&format!("人声转 MIDI：推理方式改成 {}", dev.as_str()));
+    Ok(device_payload(&st.inner().root, &st.inner().writable))
+}
+
+/// 给界面的那一小段状态（`midi_device_get` / `midi_device_set` 共用一份，免得两边漂）。
+fn device_payload(root: &std::path::Path, writable: &std::path::Path) -> Value {
+    let dll = mt::runtime_dll(root, writable);
+    let ds = mt::device_status(writable, dll.as_deref());
+    json!({
+        "mode": ds.device.as_str(),
+        "cuda": { "ok": ds.cuda_ok, "detail": ds.cuda_detail },
+        "note": ds.note,
+    })
+}
+
 /* ══════════════════════════════════ 下载 ══════════════════════════════════ */
 
 fn note_progress(got: u64, total: Option<u64>, stage: crate::svsep::Stage) {
@@ -266,6 +309,9 @@ pub async fn midi_transcribe(st: super::St<'_>, args: Value) -> Cmd {
             126,
         ) as i64,
         threads: clamp_usize(args.get("threads").and_then(|v| v.as_u64()), 4, 1, 32),
+        // 真正的判据是盘上的设置（`mt::transcribe_blocking` 会再读一次），这里填进去
+        // 只是让日志里那一行与用户选的一致 —— 任务也可能来自「再跑一次」。
+        device: mt::read_device(&writable),
     };
 
     let st_arc: Arc<super::AppState> = st.inner().clone();
@@ -285,6 +331,7 @@ pub async fn midi_transcribe(st: super::St<'_>, args: Value) -> Cmd {
     let st2 = Arc::clone(&st_arc);
     let id2 = job_id.clone();
     let root_dir = st_arc.root.clone();
+    let writable_dir = st_arc.writable.clone();
     // 模型目录在这里就定下来（表给的「当前生效那一层」），随任务一起进去 ——
     // 任务跑到一半时用户要是点了「删除依赖」，至少这一次用的还是任务开始时那一份。
     let models = crate::artifact::dir_of(&root, &writable, "game.models");
@@ -292,7 +339,8 @@ pub async fn midi_transcribe(st: super::St<'_>, args: Value) -> Cmd {
     let scratch = mt::data_dir(&writable).join("work");
     tokio::spawn(async move {
         run_job(
-            st2, id2, input_path, out_dir, scratch, root_dir, models, dll, opts, cancel, stem,
+            st2, id2, input_path, out_dir, scratch, root_dir, writable_dir, models, dll, opts, cancel,
+            stem,
         )
         .await;
     });
@@ -309,6 +357,7 @@ async fn run_job(
     out_dir: std::path::PathBuf,
     scratch: std::path::PathBuf,
     root: std::path::PathBuf,
+    writable: std::path::PathBuf,
     models: std::path::PathBuf,
     dll: std::path::PathBuf,
     opts: engine::Options,
@@ -322,6 +371,7 @@ async fn run_job(
         &out_dir,
         &scratch,
         &root,
+        &writable,
         &models,
         &dll,
         &opts,
@@ -369,6 +419,7 @@ async fn run_job_inner(
     out_dir: &std::path::Path,
     scratch: &std::path::Path,
     root: &std::path::Path,
+    writable: &std::path::Path,
     models: &std::path::Path,
     dll: &std::path::Path,
     opts: &engine::Options,
@@ -419,15 +470,24 @@ async fn run_job_inner(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, f64)>();
     let models = models.to_path_buf();
     let dll = dll.to_path_buf();
+    let writable2 = writable.to_path_buf();
     let wav2 = wav.clone();
     let opts2 = opts.clone();
     let cancel2 = cancel.clone();
     let started = std::time::Instant::now();
     let handle = tokio::task::spawn_blocking(move || {
-        mt::transcribe_blocking(&models, &dll, &wav2, &opts2, &cancel2, move |what, pct| {
-            // 推理只占整条时间线的 5%..95%（前面解码、后面落盘都要留位置）
-            let _ = tx.send((what.to_string(), 5.0 + pct * 90.0));
-        })
+        mt::transcribe_blocking(
+            &writable2,
+            &models,
+            &dll,
+            &wav2,
+            &opts2,
+            &cancel2,
+            move |what, pct| {
+                // 推理只占整条时间线的 5%..95%（前面解码、后面落盘都要留位置）
+                let _ = tx.send((what.to_string(), 5.0 + pct * 90.0));
+            },
+        )
     });
 
     // 边等边把进度灌进任务表：`spawn_blocking` 的返回值要 await，
@@ -461,12 +521,13 @@ async fn run_job_inner(
         &st,
         &job_id,
         &format!(
-            "写出 {}（encoder {:.1}s / segmenter {:.1}s / estimator {:.1}s，总 {:.1}s）",
+            "写出 {}（encoder {:.1}s / segmenter {:.1}s / estimator {:.1}s，总 {:.1}s，后端 {}）",
             names.join("、"),
             report.encoder_seconds,
             report.segmenter_seconds,
             report.estimator_seconds,
             started.elapsed().as_secs_f64(),
+            report.backend,
         ),
     );
 
@@ -482,6 +543,9 @@ async fn run_job_inner(
                 "dir": dir,
                 "files": names,
                 "notes": notes,
+                // 这次**实际**用的后端（`"CUDA"` / `"CPU"`）。用户选了 GPU 但建会话
+                // 失败时会退回 CPU，界面据这一项说清「为什么还是这么慢」。
+                "backend": report.backend,
                 "seconds": {
                     "encoder": report.encoder_seconds,
                     "segmenter": report.segmenter_seconds,

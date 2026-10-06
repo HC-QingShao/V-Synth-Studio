@@ -25,7 +25,11 @@ tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "f
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "query", "json", "stream"] }
 futures-util = "0.3.34"
 flate2 = "1.1.10"
-ort = { version = "2.0.0-rc.13", default-features = false, features = ["ndarray", "load-dynamic"] }
+# `cuda` 只为了拿到 `ort::ep::CUDA` 这个类型（在 ort 里被 `#[cfg(feature = "cuda")]` 门住），
+# 不构成构建期 CUDA 依赖：ort 的 cuda feature 只打开 API，真正 LoadLibrary 的在运行时，
+# 而 `load-dynamic` 已让 ort-sys 带上 `disable-linking`，链接期不碰任何 CUDA 库。
+# 所以没有 N 卡 / 没装 CUDA 的机器照样跑，只是 GPU 那一格锁着。
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["ndarray", "load-dynamic", "cuda"] }
 ndarray = "0.17.2"
 tauri-plugin-dialog = "2"
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }

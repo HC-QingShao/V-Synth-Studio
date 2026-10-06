@@ -1,5 +1,6 @@
-import {useCallback, useEffect, useMemo, useState} from 'react'
-import {api, MIDI_LANGUAGES, type MidiNote, type MidiStatus,} from '@/lib/api'
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
+import {GlassSegmentedControl} from '@ttqtt/liquid-glass-react'
+import {api, MIDI_LANGUAGES, type MidiDeviceMode, type MidiNote, type MidiStatus,} from '@/lib/api'
 import {getConfig, saveConfig} from '@/lib/config'
 import {fileUrl, joinPath} from '@/lib/ipc'
 import {Button} from '@/components/Button'
@@ -48,6 +49,14 @@ const SECONDS_PER_AUDIO_SECOND = 10
 
 /** 去噪步数。8 是上游默认；耗时几乎与它线性相关，所以文案里要说清。 */
 const STEP_CHOICES = [4, 8, 16, 32] as const
+
+/** 推理方式三选一。`auto` 与 `cpu` 今天等价（引擎只在 `gpu` 时挂 CUDA）。 */
+const DEVICE_MODES = [
+    {value: 'auto' as const, label: '自动'},
+    {value: 'gpu' as const, label: 'GPU'},
+    {value: 'cpu' as const, label: 'CPU'},
+]
+const DEVICE_LABEL: Record<MidiDeviceMode, string> = {auto: '自动', gpu: 'GPU', cpu: 'CPU'}
 
 /** 输入的音频扩展名（后端 ffmpeg 能解的都能给，这里只是文件选择器的过滤） */
 const AUDIO_EXTS = ['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg', 'opus', 'wma', 'aiff', 'ape']
@@ -229,6 +238,8 @@ export function Midi({onToast, onNavigate}: PageProps) {
     const [steps, setSteps] = useState(8)
     const [language, setLanguage] = useState(4)
     const [threads, setThreads] = useState(4)
+    /** 推理方式。真值在盘上（`<可写>/midi/midi_settings.json`），这里只是镜像。 */
+    const [device, setDevice] = useState<MidiDeviceMode>('auto')
 
     const [busy, setBusy] = useState(false)
     /** 危险区第一下：只立旗标，第二下才真删（与音轨分离页同一套）。 */
@@ -258,10 +269,27 @@ export function Midi({onToast, onNavigate}: PageProps) {
     const [taskId, setTaskId] = useState<string | null>(null)
 
     /* ── 轮询状态 ─────────────────────────────────────────── */
+    /**
+     * 上一次改推理方式的时刻。轮询据此忽略「在那之前出发、之后才回来」的那一轮 ——
+     * 那种响应手里拿的是旧值，照它写会让刚点亮的那格弹回去。
+     * 别改成「改了之后 N 秒内一律不动」：那会把 N 秒内别的窗口改的值也一起挡掉。
+     */
+    const deviceChangedAt = useRef(0)
+    /** `refresh` 的依赖是空的（只挂一次定时器），所以要比值就得比 ref。 */
+    const deviceRef = useRef(device)
+    deviceRef.current = device
+
     const refresh = useCallback(async () => {
+        const t0 = Date.now()
         try {
             const v = await api.midiStatus()
             setSt(v)
+            /* 顺带把推理方式同步过来。⚠️ **每轮都跟** —— 本地改动是「点了立刻发请求」，
+               几毫秒就落盘，2 秒后的这一轮跟的是自己；不跟才会出问题：另一个窗口
+               （或用户直接改那个 json）会让界面显示的和引擎按的不一致，且毫无提示。 */
+            if (v.device.mode !== deviceRef.current && t0 >= deviceChangedAt.current) {
+                setDevice(v.device.mode)
+            }
             setStatusErr(null)
             return v
         } catch (e) {
@@ -347,6 +375,14 @@ export function Midi({onToast, onNavigate}: PageProps) {
         installer.stepLabel || (dl?.kind === 'models' ? '模型' : '')
     /** 安装失败要显示的那句话：循环自己撞上的错优先，否则是后端留下的那一句 */
     const installError = installer.error || dl?.error || null
+    /**
+     * 这台机器能不能用 GPU。`undefined` = 状态还没拉回来，那一格先按锁着画
+     * （宁可晚两秒解锁，也不要在没探明时把格子放开）。
+     *
+     * ⛔ 只能来自后端：真正的判据是「后端真拿一张 1×1 的图建出了 CUDA 会话」，前端没有
+     * 任何办法知道（`navigator.gpu` 说的是浏览器那套，与 ONNX Runtime 无关）。
+     */
+    const cuda = st?.device?.cuda
     /* 估时：吞吐 × 时长 × 步数比例。只是量级，不是承诺。 */
     const estimate = useMemo(
         () => (duration > 0 ? (duration * SECONDS_PER_AUDIO_SECOND * steps) / 8 : 0),
@@ -390,6 +426,34 @@ export function Midi({onToast, onNavigate}: PageProps) {
             onToast(errText(e), 'err')
         } finally {
             setBusy(false)
+        }
+    }
+
+    /**
+     * 改推理方式：**乐观点亮**，失败弹回并把后端的错说出来。
+     *
+     * 后端不校验硬件（盘上记的是意愿），所以这里也不拦：真正用不了时引擎自己退回 CPU
+     * 并把原因写进任务日志。
+     */
+    const doSetDevice = async (mode: MidiDeviceMode) => {
+        if (mode === device) return
+        const before = device
+        /* 打一个时间戳，轮询那边据此忽略「在我之前出发、之后才回来」的那一轮 ——
+           少了这一条就会出现「点了 GPU 又自己跳回 CPU」（那一轮请求是 2 秒前发出的）。 */
+        deviceChangedAt.current = Date.now()
+        setDevice(mode)
+        try {
+            const r = await api.midiSetDevice(mode)
+            // 以盘上返回的值为准（它才是权威），并更新忽略窗口。
+            deviceChangedAt.current = Date.now()
+            setDevice(r.mode)
+            // 引擎在下次提交扒谱时才读盘，所以说清「什么时候生效」。
+            onToast(`推理方式已改成「${DEVICE_LABEL[r.mode]}」，下次开始扒谱时生效。`, 'ok')
+            void refresh()
+        } catch (e) {
+            deviceChangedAt.current = 0
+            setDevice(before)
+            onToast(errText(e), 'err')
         }
     }
 
@@ -554,6 +618,59 @@ export function Midi({onToast, onNavigate}: PageProps) {
                             onChange={(e) => setThreads(Number(e.target.value) || 4)}
                         />
                     </Field>
+
+                    {/* 推理方式（自动 / GPU / CPU）：和音轨分离页同一个形状的三选一。
+                        ⛔ GPU 那一格**只在 `cuda.ok` 时可选**，而这个值只能来自后端
+                        （`status.device.cuda`）—— 别按 `navigator` 或显卡名字猜：
+                        真正的判据是「后端建得出一个 CUDA 会话」，只有后端探得到，
+                        而猜错的方向恰好是最坏的那个（放出格子 → 跑起来才发现不行）。
+                        ⛔ 这里**不能套 `<Field>`**：它是个 `<label>`，而控件里面是
+                        `<input type="radio">` —— 点标签上任意一处（包括下面那行说明）
+                        都会激活第一个单选项，等于悄悄把推理方式改回「自动」。 */}
+                    <div className="field">
+                        <span className="field-label">推理方式</span>
+                        {/* 禁用只加在 `<input type="radio">` 上，外层 `<label class="lg-segment">`
+                            照样收得到点击，所以「点了给提示、但不选中」要在**捕获阶段**做。
+                            ⛔ 别给这个容器加 `pointer-events: none` 来表达禁用 —— 那就成了
+                            点了毫无反应，而这正是用户会来报的那个问题。 */}
+                        <div
+                            className="midi-infer"
+                            onClickCapture={(e) => {
+                                const seg = (e.target as HTMLElement).closest('.lg-segment')
+                                if (!seg || seg.getAttribute('data-disabled') !== 'true') return
+                                e.preventDefault()
+                                e.stopPropagation()
+                                onToast(
+                                    cuda?.ok
+                                        ? '这一格现在选不了。'
+                                        : `GPU 现在用不了：${cuda?.detail ?? '正在探测'}。`,
+                                    'warn',
+                                )
+                            }}
+                        >
+                            <GlassSegmentedControl
+                                aria-label="推理方式"
+                                items={DEVICE_MODES.map((m) => ({
+                                    ...m,
+                                    /* 锁死那一格：只有 `cuda.ok` 为假时锁 GPU。`disabled` 是给
+                                       读屏与键盘用的，视觉上的置灰由库的 CSS 做。 */
+                                    disabled: m.value === 'gpu' && !cuda?.ok,
+                                }))}
+                                value={device}
+                                onValueChange={(v: string) => void doSetDevice(v as MidiDeviceMode)}
+                            />
+                        </div>
+                        <span className="field-hint">
+                            {cuda?.ok
+                                ? '这台机器能用 GPU，扒谱会明显更快。'
+                                : st
+                                    ? `GPU 暂不可用：${cuda?.detail ?? ''}`
+                                    : '正在探这台机器能不能用 GPU…'}
+                        </span>
+                    </div>
+
+                    {/* 选着 GPU 但当前用不上 —— 后端给的话术，直接显示，别自己另编一套 */}
+                    {st?.device?.note && <p className="midi-note-warn">{st.device.note}</p>}
 
                 </Panel>
 

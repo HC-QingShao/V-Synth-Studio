@@ -363,17 +363,35 @@ static ARTIFACTS: &[Artifact] = &[
         ],
         path_names: &[],
     },
-    /* ── 人声转 MIDI：ONNX Runtime 动态库（随包分发，不再运行期下载）── */
+    /* ── 人声转 MIDI：ONNX Runtime 动态库（随包 + 运行期可借用）── */
     Artifact {
         id: "midi.ort",
         label: "ONNX Runtime",
-        /* 由 `tools/fetch_tools.mjs` 按平台上取到 `tools/onnxruntime/`，
-        随 `bundle.resources` 的 `../tools` 打进安装包 —— 与 ffmpeg 同一条路。
+        /* 只有 `tools/onnxruntime/` 是随包分发的（`tools/fetch_tools.mjs` 取到，
+        随 `bundle.resources` 的 `../tools` 打进安装包 —— 与 ffmpeg 同一条路）；
+        另三个候选都是**运行期**才可能存在的借用点：用户自己放进 `<可写>/midi` 的、
+        音轨分离运行时里那份（GPU 构建）、以及 DirectML 加速包那份。
+        ⚠️ 这个顺序**不是**挑选顺序：带 `onnxruntime_providers_cuda.dll` 的那一份赢
+        （`midi_transcribe::runtime_dll`），否则一份 CPU 包会把它后面那份 GPU 构建遮蔽掉。
         文件名按平台走 `NameKind::Dll`（win `.dll` / mac `lib*.dylib` / linux `lib*.so`）。 */
-        places: &[Place {
-            base: Base::Root,
-            rel: "tools/onnxruntime",
-        }],
+        places: &[
+            Place {
+                base: Base::Writable,
+                rel: "midi",
+            },
+            Place {
+                base: Base::Root,
+                rel: "tools/onnxruntime",
+            },
+            Place {
+                base: Base::Svsep,
+                rel: "runtime/Lib/site-packages/onnxruntime/capi",
+            },
+            Place {
+                base: Base::Svsep,
+                rel: "dml/onnxruntime/capi",
+            },
+        ],
         need: &[FileNeed {
             rel: "onnxruntime",
             kind: NameKind::Dll,
@@ -646,18 +664,12 @@ pub fn missing_of(root: &Path, writable: &Path, id: &str) -> Vec<&'static str> {
     missing(&Ctx::new(root, writable), need(id))
 }
 
-/// 定位到**第 `idx` 个必需文件**的完整路径；没找到那一层就 `None`。
+/// 定位到 `Base::Root` 下**第 `idx` 个必需文件**的完整路径；没找到就 `None`。
 ///
-/// 单文件产物（可执行文件、onnxruntime 的 dll）用它 —— 界面上问的是
-/// 「这个文件在哪」，而不是「哪个目录齐了」。
-pub fn path_of(root: &Path, writable: &Path, id: &str, idx: usize) -> Option<PathBuf> {
-    let a = need(id);
-    locate(&Ctx::new(root, writable), a).map(|l| entry_path(&l.dir, &a.need[idx]))
-}
-
-/// [`path_of`] 的 `Base::Root` 版本：不去查 svsep 的全局（省一次查询）。
-///
-/// `tools/` 下的那几个（ffmpeg / yt-dlp / LibreSVIP）用它。
+/// 单文件产物用它（界面上问的是「这个文件在哪」，不是「哪个目录齐了」），
+/// 而且只查 `root` —— `tools/` 下的那几个（ffmpeg / yt-dlp / LibreSVIP）用它，
+/// 省一次 svsep 全局查询。需要跨 `root` / `writable` / svsep 找的（onnxruntime、
+/// 模型）走 [`dirs_of`]，因为「挑哪一份」另有判据（见 `midi_transcribe::runtime_dll`）。
 pub fn path_in_root(root: &Path, id: &str, idx: usize) -> Option<PathBuf> {
     let a = need(id);
     locate(&Ctx::root_only(root), a).map(|l| entry_path(&l.dir, &a.need[idx]))
