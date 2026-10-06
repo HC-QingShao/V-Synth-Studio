@@ -190,20 +190,28 @@ jobs:
           $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT `File`, `FileName`, `FileSize` FROM `File`'))
           $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
 
-          # 一遍收完：名字、逐个体积、总体积。别为了拿某一项的体积再查一遍
+          # 一遍收完：行数、名字、逐个体积、总体积。别为了拿某一项的体积再查一遍
           # （同一个视图再跑一次 = 同一份逻辑写两遍，改一处忘一处的那种重复）。
-          $sizes = @{}                       # 长名 → 字节数
+          #
+          # ⚠️ **「多少文件」必须数行，不能数 `$sizes.Count`。** `FileName` 不是唯一的：
+          #    libresvip 那棵 Python 树里 `__init__.py` 出现 51 次、`options.py` 45 次、
+          #    `model.py` 32 次…… 用 `$sizes.Count` 会少算 299 个（实测 1096 vs 1395），
+          #    而这条判据正是「少打包了没有」——少算就等于把防线拆了。
+          #    `$sizes` 只用来查「某个名字的文件在不在」，判总量/个数一律用行数。
+          $sizes = @{}                       # 长名 → 字节数（只用于 ContainsKey）
+          $rows = 0                          # 真实文件数（File 表的行数）
           $total = 0
           while ($true) {
             $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
             if (-not $rec) { break }
+            $rows++
             $fn = [string]$rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, 2)
             $sz = [int]$rec.GetType().InvokeMember('IntegerData', 'GetProperty', $null, $rec, 3)
             $total += $sz
             if ($fn -match '\|') { $fn = ($fn -split '\|')[-1] }   # FileName 是「短名|长名」
             $sizes[$fn] = $sz
           }
-          Write-Host ("File 表：{0} 个文件，{1:N1} MB（未压缩）" -f $sizes.Count, ($total / 1MB))
+          Write-Host ("File 表：{0} 个文件（{1} 个不同文件名），{2:N1} MB（未压缩）" -f $rows, $sizes.Count, ($total / 1MB))
 
           # ① `bundle.resources` 真去装的那几个 + 程序本体。
           #    **不要**加 `index.html` / `ffprobe.exe` —— 前者走 `frontendDist`
@@ -213,21 +221,18 @@ jobs:
           $miss = @($need | Where-Object { -not $sizes.ContainsKey($_) })
           if ($miss.Count) { throw "MSI 里少了：$($miss -join '、') —— bundle.resources 少打包是静默的" }
 
-          # ② 总量下限。**这几个数要按仓库里的实际内容算**，不能凭印象写。
+          # ② 个数与总量下限。**这几个数要按仓库里的实际内容算**，不能凭印象写。
           #
-          #    这个数**得按「干净机器上的 tools/」算**，不是本机那个：
-          #        CI 干净机器（fetch 完）：1,378 文件 / 187.5 MB
-          #        本机（多一个 `ffprobe.exe`）：1,395 文件 / 288.1 MB
-          #     在 MSI 里还要加上 resources.json / pinyin.json / 程序本体（≈90 MB）。
-          #     ⇒ File 表 ≈ 1,390 个文件、≈ 280 MB（未压缩）
+          #    2026-10-06 Windows 本机实测（就是这两个判据的标定值）：
+          #        File 表 1,395 行 / 262.1 MB（未压缩），程序本体 59.3 MB
+          #      `tools/` 那份 ≈183 MB 是主体，`libresvip` 一棵树就占 1,375 个文件。
           #
           #    ⚠️ 两个坑：
           #      · 别把 jizura 的文件数/体量算进来 —— 它走 `frontendDist`（嵌进 exe），
-          #        File 表里看不见它们。
-          #      · 别按本机目录算 —— 本机可能多一个 `ffprobe.exe`（105 MB），
-          #        而它不在产物表里。
-          if ($sizes.Count -lt 1150) { throw "MSI 里只有 $($sizes.Count) 个文件，明显少打包了（期望 ≈1390）" }
-          if ($total -lt 150MB) { throw "MSI 内容只有 $([math]::Round($total / 1MB, 1)) MB，明显少打包了（期望 ≈280MB）" }
+          #        File 表里看不见它们，只有 exe 的体积能反映。
+          #      · 下限要留出余量：它拦的是「映射少写一条」这种大错，不是「少了一个插件」。
+          if ($rows -lt 1150) { throw "MSI 里只有 $rows 个文件，明显少打包了（实测 ≈1395）" }
+          if ($total -lt 150MB) { throw "MSI 内容只有 $([math]::Round($total / 1MB, 1)) MB，明显少打包了（实测 ≈262MB）" }
 
           # ③ exe 本身的体积：前端（含 2335 个字体，约 64MB）嵌在里面。
           #    本机 Linux release 实测 61.8MB；Windows 上（WebView2 + MSVC）会更大。
