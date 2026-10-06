@@ -1,7 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from 'react'
 import {
-import {translate} from '@/lib/i18n'
-import {useI18n} from '@/lib/i18n'
     GlassCheckbox,
     GlassSegmentedControl,
     List,
@@ -40,6 +38,7 @@ import {baseName, errText, formatBytes, formatDuration, formatNumber} from '@/li
 import {useJob} from '@/lib/useJob'
 import type {PageProps} from './types'
 import './Video.css'
+import {useI18n} from '@/lib/i18n'
 
 /**
  * 视频解析下载（MV 素材）。
