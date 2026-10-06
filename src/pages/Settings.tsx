@@ -151,9 +151,9 @@ function Appearance({
     const clampLevel = (v: number): GlassLevel =>
         Math.min(GLASS_LEVELS.length, Math.max(1, Math.round(v))) as GlassLevel
     const THEMES: { id: ThemeMode; label: string; desc: string }[] = [
-        {id: 'system', label: '跟随系统', desc: '系统切换配色时自动跟着换'},
-        {id: 'light', label: '明亮', desc: '浅色底、细描边'},
-        {id: 'dark', label: '黑暗', desc: '深色底，长时间看不刺眼'},
+        {id: 'system', label: t('跟随系统'), desc: t('系统切换配色时自动跟着换')},
+        {id: 'light', label: t('明亮'), desc: t('浅色底、细描边')},
+        {id: 'dark', label: t('黑暗'), desc: t('深色底，长时间看不刺眼')},
     ]
 
     return (
@@ -200,26 +200,26 @@ function Appearance({
                     </div>
                 </div>
                 <p className="hint">
-                    等级只影响材质，背景图不变。
+                    {t('等级只影响材质，背景图不变。')}
                 </p>
             </Panel>
 
             <Panel>
                 <PanelHead title={t("主题")} desc={t("整套界面的配色")}/>
                 <div className="choice-grid">
-                    {THEMES.map((t) => (
+                    {THEMES.map((themeOption) => (
                         <button
-                            key={t.id}
+                            key={themeOption.id}
                             type="button"
                             className="choice"
-                            aria-pressed={theme === t.id}
-                            onClick={() => onThemeChange(t.id)}
+                            aria-pressed={theme === themeOption.id}
+                            onClick={() => onThemeChange(themeOption.id)}
                         >
               <span className="choice-head">
-                <span className="choice-label">{t.label}</span>
+                <span className="choice-label">{themeOption.label}</span>
                   {theme === t.id && <Chip tone="accent">已选</Chip>}
               </span>
-                            <span className="choice-desc">{t.desc}</span>
+                            <span className="choice-desc">{themeOption.desc}</span>
                         </button>
                     ))}
                 </div>
