@@ -9,7 +9,6 @@ import {Chip, Panel, Stat} from '@/components/Panel'
 import {JobProgress} from '@/components/Job'
 import type {PageProps} from './types'
 import './Resources.css'
-import {translate} from '@/lib/i18n'
 import {useI18n} from '@/lib/i18n'
 
 /**
