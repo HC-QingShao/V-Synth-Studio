@@ -10,6 +10,7 @@ import {Upstream} from '@/components/Credit'
 import {GlassSlider} from '@ttqtt/liquid-glass-react'
 import {GLASS_LEVELS, type GlassLevel, useGlassLevel} from '@/lib/useGlass'
 import {useNavLens} from '@/lib/useNavLens'
+import {useI18n} from '@/lib/i18n'
 import type {ThemeMode} from '@/App'
 import './Settings.css'
 
@@ -44,6 +45,7 @@ export function Settings({
     theme: ThemeMode
     onThemeChange: (m: ThemeMode) => void
 }) {
+    const {t} = useI18n()
     const [section, setSection] = useState<SectionId>('appearance')
     /* 高亮块要量位置：和主侧栏同一套（见 lib/useNavLens.ts） */
     const navRef = useRef<HTMLElement>(null)
@@ -96,7 +98,7 @@ export function Settings({
                 radius={26}
                 padding={12}
             >
-                <nav className="app-nav" aria-label="设置分节" ref={navRef}>
+                <nav className="app-nav" aria-label={t("设置分节")} ref={navRef}>
                     <span className="lg-selection-lens nav-lens" ref={lensRef} aria-hidden="true"/>
                     {SECTIONS.map((s) => (
                         <button
@@ -106,7 +108,7 @@ export function Settings({
                             aria-current={section === s.id ? 'page' : undefined}
                             onClick={() => setSection(s.id)}
                         >
-                            <span className="nav-row-label">{s.label}</span>
+                            <span className="nav-row-label">{t(s.label)}</span>
                         </button>
                     ))}
                 </nav>
@@ -143,6 +145,7 @@ function Appearance({
     onThemeChange: (m: ThemeMode) => void
 }) {
     const {level, setLevel} = useGlassLevel()
+    const {language, t, setLanguage} = useI18n()
 
     /** 滑块给的是 number，收进 1~3（拖动/键盘理论上都给不出界外值，防御一下） */
     const clampLevel = (v: number): GlassLevel =>
@@ -163,8 +166,8 @@ function Appearance({
       */}
             <Panel>
                 <PanelHead
-                    title="玻璃等级"
-                    desc="级别越高越「玻璃」，开销也越大"
+                    title={t("玻璃等级")}
+                    desc={t("级别越高越「玻璃」，开销也越大")}
                 />
                 <div className="slider-row">
                     <GlassSlider
@@ -202,7 +205,7 @@ function Appearance({
             </Panel>
 
             <Panel>
-                <PanelHead title="主题" desc="整套界面的配色"/>
+                <PanelHead title={t("主题")} desc={t("整套界面的配色")}/>
                 <div className="choice-grid">
                     {THEMES.map((t) => (
                         <button
@@ -217,6 +220,20 @@ function Appearance({
                   {theme === t.id && <Chip tone="accent">已选</Chip>}
               </span>
                             <span className="choice-desc">{t.desc}</span>
+                        </button>
+                    ))}
+                </div>
+            </Panel>
+
+            <Panel>
+                <PanelHead title={t("语言")} desc={t("选择应用界面语言")}/>
+                <div className="choice-grid">
+                    {([["zh-CN", "简体中文"], ["en-US", "English"], ["ja-JP", "日本語"]] as const).map(([id, label]) => (
+                        <button key={id} type="button" className="choice" aria-pressed={language === id} onClick={() => setLanguage(id)}>
+                            <span className="choice-head">
+                                <span className="choice-label">{t(label)}</span>
+                                {language === id && <Chip tone="accent">{t("已选")}</Chip>}
+                            </span>
                         </button>
                     ))}
                 </div>
