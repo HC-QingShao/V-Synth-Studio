@@ -98,7 +98,6 @@ const DICT: Record<string, Record<UiLanguage, string>> = {
   "下载模式": {'zh-CN':"下载模式",'en-US':"Download mode",'ja-JP':"ダウンロードモード"},
   "下载队列": {'zh-CN':"下载队列",'en-US':"Download queue",'ja-JP':"ダウンロードキュー"},
   "音频素材": {'zh-CN':"音频素材",'en-US':"Audio source",'ja-JP':"音声素材"},
-  "已选": {'zh-CN':"已选",'en-US':"Selected",'ja-JP':"選択中"},
   "未选": {'zh-CN':"未选",'en-US':"Not selected",'ja-JP':"未選択"},
   "分离模式": {'zh-CN':"分离模式",'en-US':"Separation mode",'ja-JP':"分離モード"},
   "分离完做什么": {'zh-CN':"分离完做什么",'en-US':"After separation",'ja-JP':"分離後の処理"},
