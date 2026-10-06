@@ -47,44 +47,37 @@ pub fn new_job(st: &Arc<super::AppState>, kind: &str, title: &str) -> String {
 /// ⚠️ **在锁内取快照、锁外广播** —— 广播放在锁里的话，订阅者一多就会把正在干活的
 /// 任务线程堵住（进度更新很密，而广播是同步遍历订阅者）。
 pub fn set_job(st: &Arc<super::AppState>, id: &str, patch: Value) {
-    let snapshot = {
+    let (snapshot, tx) = {
         let mut guard = st.jobs.lock().unwrap();
-        if let Some(job) = guard.items.get_mut(id) {
+        let snapshot = guard.items.get_mut(id).map(|job| {
             if let (Some(dst), Some(src)) = (job.as_object_mut(), patch.as_object()) {
                 for (k, v) in src {
                     dst.insert(k.clone(), v.clone());
                 }
             }
-            Some(job.clone())
-        } else {
-            None
-        }
+            job.clone()
+        });
+        (snapshot, guard.tx.clone())
     };
     if let Some(j) = snapshot {
-        // Do not hold the task-table mutex while broadcasting.
-        if let Ok(guard) = st.jobs.lock() {
-            guard.publish(&j);
-        }
+        let _ = tx.send(j);
     }
 }
 
 /// 往任务日志里追加一行（带 `HH:MM:SS` 时间戳），并广播。
 pub fn log_job(st: &Arc<super::AppState>, id: &str, line: &str) {
-    let snapshot = {
+    let (snapshot, tx) = {
         let mut guard = st.jobs.lock().unwrap();
-        if let Some(job) = guard.items.get_mut(id) {
+        let snapshot = guard.items.get_mut(id).map(|job| {
             if let Some(logs) = job.get_mut("logs").and_then(|l| l.as_array_mut()) {
                 logs.push(json!(format!("[{}] {}", clock(), line)));
             }
-            Some(job.clone())
-        } else {
-            None
-        }
+            job.clone()
+        });
+        (snapshot, guard.tx.clone())
     };
     if let Some(j) = snapshot {
-        if let Ok(guard) = st.jobs.lock() {
-            guard.publish(&j);
-        }
+        let _ = tx.send(j);
     }
 }
 
@@ -171,7 +164,7 @@ pub async fn get_job(st: super::St<'_>, id: String) -> Cmd {
 /// 读到就中断并掐掉子进程。**没有额外的取消通道 —— 任务表本身就是通道。**
 #[tauri::command]
 pub async fn cancel_job(st: super::St<'_>, id: String) -> Cmd {
-    let snapshot = {
+    let (snapshot, tx) = {
         let mut guard = st.jobs.lock().map_err(|_| "任务表锁坏了")?;
         let job = guard
             .items
@@ -184,12 +177,10 @@ pub async fn cancel_job(st: super::St<'_>, id: String) -> Cmd {
                 m.insert("message".into(), json!("已取消"));
             }
         }
-        job.clone()
+        (job.clone(), guard.tx.clone())
     };
     // Cancellation is a state transition; wake live watchers immediately.
-    if let Ok(guard) = st.jobs.lock() {
-        guard.publish(&snapshot);
-    }
+    let _ = tx.send(snapshot.clone());
     Ok(json!({ "job": snapshot }))
 }
 
