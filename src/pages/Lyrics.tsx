@@ -12,7 +12,6 @@ import {Icon} from '@/components/Icon'
 import {Chip, Panel, PanelHead} from '@/components/Panel'
 import type {PageProps, ToastTone} from './types'
 import './Lyrics.css'
-import {translate} from '@/lib/i18n'
 import {useI18n} from '@/lib/i18n'
 
 /**
