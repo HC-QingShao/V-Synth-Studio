@@ -13,7 +13,6 @@ import {POLL_STATUS, useStatusPoll} from '@/lib/polling'
 import {downloadBytes, extractedBytes, installLabel, type InstallStep, useInstaller,} from '@/lib/useInstaller'
 import type {PageProps} from './types'
 import './Svsep.css'
-import {translate} from '@/lib/i18n'
 import {useI18n} from '@/lib/i18n'
 
 /**
