@@ -832,7 +832,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
       <Panel>
         <PanelHead
           title="解析视频"
-          desc="B 站支持分P / 合集 / 番剧 / 大会员画质，其它站点走 yt-dlp"
+          desc="B 站支持分P / 合集 / 番剧 / 大会员画质"
           extra={<Chip>回车即解析</Chip>}
         />
         <div className="stack">
@@ -858,19 +858,14 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
 
           {state && !state.tools?.ffmpeg?.available && (
             <Finding level="warn" title="未安装 ffmpeg">
-              B 站的 DASH 流是音视频分开的：没有 ffmpeg 就不会自动合并成 mp4，只会留下 .video.m4s 与
-              .audio.m4s 两个文件。「仅音频」模式不受影响。
+              MV 下载后不会自动合并成 mp4。「仅音频」模式不受影响。
               <br />
-              ffmpeg 随程序分发，不需要联网下载；若这里显示未检测到，从压缩包里把 tools
-              目录重新解压到程序根目录即可。
+              tools 目录缺失，请重新解压程序包。
             </Finding>
           )}
           {state && !state.tools?.ytdlp?.available && (
             <Finding level="info" title="未安装 yt-dlp">
-              B 站不受影响；YouTube 等其它上千个站点需要 yt-dlp 才能解析。
-              <br />
-              yt-dlp 随程序分发，不需要联网下载；若这里显示未检测到，从压缩包里把 tools
-              目录重新解压到程序根目录即可。
+              B 站不受影响；YouTube 等其它站点需要 yt-dlp 才能解析。
             </Finding>
           )}
         </div>
@@ -879,7 +874,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
       {/* ══════════════════════ 解析中 / 失败 / 空态 ══════════════════════ */}
       {parsing && (
         <Panel>
-          <p className="muted">正在解析视频信息…（B 站要多等几秒）</p>
+          <p className="muted">正在解析视频信息…</p>
         </Panel>
       )}
 
@@ -895,7 +890,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
               </Finding>
             )}
             <p className="video-note">
-              提示：B 站链接异常时，可以先确认 BV 号是否完整，或到「设置」里填一份 Cookie。
+              B 站链接异常时，先确认 BV 号是否完整，或到「设置」里填一份 Cookie。
             </p>
           </div>
         </Panel>
@@ -907,7 +902,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
             <Icon name="video" size={28} />
             <p className="finding-title">还没有解析任何视频</p>
             <p className="muted">
-              把 B 站或 YouTube 的链接粘到上面的输入框，按回车就能看到封面、分P、合集和可选画质。
+              把链接粘到上面的输入框，按回车即可解析
             </p>
           </div>
         </Panel>
@@ -920,7 +915,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
             title="解析结果"
             desc={
               isBili
-                ? `${isBangumi ? '番剧' : '视频'} · ${info.uploader || 'UP 未知'} · 共 ${countItems(parsed)} 个可选内容`
+                ? `${isBangumi ? '番剧' : '视频'} · ${info.uploader || 'UP 未知'}`
                 : `${info.extractor || 'yt-dlp'} · ${info.uploader || '作者未知'}`
             }
             extra={
@@ -1095,9 +1090,6 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                       {selection.size > 1 ? `批量加入下载队列（${selection.size}）` : '把选中的加入队列'}
                     </Button>
                   </div>
-                  <p className="video-note">
-                    勾选多个分P/剧集后加入队列，会按顺序一个一个下载，不会同时开一堆连接。
-                  </p>
                 </div>
               )}
 
@@ -1116,9 +1108,8 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                     <>
                       <span className="field-label">播放流（整段）</span>
                       <Finding level="info" title="整段流模式">
-                        这个视频只有整段流（老视频或部分番剧），画质由 B 站决定，不能单独挑视频轨 /
-                        音频轨。「仅音频」模式在整段流下不可用，可以整段下载后用「音频工具 →
-                        从视频提取音频」再抽音轨。
+                        这个视频只有整段流，画质由 B 站决定，不能单独挑视频轨 / 音频轨；可以整段下载后用
+                        「音频工具 → 从视频提取音频」再抽音轨。
                       </Finding>
                       <List>
                         <ListSection>
@@ -1144,9 +1135,9 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                         <div className="video-cookie">
                           <Finding level="warn" title="画质受限：未登录">
                             {locked.length
-                              ? `扫码登录就能解锁 1080P+。这个视频有 ${locked
+                              ? `这个视频有 ${locked
                                   .map((l) => l.name)
-                                  .join('、')} 等高画质，但没登录 B 站只能取到 ${
+                                  .join('、')} 等高画质，未登录只能取到 ${
                                   videos.map((v) => v.qualityName).join('、') || '低画质'
                                 }。`
                               : '扫码登录就能解锁 1080P+ 等大会员画质。'}
@@ -1165,8 +1156,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                             </Button>
                           </div>
                           <p className="video-note">
-                            扫码最省事：手机 B 站扫一下、确认一下，Cookie 就自动写进本机配置，以后一直有效。
-                            也可以自己去设置页填一份。两种方式的 Cookie 都只存在本机配置文件里，不会上传到任何地方。
+                            扫码最省事：手机 B 站扫一下、确认一下。
                           </p>
                         </div>
                       )}
@@ -1175,7 +1165,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                         <span className="field-label">视频流</span>
                         <Chip>{`${videos.length} 条`}</Chip>
                         <span className="spacer" />
-                        {mode === 'audio' ? <Chip tone="accent">仅音频模式：不会下载视频流</Chip> : null}
+                        {mode === 'audio' ? <Chip tone="accent">仅音频：不下载视频流</Chip> : null}
                       </div>
                       {videos.length ? (
                         <List>
@@ -1203,7 +1193,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                         </List>
                       ) : (
                         <Finding level="warn" title="没有视频流">
-                          这个视频没有可用的 DASH 视频流。
+                          这个视频没有可用的视频流。
                         </Finding>
                       )}
                       {selectedVideo && riskyCodec(selectedVideo.codecs) ? (
@@ -1211,9 +1201,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                           {`选中的 ${selectedVideo.qualityName} 是 ${selectedVideo.codecs}：体积更小，但不少老编辑器、老播放器打不开。要拿去剪辑就换一条 H.264 的。`}
                         </Finding>
                       ) : null}
-                      <p className="video-note">
-                        默认选最高画质并优先 H.264；同一画质下 B 站只会给一条流（按码率最高的那条算）。
-                      </p>
+                      <p className="video-note">默认选最高画质并优先 H.264。</p>
 
                       <div className="video-section-head">
                         <span className="field-label">音频流</span>
@@ -1249,7 +1237,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
 
                       {isBangumi ? (
                         <Finding level="info" title="番剧画质">
-                          番剧的高画质通常需要大会员；如果列表里只有低画质，先确认账号权限。
+                          番剧高画质需要大会员
                         </Finding>
                       ) : null}
                     </>
@@ -1264,7 +1252,6 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                     <span className="field-label">可选格式</span>
                     <Chip>{`${ytFormats.length} 条`}</Chip>
                     <span className="spacer" />
-                    <span className="video-note">由 yt-dlp 列出，选哪条就下哪条</span>
                   </div>
                   {ytFormats.length ? (
                     <List>
@@ -1294,10 +1281,9 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
                       yt-dlp 没有列出可用格式。
                     </Finding>
                   )}
-                  <p className="video-note">「仅音频」模式由 yt-dlp 自动挑音质最好的一条音频轨。</p>
                   {info.subtitles?.length ? (
                     <Finding level="info" title="官方字幕">
-                      {`有官方字幕：${info.subtitles.join('、')}。勾选「下载官方字幕」后会按站点语言内嵌。`}
+                      {`有官方字幕：${info.subtitles.join('、')}。`}
                     </Finding>
                   ) : (
                     <Finding level="info" title="官方字幕">
@@ -1316,19 +1302,19 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
         <Panel>
           <PanelHead title="预览" />
           <p className="muted">
-            正在把预览流缓存到本机…（第一次要等几秒；同一支看第二次是瞬时的）
+            正在准备预览…（第一次要等几秒）
           </p>
         </Panel>
       )}
       {!parsing && !previewBusy && previewErr && (
         <Panel>
           <PanelHead title="预览" />
-          <p className="muted">这一段预览不了：{previewErr}下载之后本地看是一样的。</p>
+          <p className="muted">这一段预览不了：{previewErr}</p>
         </Panel>
       )}
       {!parsing && !previewBusy && preview && (
         <Panel>
-          <PanelHead title="预览" desc="不用先下载，直接在这儿看一眼（直链先缓存到本机再播）" />
+          <PanelHead title="预览" desc="不用先下载，直接在这儿看一眼" />
           <VideoPreview
             videoUrl={preview.videoUrl}
             audioUrl={preview.audioUrl}
@@ -1402,14 +1388,14 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
 
           <SwitchRow
             label="下载封面"
-            desc="B 站封面存成同名 .jpg（部分视频没有封面图）"
+            desc="B 站封面存成同名 .jpg"
             disabled={!isBili}
             checked={settings.downloadCover}
             onChange={(v) => setSetting('downloadCover', v)}
           />
           <SwitchRow
             label="下载弹幕 XML"
-            desc="存成同名 .danmaku.xml，可丢给弹幕工具"
+            desc="存成同名 .danmaku.xml"
             disabled={!isBili}
             checked={settings.downloadDanmaku}
             onChange={(v) => setSetting('downloadDanmaku', v)}
@@ -1423,7 +1409,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
 
           <Field
             label="保存到子目录（可选）"
-            hint="可用变量：{title} 标题、{uploader} UP主、{date} 发布日期、{p} 分P号、{quality} 画质。文件名仍按视频标题命名，这里只控制放在哪个子目录里。"
+            hint="可用变量：{title} 标题、{uploader} UP主、{date} 发布日期、{p} 分P号、{quality} 画质。"
           >
             <TextInput
               value={settings.subDir}
@@ -1438,7 +1424,7 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
               hint={
                 state?.tools?.ffmpeg?.available
                   ? '转码会用到 ffmpeg。'
-                  : '注意：转码需要 ffmpeg，现在还没装，先保持「不转码」也能下到音频。'
+                  : '转码需要 ffmpeg，当前未检测到，保持「不转码」即可下载。'
               }
             >
               <Picker
@@ -1464,9 +1450,6 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
               加入下载队列
             </Button>
           </div>
-          <p className="video-note video-center">
-            下载全部在本机完成，不会上传任何东西；解析与下载都走 B 站官方接口。
-          </p>
         </div>
       </Panel>
 
@@ -1512,24 +1495,21 @@ export function Video({ state, onNavigate, onRefreshState, onToast }: PageProps)
             ))}
           </div>
 
-          <p className="video-note">下载在后台进行：切走视图也不会中断，回来重新解析即可继续。</p>
+          <p className="video-note">下载在后台进行：切走视图不会中断。</p>
         </Panel>
       )}
 
       {/* 许可与出处：解析下载走 yt-dlp、合流转码走 ffmpeg，都是别人的东西 */}
       <Credit
-        desc="下载与合流各用一个第三方程序，许可与出处写在这里"
         items={[
           { label: '解析下载', value: 'Unlicense', sub: 'yt-dlp 2026.08.19' },
           { label: '合流转码', value: 'GPL v3', sub: 'FFmpeg 9.0.2（gyan.dev）' },
-          { label: 'B 站解析', value: '本机完成', sub: '登录信息只存在本机' },
         ]}
       >
         B 站以外的站点交给 <Upstream href="https://github.com/yt-dlp/yt-dlp">yt-dlp</Upstream>
-        （Unlicense，等同公有领域）；音视频合流、抽音轨、转码交给随包的{' '}
+        （Unlicense）；音视频合流、抽音轨、转码交给{' '}
         <Upstream href="https://ffmpeg.org/">ffmpeg</Upstream>
-        （GPL v3 构建）。B 站的画质、音轨与登录信息都在本机处理，不经过第三方解析服务；
-        许可全文见仓库里的 THIRD-PARTY-NOTICES。
+        （GPL v3）。许可全文见仓库里的 THIRD-PARTY-NOTICES。
       </Credit>
     </>
   )

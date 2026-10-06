@@ -223,7 +223,7 @@ export function Resources({ onToast }: PageProps) {
       return
     }
     setChecking(true)
-    setCheckNote('每个站点都会请求一次；403 多为反爬拦截，不代表站点失效。')
+    setCheckNote('403 多为反爬拦截，不代表站点失效。')
     try {
       const res = await api.checkLinks()
       /* ⚠️ `check_resources` 目前是**占位实现**（返回 `{ results: [], pending: true }`，
@@ -232,7 +232,7 @@ export function Resources({ onToast }: PageProps) {
       if (!res?.jobId) {
         setChecking(false)
         setCheckNote('')
-        onToast('链接校验还没做好，暂时无法检查', 'err')
+        onToast('暂时无法校验链接', 'err')
         return
       }
       start(res.jobId, {
@@ -365,7 +365,7 @@ export function Resources({ onToast }: PageProps) {
       */}
       <Banner
         tone="warning"
-        title="Tips："
+        title="说明"
         message={notice || DEFAULT_NOTICE}
         material={material === 'liquid' ? 'clear' : 'regular'}
       />
@@ -414,7 +414,6 @@ export function Resources({ onToast }: PageProps) {
           <div className="stack">
             <p className="finding-title">资源库读取失败</p>
             <p className="finding-text">{loadErr}</p>
-            <p className="muted">资源库数据没能读出来，稍后点下面重试即可。</p>
             <div className="btn-row">
               <Button icon="refresh" onClick={() => void load(true)}>
                 重试
@@ -429,7 +428,6 @@ export function Resources({ onToast }: PageProps) {
           <div className="empty">
             <Icon name="library" size={28} />
             <p className="finding-title">资源库还是空的</p>
-            <p className="muted">资源库里还没有条目。点「重新载入」再试一次。</p>
             <Button icon="refresh" onClick={() => void load(true)}>
               重新载入
             </Button>
@@ -442,9 +440,6 @@ export function Resources({ onToast }: PageProps) {
           <div className="empty">
             <Icon name="search" size={28} />
             <p className="finding-title">没有匹配的资源</p>
-            <p className="muted">
-              {q ? `没有名称 / 描述 / 标签里含「${query.trim()}」的条目。换个词，或清空搜索框。` : '当前分组下没有条目。'}
-            </p>
             <Button
               onClick={() => {
                 setQuery('')
@@ -646,7 +641,6 @@ function ResourceCard({
       {item.desc && <p className="res-item-desc">{item.desc}</p>}
       {item.tip && (
         <p className="res-item-tip">
-          <strong>提示：</strong>
           {item.tip}
         </p>
       )}

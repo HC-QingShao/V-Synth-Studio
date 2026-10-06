@@ -81,7 +81,7 @@ export function readFileBytes(path: string): Promise<ArrayBuffer> {
       else reject(new Error(`读不到文件内容（HTTP ${xhr.status}）`))
     }
     xhr.onerror = () =>
-      reject(new Error('读不到文件内容：asset 协议拒绝了这次读取（这个目录没放行？）'))
+      reject(new Error('读不到文件内容：这个路径读不出来'))
     xhr.send()
   })
 }

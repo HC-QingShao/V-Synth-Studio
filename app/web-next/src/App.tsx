@@ -65,13 +65,13 @@ interface PageDef {
  */
 const PAGES = [
   { id: 'dashboard', title: '总览', sub: '环境检测与常用入口', icon: 'home', group: '工作台' },
-  { id: 'convert', title: '工程转换', sub: '离线把工程转到另一个编辑器', icon: 'swap', group: '工作台' },
+  { id: 'convert', title: '工程转换', sub: '把工程转到另一个编辑器', icon: 'swap', group: '工作台' },
   { id: 'video', title: '视频解析', sub: 'B 站 / YouTube 等平台的 MV 下载', icon: 'video', group: '素材获取' },
-  { id: 'svsep', title: '音轨分离', sub: '在线 MVSEP / 离线内嵌引擎，拆人声与伴奏', icon: 'layers', group: '素材获取' },
+  { id: 'svsep', title: '音轨分离', sub: '在线 MVSEP / 本地引擎，拆人声与伴奏', icon: 'layers', group: '素材获取' },
   { id: 'midi', title: '人声转 MIDI', sub: '干声扒谱：音符起止与音高，导出 .mid', icon: 'music', group: '素材获取' },
   { id: 'audio', title: '音频工具', sub: '格式转换 / 裁剪 / 变调变速', icon: 'wave', group: '素材获取' },
   { id: 'lyrics', title: '网易云专栏', sub: '网易云搜词，导出 LRC · SRT，下载封面 / 歌曲', icon: 'music', group: '素材获取' },
-  { id: 'pv', title: '文字 PV', sub: '把歌词做成动态歌词视频（JIZURA）', icon: 'video', group: '素材获取' },
+  { id: 'pv', title: '文字 PV', sub: '把歌词做成动态歌词视频', icon: 'video', group: '素材获取' },
   { id: 'resources', title: '资源库', sub: '立绘、声库、插件、音源站（仅链接）', icon: 'library', group: '素材获取' },
   { id: 'settings', title: '设置', sub: '外观、路径、外部工具', icon: 'gear', group: '系统' },
 ] as const satisfies readonly PageDef[]

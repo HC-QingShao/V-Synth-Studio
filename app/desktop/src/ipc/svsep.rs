@@ -15,8 +15,10 @@
 //! | `GET /api/svsep/task/{id}/file/{name}` | **asset 协议**（`convertFileSrc(输出目录 + 文件名)`） |
 //! | `GET /api/svsep/backend/system-stats` | 并进 `svsep_status`（前端本来就每 2 秒轮一次它） |
 //!
-//! 上传那条改法的理由值得留一句：Python 服务要的本来就是**一个文件**，传字节只是
-//! 因为以前的页面拿不到路径。现在拖放与对话框都给真路径，那一趟白搬的字节没了。
+//! 上传那条改法的理由值得留一句：Python 服务要的本来就是**一个文件**，以前是页面把
+//! 字节传到后端、后端再转发；现在页面只给路径，读盘与转发都在 Rust 这一侧，前端那一趟
+//! 白搬的字节没了。⚠️ 但**转发给上游时仍然要自己拼 multipart** —— 上游读的是
+//! `request.files["file"]`，裸字节会被判成「未检测到上传文件」+400，见 `multipart_body`。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -153,7 +155,12 @@ where
 {
     if DL_ACTIVE.load(Ordering::Relaxed) == 1 {
         let now = DL_KIND.lock().ok().and_then(|k| *k).unwrap_or("包");
-        let now = if now == "runtime" { "运行时" } else { "模型" };
+        let now = match now {
+            "runtime" => "运行时",
+            "models" => "模型",
+            "dml" => "显卡加速包",
+            _ => "包",
+        };
         return Err(format!("{now}正在下载中。想换一个就先暂停或停止它。"));
     }
     if DEL_ACTIVE.load(Ordering::Relaxed) {
@@ -206,6 +213,17 @@ pub async fn svsep_status(st: super::St<'_>) -> Cmd {
         "outputsDir": s.outputs().to_string_lossy(),
         "runtime": crate::svsep::runtime_status(&st.inner().root),
         "models": crate::svsep::models_status(s.writable()),
+        "dml": {
+            /* 显卡加速包（A 卡 / Intel 核显用的 DirectML）。
+               `installed` = 包装没装；`active` = 那份 ORT 是不是真的排在
+               `site-packages` 前面（见 `svsep::set_dml_active`）。
+               `nvidia` 给界面用来解释「为什么自动模式没开」。 */
+            "installed": crate::svsep::dml_installed(&st.inner().root),
+            "active": crate::svsep::dml_active(&st.inner().root),
+            "nvidia": crate::svsep::nvidia_present(),
+            "dir": crate::platform::clean_path(&crate::svsep::dml_site_dir(&st.inner().root)),
+            "zipBytes": crate::svsep::DML_BYTES,
+        },
         "download": download_state(&st.inner().root, s.writable()),
         "running": running,
         "port": s.port_hint(),
@@ -263,10 +281,13 @@ pub async fn svsep_models_download(st: super::St<'_>) -> Cmd {
 
 /// 下运行时（几 GB，只该下一次）。
 ///
-/// ⚠️ 它解到 `<root>/app/data/svsep/`（**程序目录**，不是 `%APPDATA%`）——
-/// 因为 `python.exe` 与 `backend/` 必须待在一起，而上游后端就是按
-/// 「runtime 与 backend 同级」找东西的。安装版下 `Program Files` 不可写，
-/// 那时这个下载会以「建目录失败」失败，错误文案照实说。
+/// ⚠️ 它解到 [`crate::svsep::runtime_base`] —— **不一定**是程序目录：
+///  · 绿色版 = `<root>/app/data/svsep/`（老地方，和以前一样）；
+///  · 安装版 = `<可写>/svsep`（`%APPDATA%\…\svsep`），因为程序目录在
+///    `Program Files` 下**只读**，往那儿解 7.4 GB 必然「建目录失败」
+///    —— 这正是 MSI 用户「音轨分离用不了」的一半原因；
+///  · 用户在界面上另选了目录就听用户的（C 盘紧张的人把这几 GB 放 D 盘）。
+/// `python.exe` 与 `backend/` 必须待在一起，所以它俩跟着一起走。
 #[tauri::command]
 pub async fn svsep_runtime_download(st: super::St<'_>) -> Cmd {
     let root = st.inner().root.clone();
@@ -283,6 +304,204 @@ pub async fn svsep_runtime_download(st: super::St<'_>) -> Cmd {
         }
         out
     })
+}
+
+/* ══════════════════════════ 运行时的落点（用户可选） ══════════════════════════ */
+
+/// 运行时落点的现状。
+///
+/// 界面拿它显示「装在哪」，并据此决定要不要提醒「程序目录不可写，换个目录」。
+fn runtime_dir_info(st: &super::AppState) -> Value {
+    let active = crate::svsep::runtime_base(&st.root);
+    let legacy = crate::svsep::runtime_dir(&st.root);
+    // 真写一下才算数：安装版在 Program Files 下 create_dir_all 会失败
+    let root_dir = st.root.join("app").join("data");
+    let root_writable = match std::fs::create_dir_all(&root_dir) {
+        Ok(()) => {
+            let probe = root_dir.join(".vss-write-probe");
+            let ok = std::fs::write(&probe, b"ok").is_ok();
+            let _ = std::fs::remove_file(&probe);
+            ok
+        }
+        Err(_) => false,
+    };
+    json!({
+        "dir": crate::platform::clean_path(&active),
+        "installed": st.installed,
+        /* 程序目录能不能写。安装版（Program Files）是 false ——
+           **界面必须提一句**，否则用户点了下载只看到一句「建目录失败」。 */
+        "rootWritable": root_writable,
+        /* 安装版建议落点 / 用户没选过时的默认 */
+        "writableDefault": crate::platform::clean_path(&st.writable.join("svsep")),
+        "hasRuntime": crate::svsep::runtime_ready(&st.root),
+        /* 换过目录之后老位置可能**还留着一份 7 GB**（我们不搬文件，见下）。
+           给界面一个「旧位置还有一份」的提示，删不删用户自己定。 */
+        "legacyDir": if active == legacy { Value::Null } else { json!(crate::platform::clean_path(&legacy)) },
+    })
+}
+
+/// 问：运行时现在装在哪、默认会装到哪。
+#[tauri::command]
+pub async fn svsep_runtime_dir(st: super::St<'_>) -> Cmd {
+    Ok(runtime_dir_info(&st))
+}
+
+/// 换一个运行时落点。
+///
+/// **只改配置 + 立刻生效，不搬文件** —— 7.4 GB 搬到一半失败比不动更糟。
+/// 旧目录里那份原地留着，`runtime_dir_info().legacyDir` 会告诉界面它在哪，
+/// 删不删由用户决定（`svsep_deps_delete` 只删当前这一份）。
+#[tauri::command]
+pub async fn svsep_set_runtime_dir(st: super::St<'_>, dir: String) -> Cmd {
+    if DL_ACTIVE.load(Ordering::Relaxed) == 1 {
+        return Err("正在下载，先暂停或停止再换目录".into());
+    }
+    if DEL_ACTIVE.load(Ordering::Relaxed) {
+        return Err("正在删除依赖，等它删完".into());
+    }
+    if st.inner().svsep.probe().await {
+        return Err("分离服务正跑着，先停掉再换目录".into());
+    }
+    let raw = dir.trim().to_string();
+    if !raw.is_empty() {
+        let p = std::path::Path::new(&raw);
+        std::fs::create_dir_all(p)
+            .map_err(|e| format!("建目录失败（{}）：{e}", p.to_string_lossy()))?;
+        // 空目录建得出来不等于写得进去（只读盘、受控文件夹都这样），真落一个探针文件
+        let probe = p.join(".vss-write-probe");
+        std::fs::write(&probe, b"ok")
+            .map_err(|e| format!("这个目录写不进去（{}）：{e}", p.to_string_lossy()))?;
+        let _ = std::fs::remove_file(&probe);
+    }
+    let mut cfg = st.config_snapshot();
+    let Some(map) = cfg.as_object_mut() else {
+        return Err("配置文件坏了（不是一个 JSON 对象）".into());
+    };
+    map.insert("svsepRuntimeDir".to_string(), json!(raw));
+    super::config_file::save_config(&st.writable, &cfg)
+        .map_err(|e| format!("保存配置失败：{e}"))?;
+    if let Ok(mut g) = st.config.lock() {
+        *g = cfg;
+    }
+    crate::svsep::init_runtime_base(&st.root, &st.writable, st.installed, &raw);
+    crate::log_line(&format!(
+        "音轨分离运行时的落点改成：{}",
+        crate::platform::clean_path(&crate::svsep::runtime_base(&st.root))
+    ));
+    Ok(runtime_dir_info(&st))
+}
+
+/* ══════════════════════ 显卡加速（DirectML：A 卡 / 核显） ══════════════════════ */
+
+/// 下显卡加速包（24 MB）并让它生效。
+///
+/// ⚠️ 它和「运行时 / 模型」**不是同一套下载机制**：那两个是几 GB、支持续传的
+/// 大包（走 `DL_*` 那套状态机），这个是 24 MB 的一次性文件，走 `fetch_to_file`
+/// 自己的五轮重试就够。所以它**不抢** `DL_ACTIVE`，界面也不该拿它当大包显示。
+#[tauri::command]
+pub async fn svsep_dml_download(st: super::St<'_>) -> Cmd {
+    if DL_ACTIVE.load(Ordering::Relaxed) == 1 {
+        let now = DL_KIND.lock().ok().and_then(|k| *k).unwrap_or("包");
+        return Err(format!("{now}正在下载中，等它下完再下加速包。"));
+    }
+    if DEL_ACTIVE.load(Ordering::Relaxed) {
+        return Err("正在删除依赖文件，等它删完再下".into());
+    }
+    let root = st.inner().root.clone();
+    let state = st.inner().clone();
+    if let Ok(mut k) = DL_KIND.lock() {
+        *k = Some("dml");
+    }
+    if let Ok(mut e) = DL_ERROR.lock() {
+        *e = None;
+    }
+    DL_PAUSE.store(false, Ordering::Relaxed);
+    DL_STOP.store(false, Ordering::Relaxed);
+    DL_STAGE.store(0, Ordering::Relaxed);
+    DL_BYTES.store(0, Ordering::Relaxed);
+    DL_TOTAL.store(0, Ordering::Relaxed);
+    DL_ACTIVE.store(1, Ordering::Relaxed);
+
+    /* 它走的是 `download_dml` 而不是 `fetch_bundle`（24 MB、不支持续传），
+       所以 `spawn_download` 那个「返回值必须是 FetchOutcome」的签名套不上，
+       这里自己收尾 —— 但**进度仍然写同一组 `DL_*`**，界面不用学第二套。 */
+    tokio::spawn(async move {
+        let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, None);
+        let res = crate::svsep::download_dml(&root, &ctl, note_progress).await;
+        if res.is_ok() {
+            let (mode, six) = dml_settings(&state);
+            crate::svsep::apply_dml(&root, &mode, six);
+        }
+        DL_ACTIVE.store(0, Ordering::Relaxed);
+        if let Ok(mut k) = DL_KIND.lock() {
+            *k = None;
+        }
+        if let Err(e) = res {
+            if let Ok(mut slot) = DL_ERROR.lock() {
+                *slot = Some(e);
+            }
+        }
+    });
+    Ok(json!({ "started": true }))
+}
+
+/// directml 的设置怎么读（`auto` / `on` / `off` + 六轨开关）。
+fn dml_settings(st: &super::AppState) -> (String, bool) {
+    let cfg = st.config_snapshot();
+    let mode = cfg
+        .get("svsepDml")
+        .and_then(Value::as_str)
+        .unwrap_or("auto")
+        .to_string();
+    let six = cfg
+        .get("svsepDmlSix")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    (mode, six)
+}
+
+/// 开 / 关显卡加速，以及「六轨也用」。
+///
+/// ⚠️ 六轨那条是**改上游 Python 的一行硬编码**（上游怕爆显存写死了 False）。
+/// 显存不够时是整个任务失败、不是自动退回 CPU —— 界面上必须写清「建议显存 ≥ 8 GB」。
+#[tauri::command]
+pub async fn svsep_set_dml(st: super::St<'_>, mode: Option<String>, six: Option<bool>) -> Cmd {
+    if st.inner().svsep.probe().await {
+        return Err("分离服务正跑着，先停掉再改加速设置".into());
+    }
+    let (mut cur_mode, mut cur_six) = dml_settings(&st.inner());
+    if let Some(m) = mode {
+        let m = m.trim().to_lowercase();
+        if !["auto", "on", "off"].contains(&m.as_str()) {
+            return Err(format!("不认识的模式：{m}（只能是 auto / on / off）"));
+        }
+        cur_mode = m;
+    }
+    if let Some(s) = six {
+        cur_six = s;
+    }
+    if cur_mode != "off" && !crate::svsep::dml_installed(&st.inner().root) {
+        return Err("还没下加速包。先点「安装扩展包」，或者单独下这个 24 MB 的包。".into());
+    }
+    let mut cfg = st.config_snapshot();
+    let Some(map) = cfg.as_object_mut() else {
+        return Err("配置文件坏了（不是一个 JSON 对象）".into());
+    };
+    map.insert("svsepDml".to_string(), json!(cur_mode));
+    map.insert("svsepDmlSix".to_string(), json!(cur_six));
+    super::config_file::save_config(&st.writable, &cfg).map_err(|e| format!("保存配置失败：{e}"))?;
+    if let Ok(mut g) = st.config.lock() {
+        *g = cfg;
+    }
+    let (active, six_ok) = crate::svsep::apply_dml(&st.inner().root, &cur_mode, cur_six);
+    Ok(json!({
+        "mode": cur_mode,
+        "six": cur_six,
+        "active": active,
+        "sixActive": six_ok,
+        "installed": crate::svsep::dml_installed(&st.inner().root),
+        "nvidia": crate::svsep::nvidia_present(),
+    }))
 }
 
 /// 暂停下载：`.part` 留着，下次点「继续下载」带 Range 接着下。
@@ -371,6 +590,51 @@ pub async fn svsep_deps_delete(st: super::St<'_>) -> Cmd {
 
 /* ══════════════════════════════ 分离任务 ══════════════════════════════ */
 
+/// multipart 的 boundary 每次换一个（进程内自增就够 —— body 只在本进程里拼）。
+static NEXT_BOUNDARY: AtomicU64 = AtomicU64::new(1);
+
+/// 交给上游的**文件名**：ASCII 词干 + 原扩展名。
+///
+/// 为什么不用中文原名：multipart 头里的非 ASCII 要靠 RFC 2231 才规范，而上游
+/// `secure_filename()` 本来就会把非 ASCII 剥成 `upload` —— 真正被它用到的只有
+/// **扩展名**（`ALLOWED_EXTENSIONS` 白名单 + 引擎按后缀判格式）。原名另有地方记
+/// （任务记录里的 `original_name`）。
+///
+/// 没有扩展名时兜一个 `wav`：上游对无后缀的文件一律 400，给个能过白名单的后缀
+/// 至少让它走到「解码失败」那条正常错误上。
+fn upload_filename(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "wav".to_string());
+    let stem: String = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let stem = stem.trim_matches('_');
+    let stem = if stem.is_empty() { "audio" } else { stem };
+    format!("{stem}.{ext}")
+}
+
+/// 拼一个只有 `file` 一个字段的 multipart 体（CRLF 一个都不能少）。
+fn multipart_body(boundary: &str, filename: &str, content_type: &str, bytes: &[u8]) -> Vec<u8> {
+    let head = format!(
+        "--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+         Content-Type: {content_type}\r\n\r\n"
+    );
+    let mut body = Vec::with_capacity(bytes.len() + head.len() + boundary.len() + 16);
+    body.extend_from_slice(head.as_bytes());
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
 /// 提交一次分离 —— **收本机路径，不收字节**。
 ///
 /// 这是这次减法里最典型的一处：旧实现是「前端把音频读成 multipart 传到后端，
@@ -410,6 +674,16 @@ pub async fn svsep_separate(st: super::St<'_>, path: String, engine: Option<Stri
         _ => "application/octet-stream",
     };
 
+    /* ⚠️ **必须拼成 multipart/form-data，不能把裸字节 POST 过去。**
+       上游 Flask 的 `_submit_separation()` 读的是 `request.files["file"]` ——
+       裸字节（哪怕 content-type 写对了）在它眼里就是「没有文件」，直接
+       `400 {"ok":false,"error":"未检测到上传文件"}`。2026-10 测试版报的
+       「音轨分离报错 400」就是这一条（`tests/manual/svsep-separate-check.mjs`
+       复现并留了探针）。`filename` 也必须带**对的扩展名**：上游要拿后缀去
+       `ALLOWED_EXTENSIONS` 白名单里对，对不上同样是 400。 */
+    let boundary = format!("----VSynthStudioBoundary{}", NEXT_BOUNDARY.fetch_add(1, Ordering::Relaxed));
+    let body = multipart_body(&boundary, &upload_filename(p), ct, &bytes);
+
     if !st.inner().svsep.probe().await {
         // 顺手把它起起来 —— 用户点「开始分离」时服务通常还没起
         st.inner().svsep.start().await.map_err(|e| e.to_string())?;
@@ -418,7 +692,7 @@ pub async fn svsep_separate(st: super::St<'_>, path: String, engine: Option<Stri
     let mut out = st
         .inner()
         .svsep
-        .submit(&engine, bytes, ct)
+        .submit(&engine, body, &format!("multipart/form-data; boundary={boundary}"))
         .await
         .map_err(|e| e.to_string())?;
     // 任务对象捋平：前端拿 `res.task` 直接当任务记录用，而它读的是 `task.id` ——
@@ -734,5 +1008,41 @@ mod tests {
         assert!(all.len() <= KEEP_TASKS);
         assert!(all.iter().any(|(k, _)| k == "old10"));
         assert!(!all.iter().any(|(k, _)| k == "t1"));
+    }
+
+    /// 上游要 multipart（`request.files["file"]`），裸字节会回 400 —— 2026-10 那个 bug。
+    #[test]
+    fn the_body_is_multipart_with_a_file_field_and_a_usable_filename() {
+        let body = multipart_body("BOUND", "song.wav", "audio/wav", b"RIFFdata");
+        let text = String::from_utf8_lossy(&body).to_string();
+        assert!(text.starts_with("--BOUND\r\n"));
+        assert!(text.contains("Content-Disposition: form-data; name=\"file\"; filename=\"song.wav\"\r\n"));
+        assert!(text.contains("Content-Type: audio/wav\r\n\r\n"));
+        assert!(text.contains("RIFFdata"));
+        assert!(text.ends_with("\r\n--BOUND--\r\n"));
+        // 裸字节的判据：整段里必须既有边界也有音频本体
+        assert!(body.len() > 8);
+    }
+
+    #[test]
+    fn upload_filename_keeps_the_extension_and_stays_ascii() {
+        use std::path::Path;
+        /* 判据只写**上游真正会用到**的三件事：ASCII、后缀在 `ALLOWED_EXTENSIONS` 里、
+           词干非空。具体的中文被换成什么字符不重要（上游 `secure_filename` 还会再洗一遍）。 */
+        for (input, want_ext) in [
+            (r"D:\歌\晴天 最终版.WAV", "wav"),
+            ("/tmp/a-b_c.mp3", "mp3"),
+            ("/tmp/无题", "wav"), // 没有扩展名 → 兜一个能过白名单的
+            ("/tmp/.wav", "wav"),
+            ("/tmp/整首歌.flac", "flac"),
+        ] {
+            let got = upload_filename(Path::new(input));
+            assert!(got.is_ascii(), "{input} → {got} 里还有非 ASCII");
+            assert_eq!(got.rsplit_once('.').map(|(_, e)| e), Some(want_ext), "{input} → {got}");
+            let stem = got.rsplit_once('.').map(|(s, _)| s).unwrap_or("");
+            assert!(!stem.trim_matches('_').is_empty(), "{input} → {got} 词干是空的");
+        }
+        // 全是中文字符时退回 audio，而不是一串下划线
+        assert_eq!(upload_filename(Path::new("/tmp/无题.wav")), "audio.wav");
     }
 }

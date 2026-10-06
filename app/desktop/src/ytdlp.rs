@@ -16,8 +16,7 @@ use crate::net::{Cancel, CANCELED};
 /// yt-dlp 缺失时的统一提示。它**随程序打包**，所以「找不到」只可能是
 /// tools 目录被删或解压不完整 —— 不要引导用户去联网下载（境内下不动）。
 const NOT_FOUND: &str =
-    "未找到 yt-dlp。它随程序一起打包，出现这个提示说明 tools 目录缺失或不完整 —— \
-     从压缩包里把 tools 整个目录重新解压到程序根目录即可。";
+    "未找到 yt-dlp：tools 目录缺失，请重新解压程序包。";
 
 #[derive(Clone)]
 pub struct Found {

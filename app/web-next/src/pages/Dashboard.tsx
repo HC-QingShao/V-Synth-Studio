@@ -21,22 +21,22 @@ const QUICK: { id: string; title: string; desc: string }[] = [
   {
     id: 'video',
     title: 'MV 解析下载',
-    desc: 'B 站视频解析下载（含大会员画质、弹幕与字幕）；YouTube 等上千个站点由 yt-dlp 支持',
+    desc: 'B 站视频解析下载（含大会员画质、弹幕与字幕）；YouTube 等上千个站点',
   },
   {
     id: 'svsep',
     title: '音轨分离',
-    desc: '在线 MVSEP（要上传）与离线内嵌引擎（音频不出本机）两条路，拆人声、伴奏、鼓、贝斯等',
+    desc: '在线 MVSEP（要上传）与本地引擎两条路，拆人声、伴奏、鼓、贝斯等',
   },
   {
     id: 'audio',
     title: '音频工具',
-    desc: '本地 ffmpeg 做 WAV/MP3 导出、裁剪、变调变速、响度标准化',
+    desc: 'WAV/MP3 导出、裁剪、变调变速、响度标准化',
   },
   {
     id: 'resources',
     title: '资源导航',
-    desc: '立绘、免费声库、插件、可下 WAV 的音源站 —— 只存链接，不占你的硬盘',
+    desc: '立绘、免费声库、插件、可下 WAV 的音源站 —— 只存链接，不下载文件',
   },
 ]
 
@@ -58,7 +58,7 @@ function computeChecks(state: AppState | null): Check[] {
       level: 'warn',
       title: '未找到 ffmpeg',
       detail:
-        'MV 下载后无法把视频流和音频流合并成 mp4，也不能导出 WAV/MP3、不能做变调变速。它随程序分发，不需要联网下载 —— 若显示未找到，把 tools 目录重新解压到程序根目录。',
+        'MV 下载后无法把视频流和音频流合并成 mp4，也不能导出 WAV/MP3、不能做变调变速。',
     })
   }
   if (!tools.ytdlp?.available) {
@@ -144,7 +144,7 @@ export function Dashboard({
     return (
       <Panel>
         <p className="muted">
-          正在检查环境…（要读取 ffmpeg / yt-dlp 版本，通常 2–3 秒）
+          正在检查环境…（约 2–3 秒）
         </p>
       </Panel>
     )
@@ -156,7 +156,7 @@ export function Dashboard({
         <div className="stack">
           <PanelHead
             title="欢迎回来"
-            desc="这里是一款专为P主打造的虚拟歌姬工作站，集合了很多便捷功能，大多数处理都在本地运行不会将任何数据上传云端。"
+            desc="这里是一款专为P主打造的虚拟歌姬工作站，集合了很多便捷功能。"
           />
           <div className="btn-row">
             <Button variant="primary" icon="play" onClick={() => onNavigate('convert')}>
@@ -174,7 +174,7 @@ export function Dashboard({
             label="音轨分离扩展包"
             {...packStat(
               packs.svsep,
-              '离线分离的引擎与模型都在本机',
+              '引擎与模型已就绪',
               '在「音轨分离」页里下载（约 8 GB）',
             )}
           />
@@ -182,7 +182,7 @@ export function Dashboard({
             label="人声转 MIDI 扩展包"
             {...packStat(
               packs.midi,
-              'GAME 模型与动态库都在本机',
+              '模型与运行时已就绪',
               '在「人声转 MIDI」页里下载',
             )}
           />
@@ -224,10 +224,7 @@ export function Dashboard({
       </Panel>
 
       <Panel>
-        <PanelHead
-          title="外部工具"
-          desc="ffmpeg / yt-dlp 随程序分发，不需要联网下载；这里只做检测"
-        />
+        <PanelHead title="外部工具" />
         <div className="tool-list">
           <ToolRow label="ffmpeg" desc="音视频合并、导出 WAV/MP3、变调变速" info={state?.tools?.ffmpeg} onToast={onToast} />
           <ToolRow label="yt-dlp" desc="YouTube 等上千站点的解析与下载" info={state?.tools?.ytdlp} onToast={onToast} />

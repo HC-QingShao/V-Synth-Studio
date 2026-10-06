@@ -15,6 +15,7 @@ import { Chip, Finding, Panel, PanelHead, Stat } from '@/components/Panel'
 import { Field, TextInput } from '@/components/Field'
 import { DirectoryInput } from '@/components/DirPicker'
 import { formatBytes } from '@/lib/format'
+import { downloadBytes, installLabel, useInstaller, type InstallStep } from '@/lib/useInstaller'
 import { useJob } from '@/lib/useJob'
 import type { PageProps } from './types'
 import './Midi.css'
@@ -255,16 +256,62 @@ export function Midi({ onToast, onNavigate }: PageProps) {
         setDevice(v.device.mode)
       }
       setStatusErr(null)
+      return v
     } catch (e) {
       setStatusErr(errText(e))
+      return null
     }
   }, [])
 
+  /**
+   * 要装哪几个包、按什么顺序。
+   *
+   * 顺序：**推理运行库 → 模型**。运行库那一行在装了音轨分离时会「白捡」——
+   * 后端借那边运行时的 `onnxruntime.dll`（`runtime.borrowed`），那时 `ready`
+   * 已经是真，这一步自动跳过，不会白下 78 MB。
+   */
+  const plan = useCallback(
+    (s: MidiStatus): InstallStep[] => [
+      {
+        key: 'runtime',
+        label: '推理运行库',
+        bytes: downloadBytes(s.runtime),
+        ready: !!s.runtime.ready,
+        /* 借来的那份（音轨分离的运行时）**本来就不用下** —— 标 `skip` 而不是 `ready`，
+           这样「刚进这一页、只有模型缺」时按钮说「安装扩展包」而不是「继续安装」 */
+        skip: !!s.runtime.borrowed,
+        start: api.midiDownloadRuntime,
+      },
+      {
+        key: 'models',
+        label: '模型',
+        bytes: downloadBytes(s.models),
+        ready: !!s.models.ready,
+        start: api.midiDownloadModels,
+      },
+    ],
+    [],
+  )
+
+  /**
+   * 「一键装」：一颗按钮把还缺的包按顺序下完（状态机在 `lib/useInstaller.ts`）。
+   * ⚠️ 这边**没有暂停**：这两个包不支持续传（停下就是重来），后端也刻意没给
+   * 「继续下载」这个动作 —— 所以进度条下只留「停止下载」。
+   */
+  const installer = useInstaller<MidiStatus>({
+    load: refresh,
+    plan,
+    download: (s) => s.download,
+    onToast,
+  })
+
   useEffect(() => {
+    /* 安装中由 `useInstaller` 每 1.75 秒拉一次（拉的也是 `refresh`），这里让开 */
+    if (installer.installing) return
     void refresh()
     const t = window.setInterval(() => void refresh(), POLL_STATUS)
     return () => window.clearInterval(t)
-  }, [refresh])
+  }, [refresh, installer.installing])
 
   /* 离开页面时收干净订阅（`useJob` 内部也做了，这里显式一点） */
   useEffect(() => () => stop(), [stop])
@@ -301,6 +348,13 @@ export function Midi({ onToast, onNavigate }: PageProps) {
   const ready = !!st?.models.ready && !!st?.runtime.ready
   const running = !!job && job.status === 'running'
   const dl = st?.download
+  /** 那颗大按钮的文案；`null` = 全装好了，那时不画按钮（上面那排 Stat 就是摘要） */
+  const installText = installLabel(st ? plan(st) : [])
+  /** 进度条标签上「正在装什么」—— 优先用安装循环正在装的那一步，退回下载状态里的种类 */
+  const stepName =
+    installer.stepLabel || (dl?.kind === 'runtime' ? '推理运行库' : dl?.kind === 'models' ? '模型' : '')
+  /** 安装失败要显示的那句话：循环自己撞上的错优先，否则是后端留下的那一句 */
+  const installError = installer.error || dl?.error || null
   /**
    * 这台机器能不能用 GPU。`undefined` = 状态还没拉回来（那一格先按锁着画，
    * 宁可晚两秒解锁也不要在没探明时把格子放开）。
@@ -317,32 +371,6 @@ export function Midi({ onToast, onNavigate }: PageProps) {
   )
 
   /* ── 动作 ─────────────────────────────────────────────── */
-
-  const doDownloadModels = async () => {
-    setBusy(true)
-    try {
-      await api.midiDownloadModels()
-      onToast(`开始下载模型（${st ? formatBytes(st.models.zipBytes) : '整个模型包'}）`, 'info')
-      void refresh()
-    } catch (e) {
-      onToast(errText(e), 'err')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const doDownloadRuntime = async () => {
-    setBusy(true)
-    try {
-      await api.midiDownloadRuntime()
-      onToast('开始下载 ONNX Runtime（约 78 MB）', 'info')
-      void refresh()
-    } catch (e) {
-      onToast(errText(e), 'err')
-    } finally {
-      setBusy(false)
-    }
-  }
 
   const doStopDownload = async () => {
     setBusy(true)
@@ -404,7 +432,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
       // 引擎在下次提交扒谱时才读盘，所以说清「什么时候生效」。
       onToast(
         mode === 'gpu'
-          ? '已设为 GPU。下次开始扒谱时生效（跑起来用不了会自动退回 CPU，原因写进任务日志）。'
+          ? '已设为 GPU。下次开始扒谱时生效。'
           : `推理方式已改成「${DEVICE_LABEL[r.mode]}」，下次开始扒谱时生效。`,
         'ok',
       )
@@ -446,7 +474,6 @@ export function Midi({ onToast, onNavigate }: PageProps) {
           void refresh()
         },
       })
-      onToast('已提交，跑的时候界面照常能用', 'info')
     } catch (e) {
       onToast(errText(e), 'err')
     } finally {
@@ -499,7 +526,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
         <Panel>
           <PanelHead
             title="干声素材"
-            desc="把「音轨分离」拆出来的人声给这里；直接给整首歌也行，但伴奏会干扰判音高"
+            desc="把「音轨分离」拆出来的人声给这里"
             extra={input ? <Chip tone="ok">已选</Chip> : <Chip>未选</Chip>}
           />
           <input
@@ -538,10 +565,10 @@ export function Midi({ onToast, onNavigate }: PageProps) {
         </Panel>
 
         <Panel>
-          <PanelHead title="参数" desc="只有「去噪步数」值得反复试，其余照默认就行" />
+          <PanelHead title="参数" desc="只有「去噪步数」值得反复试" />
           <Field
             label="去噪步数"
-            hint={`默认 8 步。耗时几乎与它成正比 —— 32 步大约是 8 步的四倍。${
+            hint={`默认 8 步。耗时几乎与它成正比。${
               estimate > 0 ? `按当前设置估约 ${humanSecs(estimate)}。` : ''
             }`}
           >
@@ -576,7 +603,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
 
           <Field
             label="线程数"
-            hint="线程不是越多越快，4 左右通常最快；开太多反而更慢"
+            hint="4 左右通常最快；开太多反而更慢"
           >
             <TextInput
               type="number"
@@ -615,7 +642,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
                 onToast(
                   cuda?.ok
                     ? '这一格现在选不了。'
-                    : `GPU 现在用不了：${cuda?.detail ?? '正在探测'}。要用 GPU 请先在「音轨分离」里把运行时下全（GPU 需要的东西都在它里面，装了就不用再下别的）。`,
+                    : `GPU 现在用不了：${cuda?.detail ?? '正在探测'}。要用 GPU 请先在「音轨分离」里把运行时下全。`,
                   'warn',
                 )
               }}
@@ -668,7 +695,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
         <Panel>
           <PanelHead
             title="扒谱"
-            desc="提交后会在后台跑，进度看下面；界面照常能用"
+            desc="进度看下面；界面照常能用"
             extra={
               running ? (
                 <Chip tone="accent">运行中</Chip>
@@ -686,75 +713,49 @@ export function Midi({ onToast, onNavigate }: PageProps) {
             </Finding>
           )}
 
-          {!ready && st && (
-            <Finding level="warn" title="第一次用要先下模型">
-              模型要下 <strong>{formatBytes(st.models.zipBytes)}</strong>
-              （解开后 {formatBytes(st.models.extractBytes)}）。模型权重许可是{' '}
-              <strong>{st.license}</strong>
-              ，不能随安装包分发、要自己下 —— 点下面的按钮从官方发布取。
-              {st.models.partBytes > 0 && (
-                <>
-                  {' '}
-                  ⚠️ 盘上还留着上次没下完的 {formatBytes(st.models.partBytes)}，它
-                  <strong>不支持续传</strong>，再点一次是从头下。
-                </>
-              )}
-            </Finding>
-          )}
-
           <div className="midi-stats">
             <Stat
               label="模型"
               value={st ? (st.models.ready ? '就绪' : `缺 ${st.models.missing.length} 个`) : '…'}
-              sub={st?.models.ready ? st.models.dir : st?.models.missing.join('、')}
+              sub={st?.models.ready ? undefined : st?.models.missing.join('、')}
             />
             <Stat
               label="ONNX Runtime"
               value={st ? (st.runtime.ready ? '就绪' : '缺') : '…'}
-              sub={st?.runtime.borrowed ? '复用音轨分离的运行时' : st?.runtime.dll ?? '没找到'}
+              sub={st?.runtime.borrowed ? '复用音轨分离的运行时' : undefined}
             />
             <Stat
               label="耗时"
               value={estimate > 0 ? `约 ${humanSecs(estimate)}` : '—'}
-              sub={duration > 0 ? `${humanSecs(duration)} 素材 · 纯 CPU` : '选了文件后估算'}
+              sub={duration > 0 ? `${humanSecs(duration)} 素材 · 估算` : '选了文件后估算'}
             />
           </div>
 
-          {!ready && (
+          {/* ── 一个按钮：把还缺的包按顺序装完 ──────────────────
+              顺序是「推理运行库 → 模型」（装了音轨分离时运行库自动跳过），
+              中间不需要再点任何东西（状态机在 `lib/useInstaller.ts`）。
+              全装好之后这颗按钮**不出现** —— 上面那排 Stat 就是状态摘要。 */}
+          {installText && (
             <div className="btn-row">
               <Button
                 variant="primary"
                 icon="download"
-                disabled={busy || !!dl?.active}
-                onClick={() => void doDownloadModels()}
+                loading={installer.installing}
+                disabled={!!dl?.active}
+                onClick={() => installer.install()}
               >
-                {st?.models.ready
-                  ? '模型已就绪'
-                  : `下载模型（${st ? formatBytes(st.models.zipBytes) : '整个模型包'}）`}
+                {installText}
               </Button>
-              {!st?.runtime.ready && (
-                <Button
-                  icon="download"
-                  disabled={busy || !!dl?.active}
-                  onClick={() => void doDownloadRuntime()}
-                >
-                  {`下载运行库（${st ? formatBytes(st.runtime.zipBytes) : '78 MB'}）`}
-                </Button>
-              )}
             </div>
           )}
 
-          {dl?.active && (
+          {dl && (installer.installing || dl.active) && (
             <div className="midi-progress">
               <div className="midi-progress-head">
                 {/* 下载与解压共用一条进度条，标签必须说清是哪一段：解压的分母跟
                     整包字节数差不多大，只写「正在下载」就成了「下到 100% 又归零
                     重爬」，看着像下完又重下了一遍 */}
-                <span>
-                  {dl.stage === 'extract'
-                    ? '正在解压模型…'
-                    : `正在下载${dl.kind === 'runtime' ? '运行库' : '模型'}…`}
-                </span>
+                <span>{dl.stage === 'extract' ? '正在解压…' : `正在装${stepName}…`}</span>
                 <span className="midi-dim">
                   {formatBytes(dl.done)}
                   {dl.total > 0 ? ` / ${formatBytes(dl.total)}` : ''}
@@ -780,14 +781,14 @@ export function Midi({ onToast, onNavigate }: PageProps) {
                 </Button>
               </div>
               <p className="hint">
-                这个包<strong>不支持续传</strong>（停下就是重来），所以这里只有「停止」没有「暂停」。
+                这个包<strong>不支持续传</strong>，停下就要重来。
               </p>
             </div>
           )}
 
-          {dl?.error && (
-            <Finding level="warn" title="下载失败">
-              {dl.error}
+          {installError && (
+            <Finding level="warn" title="安装失败">
+              {installError}
             </Finding>
           )}
 
@@ -810,7 +811,6 @@ export function Midi({ onToast, onNavigate }: PageProps) {
           {estimate > 0 && !running && (
             <p className="hint">
               ⚠️ 纯 CPU 下大约<strong> 10 秒换 1 秒音频</strong> —— 3 分钟干声就是半小时左右。
-              嫌慢就把「去噪步数」调小。
             </p>
           )}
 
@@ -827,10 +827,7 @@ export function Midi({ onToast, onNavigate }: PageProps) {
                 `local` = 绿色版两层同一路径，没有第二层可回落，所以那边不用说话。 */}
             {st?.models.ready && st.models.origin === 'bundled' && (
               <p className="hint">
-                引擎现在用的是随程序自带的那份模型 <code>{st.models.dir}</code>，不是下载来的。
-                下面的删除只会清掉下载下来的那份，
-                <strong>不动随程序自带的内容</strong>，所以删完状态还是「就绪」、
-                下载按钮也不会出现。
+                引擎现在用的是随程序自带的那份模型，下面的删除只清下载来的那份，所以删完状态仍是「就绪」。
               </p>
             )}
             {armDelete ? (
@@ -865,13 +862,13 @@ export function Midi({ onToast, onNavigate }: PageProps) {
             ) : (
               <>
                 <p className="hint">
-                  下好的模型与运行库占了
+                  下好的模型与运行库占约
                   {st
-                    ? ` 约 ${formatBytes(
+                    ? ` ${formatBytes(
                         st.models.extractBytes + (st.runtime.borrowed ? 0 : st.runtime.dllBytes),
                       )}`
                     : ' 几百 MB'}
-                  。用不上了可以删掉腾地方，什么时候想用再下回来。
+                  。
                 </p>
                 <div className="btn-row">
                   <Button
@@ -992,9 +989,13 @@ export function Midi({ onToast, onNavigate }: PageProps) {
             )}
             {result.seconds && (
               <p className="hint">
-                特征提取 {result.seconds.encoder?.toFixed(1)}s · 去噪{' '}
-                {result.seconds.segmenter?.toFixed(1)}s · 判音高{' '}
-                {result.seconds.estimator?.toFixed(1)}s
+                耗时{' '}
+                {(
+                  (result.seconds.encoder ?? 0) +
+                  (result.seconds.segmenter ?? 0) +
+                  (result.seconds.estimator ?? 0)
+                ).toFixed(1)}
+                s
               </p>
             )}
           </Panel>
@@ -1004,14 +1005,14 @@ export function Midi({ onToast, onNavigate }: PageProps) {
           <PanelHead title="许可与出处" desc="模型与代码是两套许可" />
           <div className="midi-stats">
             <Stat label="代码" value="MIT" sub="openvpi/GAME" />
-            <Stat label="权重" value="CC BY-NC-SA 4.0" sub="非商业 —— 需自行下载" />
+            <Stat label="权重" value="CC BY-NC-SA 4.0" sub="非商业" />
           </div>
           <p className="hint">
             模型来自官方发布（
             <a href={st?.source ?? 'https://github.com/openvpi/GAME'} target="_blank" rel="noreferrer">
               {st?.source ?? 'github.com/openvpi/GAME'}
             </a>
-            ）。扒谱全部在这台电脑上算完，音频不外发。
+            ）。
           </p>
           {st && (
             <div className="btn-row">

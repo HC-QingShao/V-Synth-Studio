@@ -58,6 +58,30 @@ export const api = {
    */
   svsepDownloadRuntime: () => call<{ started: boolean }>('svsep_runtime_download'),
   /**
+   * 运行时现在装在哪、默认会装到哪。
+   *
+   * 安装版（装在 `Program Files`）里程序目录**不可写**，那 7.4 GB 解压必然失败 ——
+   * `rootWritable: false` 就是这个情形，所以装之前必须先问一次落点。
+   */
+  svsepRuntimeDir: () => call<SvsepRuntimeDir>('svsep_runtime_dir'),
+  /** 换运行时落点。**`dir: ""` = 回到自动**（安装版落可写目录、绿色版落程序目录）。 */
+  svsepSetRuntimeDir: (dir: string) => call<SvsepRuntimeDir>('svsep_set_runtime_dir', { dir }),
+  /**
+   * 下显卡加速包（24 MB，A 卡 / Intel 核显用的 DirectML）。
+   *
+   * ⚠️ 它和「运行时 / 模型」**共用同一份下载状态**（`svsepStatus().download`，
+   * `kind` 是 `'dml'`）—— 界面不用为它学第二套进度。
+   */
+  svsepDmlDownload: () => call<{ started: boolean }>('svsep_dml_download'),
+  /**
+   * 开 / 关显卡加速，以及「六轨也用」。
+   *
+   * ⚠️ 有 NVIDIA 显卡时**不要**自动打开：DirectML 那份 ORT 里没有 CUDA，
+   * 给 N 卡机器开它反而更慢。这件事由后端探（`dml.nvidia`），前端不猜。
+   */
+  svsepSetDml: (patch: { mode?: 'auto' | 'on' | 'off'; six?: boolean }) =>
+    call<SvsepDmlState>('svsep_set_dml', { mode: patch.mode, six: patch.six }),
+  /**
    * 暂停下载：`.part` 留着，下次点下载会带 `Range` 接着下。
    *
    * 不是立刻停 —— 后端是在下一块数据到达时才收手，所以按完按钮界面还会走一两秒。
@@ -652,7 +676,14 @@ export interface SvsepModels {
   dir: string
   ok: boolean
   downloadedBytes: number
+  /** ⚠️ 解压后的体积，**不是要下多少** —— 要下的那个看 `zipBytes` */
   expectedBytes: number
+  /**
+   * 压缩包体积（真正要下的字节）。
+   * ⚠️ 后端目前**只发 `expectedBytes`**；这个字段是照契约留的，补上之后界面上的
+   * 「要下多少」自动变准（`lib/useInstaller.ts` 的 `downloadBytes` 就是这条回退）。
+   */
+  zipBytes?: number
   downloadUrl: string
   items: SvsepModel[]
   missingIndex: string[]
@@ -664,17 +695,67 @@ export interface SvsepRuntime {
   /** `python.exe` 与 `backend/app.py` 都在 —— 这才是判据 */
   ready: boolean
   downloadUrl: string
+  /** ⚠️ 解压后的体积，**不是要下多少** */
   expectedBytes: number
+  /** 压缩包体积（见 `SvsepModels.zipBytes` 那条同样的话） */
+  zipBytes?: number
   python: boolean
   backend: boolean
   pythonPath: string
   backendPath: string
 }
 
+/**
+ * 显卡加速（DirectML，A 卡 / Intel 核显）的现状。
+ *
+ * `installed` = 包装没装；`active` = 那份 ORT 是不是真排在 `site-packages` 前面；
+ * `nvidia` = 这台机器有没有 N 卡（有就该走 CUDA，`auto` 模式下不会开 DML）。
+ */
+export interface SvsepDml {
+  installed: boolean
+  active: boolean
+  nvidia: boolean
+  dir: string
+  /** 压缩包体积（24 MB 上下） */
+  zipBytes: number
+}
+
+/** `svsep_set_dml` 的回包 —— 比状态里那一块多一个「六轨补丁生效没」 */
+export interface SvsepDmlState {
+  mode: 'auto' | 'on' | 'off'
+  six: boolean
+  active: boolean
+  sixActive: boolean
+  installed: boolean
+  nvidia: boolean
+}
+
+/**
+ * 运行时的落点（`svsep_runtime_dir` / `svsep_set_runtime_dir` 的回包）。
+ *
+ * 安装版程序目录只读，那 4.7 GB 下载 + 7.4 GB 解压必须落到别处 —— 所以界面在
+ * **第一次下载之前**要拿这份信息问一次用户（见 `Svsep.tsx`）。
+ */
+export interface SvsepRuntimeDir {
+  /** 这一次运行真正用的落点 */
+  dir: string
+  /** 安装版还是绿色版 */
+  installed: boolean
+  /** 程序目录可写吗。安装版是 `false`，界面据此说「另选一个位置」 */
+  rootWritable: boolean
+  /** 用户没选过时的默认落点 */
+  writableDefault: string
+  /** 运行时已经装好了吗（`python.exe` 与 `backend/app.py` 都在） */
+  hasRuntime: boolean
+  /** 换过落点后老位置可能还留着一份 —— 没换过就是 `null` */
+  legacyDir: string | null
+}
+
 /** 大包 zip 的下载进度（后端内存里的一份，不是磁盘上的） */
 export interface SvsepDownload {
   active: boolean
-  kind?: 'runtime' | 'models' | null
+  /** `'dml'` 是显卡加速包（24 MB，走同一份状态） */
+  kind?: 'runtime' | 'models' | 'dml' | null
   done: number
   total: number
   /**
@@ -700,6 +781,8 @@ export interface SvsepStatus {
   outputsDir: string
   runtime: SvsepRuntime
   models: SvsepModels
+  /** 显卡加速那一块（`installed` / `active` / `nvidia` / `zipBytes`） */
+  dml?: SvsepDml
   download: SvsepDownload
   /** 分离服务在不在听 */
   running: boolean

@@ -169,7 +169,7 @@ function Appearance({
       <Panel>
         <PanelHead
           title="玻璃等级"
-          desc="拖动滑块调整。级别越高越「玻璃」，开销也越大 —— 1 级最省、对比最高，4 级折射最全"
+          desc="级别越高越「玻璃」，开销也越大"
         />
         <div className="slider-row">
           <GlassSlider
@@ -202,15 +202,12 @@ function Appearance({
           </div>
         </div>
         <p className="hint">
-          1 级把玻璃换成不透明底色；2 级只模糊提色、3 级开折射 —— 这两级**内容面板都是轻量材质**；
-          4 级连内容面板也变成玻璃，画面里每个玻璃面都会多一层 SVG 位移贴图（开销最大）。
-          等级只影响材质，背景图参数不变。
-          系统里开了「减少透明度」时，模糊会自动失效 —— 那是库的无障碍策略，不受这里影响。
+          等级只影响材质，背景图不变。
         </p>
       </Panel>
 
       <Panel>
-        <PanelHead title="主题" desc="整套界面的配色，选完立刻生效" />
+        <PanelHead title="主题" desc="整套界面的配色" />
         <div className="choice-grid">
           {THEMES.map((t) => (
             <button
@@ -374,7 +371,7 @@ function Tools({
       </div>
       <p className="hint">
         {missing.length
-          ? `未检测到 ${missing.map((m) => (m === 'ytdlp' ? 'yt-dlp' : m)).join(' / ')}。它们随程序一起分发、不需要联网下载；若显示未找到，请重新解压一次程序压缩包覆盖。`
+          ? `未检测到 ${missing.map((m) => (m === 'ytdlp' ? 'yt-dlp' : m)).join(' / ')}，相关功能不可用。tools 目录缺失，请重新解压程序包。`
           : '三个外部工具都齐了，音频与下载功能完整可用。'}
       </p>
     </Panel>

@@ -79,6 +79,14 @@ const MODEL_INDEX_FILES: &[&str] = &[
 /// 换版本而变，只有「两个入口文件存在」是稳的。
 pub const RUNTIME_BYTES: u64 = 7_855_000_000;
 
+/// 运行时**压缩包**的实测大小 —— 界面用它说「这一下要下多少」。
+///
+/// 和上面那个 `RUNTIME_BYTES`（解压后）是两个数，别混：安装按钮上写错了会让
+/// 用户以为要下 7.9 GB（实测 2026-10-05，`curl -I` 那个 CDN 上的 `runtime.zip`）。
+pub const RUNTIME_ZIP_BYTES: u64 = 4_941_164_107;
+/// 模型压缩包的实测大小（`models.zip`，解压后见 `models_status` 的 `expectedBytes`）。
+pub const MODEL_ZIP_BYTES: u64 = 484_976_642;
+
 /// 运行时下载链接（123 云盘 CDN，用户自己上传的包）。
 ///
 /// ⚠️ 末尾那个 `#` **不要删**：那是用户给的原始链接，去掉它可能 404。
@@ -123,8 +131,323 @@ pub fn runtime_url() -> String {
 /* ══════════════════════════════════ 路径 ══════════════════════════════════ */
 
 /// 运行时根目录：`<root>/app/data/svsep`
+///
+/// ⚠️ **这只是「默认/经典」落点，不一定是实际用的那个** —— 真正要用的路径一律走
+/// [`runtime_base`]：安装版装在 `Program Files` 下时这里不可写，4.7 GB 解压必然
+/// 「建目录失败」（代码注释里长期承认这件事，但结果是 MSI 用户根本装不上音轨分离）；
+/// 另外 C 盘紧张的用户也会自己指定一个目录。
 pub fn runtime_dir(root: &Path) -> PathBuf {
     root.join("app").join("data").join("svsep")
+}
+
+/// 用户选定的运行时落点（空 = 没选过，按 `installed` 推）。进程级一份，启动时定。
+static RUNTIME_BASE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// 定下这一次运行要用哪个运行时目录。**启动时调一次**（见 `ipc::AppState::new`）。
+///
+/// 三条规矩，按优先级：
+///  1. 用户选过（`config.json` 的 `svsepRuntimeDir`）→ 听用户的；
+///  2. 安装版 → `<可写>/svsep`（`%APPDATA%\…\svsep`）。**这一条是修 bug 的**：
+///     程序目录在 Program Files 下只读，默认往那儿解 7.4 GB 是必失败；
+///     ⚠️ 但要是程序目录里**已经有一份完整的运行时**（以前用管理员跑过、真下下来了），
+///     继续用它 —— 不能让用户为了一个 bug 修复白重下 4.7 GB；
+///  3. 绿色版 → 老地方 `<root>/app/data/svsep`（和以前完全一致）。
+pub fn init_runtime_base(root: &Path, writable: &Path, installed: bool, configured: &str) {
+    if let Ok(mut g) = RUNTIME_BASE.lock() {
+        *g = Some(resolve_runtime_base(root, writable, installed, configured));
+    }
+}
+
+/// [`init_runtime_base`] 的**纯函数**部分（不碰全局）—— 这样它能被单测逐条钉住。
+pub fn resolve_runtime_base(root: &Path, writable: &Path, installed: bool, configured: &str) -> PathBuf {
+    let explicit = configured.trim();
+    if !explicit.is_empty() {
+        return PathBuf::from(explicit);
+    }
+    if !installed {
+        return runtime_dir(root);
+    }
+    /* 安装版：程序目录（Program Files）只读，默认落 `<可写>/svsep`。
+       ⚠️ 但要是程序目录里**已经有一份完整的运行时**（以前用管理员跑过、真下下来了），
+       继续用它 —— 不能让用户为了一个 bug 修复白重下 4.7 GB。 */
+    let legacy = runtime_dir(root);
+    if legacy.join("runtime").join("python.exe").is_file() {
+        legacy
+    } else {
+        writable.join("svsep")
+    }
+}
+
+/// 这一次运行真正用的运行时目录（`python.exe` 与 `backend/` 都在它下面）。
+///
+/// **凡是拼运行时路径的地方都必须用它**，别再直接用 [`runtime_dir`]。
+pub fn runtime_base(root: &Path) -> PathBuf {
+    RUNTIME_BASE
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| runtime_dir(root))
+}
+
+/* ═══════════════════ 显卡加速包（DirectML：A 卡 / Intel 核显） ═══════════════════ */
+
+/// DirectML 版 ONNX Runtime 的 wheel（PyPI 官方文件地址，**不是** GitHub）。
+///
+/// 为什么需要它：UVR-MDX 那个模型走的是纯 ONNX，而上游后端**本来就写了 DirectML
+/// 分支**（`separator_engine.py::_try_enable_onnx_dml`，`config.py` 也会判出 dml 模式）
+/// —— 缺的只是运行时里没装 `onnxruntime-directml`。CUDA 那条只认 NVIDIA，
+/// A 卡与 Intel 核显只能靠这个后端。
+///
+/// ⚠️ 必须是 **cp310**：随包运行时的 Python 是 3.10（见 `python310._pth`）。
+/// 1.24 起 PyPI 那个包要求 Python ≥ 3.11，装上去 import 直接失败。
+///
+/// 实测（本机 RX 580，30 秒素材）：二轨 36 秒 → 15 秒。
+pub const DML_URL: &str = "https://files.pythonhosted.org/packages/5b/f8/c9282f935b978764bdf13869cccc174267c936efd150ca070e56e23f5d05/onnxruntime_directml-1.23.0-cp310-cp310-win_amd64.whl";
+/// 实测大小（`onnxruntime_directml-1.23.0-cp310-cp310-win_amd64.whl`）。
+pub const DML_BYTES: u64 = 25_113_303;
+
+/// 同一个 wheel 的清华 PyPI 镜像（路径结构与官方一致，实测字节数相同）。
+fn dml_urls() -> Vec<String> {
+    let primary = DML_URL.to_string();
+    let mirror = DML_URL
+        .strip_prefix("https://files.pythonhosted.org/")
+        .map(|rest| format!("https://pypi.tuna.tsinghua.edu.cn/{rest}"));
+    match mirror {
+        Some(m) => vec![primary, m],
+        None => vec![primary],
+    }
+}
+
+/// DirectML 包的落点：`<运行时>/dml` —— 一个**额外的 site 目录**，靠 `._pth` 排在最前。
+///
+/// 为什么不直接覆盖 `site-packages/onnxruntime`：那会把 N 卡那份 CUDA 版**永久换掉**
+/// （用户哪天插上一张 N 卡也回不去）。分两份、由 `._pth` 决定谁在前，才是可逆的。
+pub fn dml_site_dir(root: &Path) -> PathBuf {
+    runtime_base(root).join("dml")
+}
+
+/// 加速包装没装（看那个 dll 在不在）。
+pub fn dml_installed(root: &Path) -> bool {
+    dml_site_dir(root)
+        .join("onnxruntime")
+        .join("capi")
+        .join(crate::tools::dll("onnxruntime"))
+        .is_file()
+}
+
+/// 随包 Python 的 `._pth`。**嵌入版 Python 用它固定 `sys.path`，而且会忽略
+/// `PYTHONPATH`** —— 想让 DirectML 那份 ORT 生效只有改这个文件一条路
+/// （实测：设了 `PYTHONPATH` 也照样 import 到 `site-packages` 里那份）。
+/// 文件名带版本号，所以按前缀找，将来换 3.11 不用改代码。
+fn pth_file(root: &Path) -> Option<PathBuf> {
+    let dir = runtime_base(root).join("runtime");
+    let rd = std::fs::read_dir(&dir).ok()?;
+    let mut hits: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            name.starts_with("python3") && name.ends_with("._pth")
+        })
+        .collect();
+    hits.sort();
+    hits.into_iter().next()
+}
+
+/// DirectML 现在生效没有（`._pth` 里有没有我们那一行）。
+pub fn dml_active(root: &Path) -> bool {
+    let Some(p) = pth_file(root) else { return false };
+    let Ok(text) = std::fs::read_to_string(&p) else {
+        return false;
+    };
+    let want = crate::platform::clean_path(&dml_site_dir(root));
+    text.lines()
+        .any(|l| crate::platform::clean_path(Path::new(l.trim())) == want)
+}
+
+/// 开关 DirectML：改 `._pth` 里那一行（幂等，可反复调）。
+///
+/// 行尾跟着原文件走：这个文件是 Python 自带的，别让它因为我们的编辑换一种换行。
+pub fn set_dml_active(root: &Path, on: bool) -> Result<bool, String> {
+    let Some(p) = pth_file(root) else {
+        return Err("找不到随包 Python 的 ._pth（运行时布局变了？）".into());
+    };
+    let text = std::fs::read_to_string(&p)
+        .map_err(|e| format!("读不了 {}：{e}", p.to_string_lossy()))?;
+    let crlf = text.contains("\r\n");
+    /* 写进 `._pth` 的路径**要剥掉 `\\?\` 前缀**（`root` 常常带着它）。
+       为什么非剥不可：那个前缀在 Python 的 `sys.path` 里是另一套语义，虽然实测
+       CPython 3.10 能认，但不该赌；`clean_path` 就是干这件事的。
+       比较时两边都归一化，所以老版本写进去的带前缀那行也能被清掉。 */
+    let want = crate::platform::clean_path(&dml_site_dir(root));
+    let before: Vec<String> = text
+        .lines()
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect();
+    let mut after: Vec<String> = before
+        .iter()
+        .filter(|l| crate::platform::clean_path(Path::new(l.trim())) != want)
+        .cloned()
+        .collect();
+    if on {
+        after.insert(0, want);
+    }
+    if after == before {
+        return Ok(false);
+    }
+    let mut joined = after.join(if crlf { "\r\n" } else { "\n" });
+    joined.push_str(if crlf { "\r\n" } else { "\n" });
+    std::fs::write(&p, joined).map_err(|e| format!("写不了 {}：{e}", p.to_string_lossy()))?;
+    crate::log_line(&format!(
+        "显卡加速（DirectML）：已{}（{}）",
+        if on { "开启" } else { "关闭" },
+        p.to_string_lossy()
+    ));
+    Ok(true)
+}
+
+/// 这台机器有没有 NVIDIA 显卡。判据只看 `nvidia-smi.exe` —— 与上游 Python 同一套。
+///
+/// 为什么关心它：**DirectML 那份 ORT 里没有 CUDA**。给 N 卡机器开 DirectML
+/// 等于把能跑 CUDA 的那份换掉，反而更慢，所以「自动」模式下有 N 卡就不开。
+pub fn nvidia_present() -> bool {
+    let sys = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+    std::path::Path::new(&sys)
+        .join("System32")
+        .join("nvidia-smi.exe")
+        .is_file()
+}
+
+/// 六轨（BS-RoFormer）也走 DirectML —— **要改上游那一行硬编码**。
+///
+/// ⚠️ 上游注释写着「RoFormer 在 DirectML 上易 OOM，仅使用 PyTorch CUDA 或 CPU」，
+/// 所以它把 `use_dml` 写死成 `False`。这个开关**默认关**；开了以后显存不够是
+/// **整个任务失败**（不是自动退回 CPU），所以界面上要说清「建议显存 ≥ 8 GB」。
+///
+/// 改法只认那一行的**前缀**（`use_dml = `）并且只在原缩进下动手，两边都能改回来；
+/// 升级运行时包之后上游要是改了写法，这里会安静地不生效 —— 日志是唯一线索。
+fn set_roformer_dml(root: &Path, on: bool) -> Result<bool, String> {
+    let f = runtime_base(root).join("backend").join("roformer_engine.py");
+    if !f.is_file() {
+        return Err(format!("找不到 {}（运行时还没下？）", f.to_string_lossy()));
+    }
+    let text = std::fs::read_to_string(&f).map_err(|e| format!("读不了 {}：{e}", f.to_string_lossy()))?;
+    let crlf = text.contains("\r\n");
+    let mut changed = false;
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim_end_matches('\r');
+        let target = if on {
+            "        use_dml = True  # 工作站按用户设置打开（DirectML，A 卡/核显；建议显存 ≥ 8 GB）"
+        } else {
+            "        use_dml = False"
+        };
+        if line.trim_start().starts_with("use_dml = ") && line.starts_with("        ") {
+            if line != target {
+                changed = true;
+                out.push(target.to_string());
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    if !changed {
+        return Ok(false);
+    }
+    let mut joined = out.join(if crlf { "\r\n" } else { "\n" });
+    joined.push_str(if crlf { "\r\n" } else { "\n" });
+    std::fs::write(&f, joined).map_err(|e| format!("写不了 {}：{e}", f.to_string_lossy()))?;
+    crate::log_line(&format!("六轨 DirectML：已{}", if on { "开启" } else { "关闭" }));
+    Ok(true)
+}
+
+/// 把设置落到运行时上。**启动时与用户改设置时都要调**。
+///
+/// `mode`：`"auto"`（默认）/ `"on"` / `"off"`；`six`：六轨要不要也用 DirectML。
+/// 返回 `(加速生效, 六轨补丁生效)`，给日志和状态用。
+pub fn apply_dml(root: &Path, mode: &str, six: bool) -> (bool, bool) {
+    let want = match mode {
+        "on" => dml_installed(root),
+        "off" => false,
+        // auto：装了包、而且这台机器没有 N 卡（有 N 卡就该走 CUDA 那份）
+        _ => dml_installed(root) && !nvidia_present(),
+    };
+    let active = match set_dml_active(root, want) {
+        Ok(_) => dml_active(root),
+        Err(e) => {
+            crate::log_line(&format!("显卡加速：{e}"));
+            false
+        }
+    };
+    // 六轨补丁只在「加速真生效」时才有意义（DirectML 没生效的话那一行也不该开）
+    let six_ok = match set_roformer_dml(root, six && active) {
+        Ok(_) => six && active,
+        Err(e) => {
+            crate::log_line(&format!("六轨 DirectML：{e}"));
+            false
+        }
+    };
+    (active, six_ok)
+}
+
+/// 下 DirectML 加速包（24 MB）→ 解到 `<运行时>/dml` → 立刻生效。
+///
+/// 24 MB 没必要走那套支持续传的大包机制（`.part` + 记号 + 五轮重试都在
+/// `fetch_to_file` 里，够用了）。
+pub async fn download_dml(
+    root: &Path,
+    ctl: &DownloadCtl,
+    on_progress: impl Fn(u64, Option<u64>, Stage) + Send + Sync,
+) -> Result<Value, String> {
+    let dest = dml_site_dir(root);
+    std::fs::create_dir_all(&dest).map_err(|e| format!("建目录失败（{}）：{e}", dest.to_string_lossy()))?;
+    let zip = runtime_base(root).join("svsep-dml.whl");
+
+    let mut last = String::from("没有可用的下载地址");
+    let mut ok = false;
+    for (i, url) in dml_urls().iter().enumerate() {
+        if ctl.cancelled() {
+            return Err("已停止".into());
+        }
+        if i > 0 {
+            crate::log_line(&format!("显卡加速包：上一个地址失败，换镜像重试：{url}"));
+            let _ = std::fs::remove_file(&zip);
+        }
+        match fetch_to_file(url, &zip, Some(DML_BYTES), ctl, &|got, total, stage| {
+            on_progress(got, total, stage)
+        })
+        .await
+        {
+            Ok(_) => {
+                ok = true;
+                break;
+            }
+            Err(e) => last = e,
+        }
+    }
+    if !ok {
+        return Err(last);
+    }
+
+    on_progress(0, None, Stage::Extract);
+    // wheel 就是个 zip，根目录里是 `onnxruntime/` 与 `…dist-info/`，整包解到 dml/ 即可
+    let report = extract_zip(&zip, &dest, "", |done, all| {
+        on_progress(done, Some(all), Stage::Extract)
+    })?;
+    let _ = std::fs::remove_file(&zip);
+    set_dml_active(root, true)?;
+    if !dml_installed(root) {
+        return Err("包解开了，但没找到 onnxruntime/capi/onnxruntime.dll —— 包结构不对？".into());
+    }
+    Ok(json!({
+        "ok": true,
+        "dir": crate::platform::clean_path(&dest),
+        "files": report.files,
+        "bytes": report.bytes,
+    }))
 }
 
 /// 模型目录：`<可写目录>/svsep/models`
@@ -147,12 +470,12 @@ pub fn data_dir(root: &Path, writable: &Path, installed: bool) -> PathBuf {
 }
 
 fn python_exe(root: &Path) -> PathBuf {
-    runtime_dir(root).join("runtime").join("python.exe")
+    runtime_base(root).join("runtime").join("python.exe")
 }
 
 /// 运行时是否齐备（Python + 后端）
 pub fn runtime_ready(root: &Path) -> bool {
-    python_exe(root).is_file() && runtime_dir(root).join("backend").join("app.py").is_file()
+    python_exe(root).is_file() && runtime_base(root).join("backend").join("app.py").is_file()
 }
 
 /// 运行时状态（给 `/api/svsep/status` 用的那一段）。
@@ -160,7 +483,7 @@ pub fn runtime_ready(root: &Path) -> bool {
 /// 为什么不去统计目录里的实际字节数：2.4 万个文件、每次轮询都走一遍，
 /// 在机械盘上要几秒 —— 而界面只需要「在不在」和一个够用的分母。
 pub fn runtime_status(root: &Path) -> Value {
-    let dir = runtime_dir(root);
+    let dir = runtime_base(root);
     let py = python_exe(root);
     let backend = dir.join("backend").join("app.py");
     json!({
@@ -171,6 +494,9 @@ pub fn runtime_status(root: &Path) -> Value {
         "downloadUrl": runtime_url(),
         // 「大概多大」用于展示与进度百分比，不是判据
         "expectedBytes": RUNTIME_BYTES as f64,
+        /* 要下多少（压缩包）。界面上的「安装扩展包（约 X）」用的是它 ——
+           拿 `expectedBytes` 当分母会把 4.6 GB 说成 7.9 GB。 */
+        "zipBytes": RUNTIME_ZIP_BYTES as f64,
         "python": py.is_file(),
         "backend": backend.is_file(),
         "pythonPath": py.to_string_lossy(),
@@ -222,6 +548,8 @@ pub fn models_status(writable: &Path) -> Value {
         "ok": uvr_state == "ok" && rof_state == "ok" && missing_index.is_empty(),
         "downloadedBytes": total,
         "expectedBytes": (UVR_MODEL_FULL + ROFORMER_MODEL_FULL) as f64,
+        // 要下多少（压缩包）；理由同 `runtime_status` 里那条
+        "zipBytes": MODEL_ZIP_BYTES as f64,
         "downloadUrl": model_url(),
         "items": [
             { "key": "uvr", "name": UVR_MODEL, "label": "二轨 · 人声 / 伴奏",
@@ -342,7 +670,7 @@ impl Svsep {
     }
 
     pub fn dir(&self) -> PathBuf {
-        runtime_dir(&self.root)
+        runtime_base(&self.root)
     }
 
     pub fn models(&self) -> PathBuf {
@@ -389,9 +717,7 @@ impl Svsep {
         }
         if !self.runtime_ready() {
             return Err(format!(
-                "分离运行时不在：{}\n\
-                 它随工作站一起分发。如果这里显示缺文件，说明安装包不完整 —— \
-                 重新装一遍或把 svsep 目录重新解压出来即可。",
+                "分离运行时不在：{}\n请到「音轨分离」页下载运行时。",
                 self.dir().to_string_lossy()
             ));
         }
@@ -621,10 +947,13 @@ impl Svsep {
         post_json(&format!("{base}{path}"), body).await
     }
 
-    /// 提交一次分离：把上游要的 multipart 原样转发过去。
+    /// 提交一次分离：把 `body` 原样 POST 给上游的 `/api/separate/...`。
     ///
-    /// **不做解包再重打包** —— 工作站前端已经是按上游的字段名（`file`）构造
-    /// multipart 的，拆开再拼一遍只会在文件名转义、大 body 缓冲这些地方出错。
+    /// ⚠️ **`content_type` 和 `body` 必须是一套**：上游 Flask 要的是
+    /// `multipart/form-data`（字段名 `file`，见 `ipc::svsep::multipart_body`）。
+    /// 裸字节过去它读不到 `request.files["file"]`，回的是
+    /// `400 {"ok":false,"error":"未检测到上传文件"}` —— 2026-10 测试版就是这么挂的。
+    /// 这一层只负责发，不解析、不重拼（重拼只会在文件名转义、大 body 缓冲上出错）。
     pub async fn submit(&self, engine: &str, body: Vec<u8>, content_type: &str) -> Result<Value, String> {
         let base = self
             .base_url()
@@ -944,7 +1273,7 @@ impl<'a> Bundle<'a> {
             label: "运行时",
             default_url: RUNTIME_URL,
             url,
-            dest: runtime_dir(root),
+            dest: runtime_base(root),
             strip: "", // 留着 runtime/ 这一层：那边要的正是 runtime/python.exe
             zip_name: "svsep-runtime.zip",
         }
@@ -1476,7 +1805,7 @@ pub fn delete_dependencies(
     cancelled: impl Fn() -> bool,
     mut on_progress: impl FnMut(u64, u64),
 ) -> Value {
-    let svsep = runtime_dir(root);
+    let svsep = runtime_base(root);
     let targets = [
         ("模型", models_dir(writable)),
         ("运行时", svsep.join("runtime")),
@@ -1888,6 +2217,111 @@ impl<R: std::io::Read + std::io::Seek> ZipReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 运行时的落点：**安装版不能再往 Program Files 里解 7.4 GB**（MSI 用户
+    /// 「音轨分离用不了」的一半原因），但老位置已经有的话不许逼人重下。
+    #[test]
+    fn runtime_base_follows_the_writable_dir_for_an_installed_copy() {
+        // 夹具用临时目录当「程序目录」：真去写 Program Files 会直接 Access Denied
+        let root = std::env::temp_dir().join("vss-svsep-install-base");
+        let writable = std::env::temp_dir().join("vss-svsep-install-writable");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&writable);
+
+        // 绿色版：老地方，和以前完全一样
+        assert_eq!(
+            resolve_runtime_base(&root, &writable, false, ""),
+            root.join("app").join("data").join("svsep")
+        );
+
+        // 安装版 + 程序目录里没有运行时 → 落到可写目录
+        assert_eq!(
+            resolve_runtime_base(&root, &writable, true, ""),
+            writable.join("svsep")
+        );
+
+        // 安装版 + 程序目录里**已经有一份**（以前用管理员跑过）→ 继续用它，不重下 4.7 GB
+        let legacy = root.join("app").join("data").join("svsep");
+        let py = legacy.join("runtime").join("python.exe");
+        std::fs::create_dir_all(py.parent().unwrap()).unwrap();
+        std::fs::write(&py, b"x").unwrap();
+        assert_eq!(resolve_runtime_base(&root, &writable, true, ""), legacy);
+        let _ = std::fs::remove_dir_all(root.join("app"));
+
+        // 用户选过就听用户的（前后空格要忽略）
+        assert_eq!(
+            resolve_runtime_base(&root, &writable, true, r"  D:\VSS\runtime  "),
+            PathBuf::from(r"D:\VSS\runtime")
+        );
+        // 空白串等于没选
+        assert_eq!(
+            resolve_runtime_base(&root, &writable, true, "   "),
+            writable.join("svsep")
+        );
+    }
+
+    /// DirectML 的开关就是 `python310._pth` 里那一行 —— 幂等、可逆、行尾跟着原文件。
+    #[test]
+    fn dml_switch_flips_the_pth_line_both_ways() {
+        let root = std::env::temp_dir().join("vss-svsep-dml-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let rt = runtime_dir(&root).join("runtime");
+        std::fs::create_dir_all(&rt).unwrap();
+        let pth = rt.join("python310._pth");
+        std::fs::write(&pth, "python310.zip\n.\n\n# c\nimport site\n").unwrap();
+
+        // 夹具里没有 dml 包 → `installed` 是 false（判据是那个 dll）
+        assert!(!dml_installed(&root));
+
+        // 开：那一行插到**最前面**（必须排在 `import site` 之前才抢得到 onnxruntime）
+        assert!(set_dml_active(&root, true).unwrap());
+        let text = std::fs::read_to_string(&pth).unwrap();
+        let first = text.lines().next().unwrap();
+        assert_eq!(first, dml_site_dir(&root).to_string_lossy());
+        assert!(text.contains("import site"), "原来的内容不能弄丢：{text:?}");
+        assert!(dml_active(&root));
+
+        // 再开一次什么都不做（幂等）
+        assert!(!set_dml_active(&root, true).unwrap());
+
+        // 关：那一行没了，其余照旧
+        assert!(set_dml_active(&root, false).unwrap());
+        let text = std::fs::read_to_string(&pth).unwrap();
+        assert!(!dml_active(&root));
+        assert!(text.starts_with("python310.zip"));
+        assert!(text.contains("import site"));
+
+        // 行尾跟着原文件：本来是 LF 就还是 LF
+        assert!(!text.contains("\r\n"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 六轨补丁只认那一行的前缀，两边都能改回来（上游升级了也不会被改坏）。
+    #[test]
+    fn roformer_patch_is_reversible_and_ignores_foreign_code() {
+        let root = std::env::temp_dir().join("vss-svsep-roformer-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let backend = runtime_dir(&root).join("backend");
+        std::fs::create_dir_all(&backend).unwrap();
+        let f = backend.join("roformer_engine.py");
+        std::fs::write(
+            &f,
+            "use_ac = bool(plan.get(\"use_autocast\"))\n        # RoFormer 易 OOM\n        use_dml = False\n",
+        )
+        .unwrap();
+
+        assert!(set_roformer_dml(&root, true).unwrap());
+        let t = std::fs::read_to_string(&f).unwrap();
+        assert!(t.contains("use_dml = True"), "{t}");
+        assert!(t.contains("use_ac = bool(plan.get(\"use_autocast\"))"), "别的行不许动");
+        // 幂等
+        assert!(!set_roformer_dml(&root, true).unwrap());
+        // 关得回来
+        assert!(set_roformer_dml(&root, false).unwrap());
+        let t = std::fs::read_to_string(&f).unwrap();
+        assert!(t.contains("        use_dml = False"), "{t}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn model_state_tells_apart_missing_partial_and_ok() {

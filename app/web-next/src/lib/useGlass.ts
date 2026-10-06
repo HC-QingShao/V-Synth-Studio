@@ -31,16 +31,16 @@ export const GLASS_LEVELS: { level: GlassLevel; label: string; desc: string }[] 
     label: '关',
     desc: '不透明底色，不做模糊。文字对比最高，低端机、远控桌面选这档',
   },
-  { level: 2, label: '毛玻璃', desc: '栏、侧栏、控件模糊提色；内容面板仍是轻量材质' },
+  { level: 2, label: '毛玻璃', desc: '栏、侧栏、控件模糊提色；内容面板不变' },
   {
     level: 3,
     label: '液态玻璃',
-    desc: '上面那些改成折射（边缘把背后折弯）；内容面板还是轻量材质',
+    desc: '栏与控件改用折射，内容面板不变',
   },
   {
     level: 4,
     label: '全液态',
-    desc: '连内容面板也折射 —— 每个玻璃面都会多一层 SVG 位移贴图，开销最大',
+    desc: '连内容面板也折射，开销最大',
   },
 ]
 

@@ -580,7 +580,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
       return
     }
     if (!ffmpegOk) {
-      onToast('未检测到 ffmpeg：它随程序分发，不需要联网下载。若 tools 目录缺失，从压缩包里重新把 tools 解压到程序根目录。', 'warn')
+      onToast('未检测到 ffmpeg：tools 目录缺失，请重新解压程序包', 'warn')
       return
     }
     if (!outDir) {
@@ -598,7 +598,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
       return
     }
     if (!ffmpegOk) {
-      onToast('未检测到 ffmpeg，裁剪需要它。它随程序分发，不用联网下载。', 'warn')
+      onToast('未检测到 ffmpeg：tools 目录缺失，请重新解压程序包', 'warn')
       return
     }
     if (!outDir) {
@@ -620,9 +620,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
   /* ── 派生数据 ───────────────────────────────────────────── */
 
   const formatEntries = Object.entries(formats)
-  const opName = OPS.find((o) => o.id === settings.action)?.name ?? settings.action
   const running = job?.status === 'running'
-  const ratioValue = Math.pow(2, Number(settings.semitones) / 12)
 
   /* ── 渲染 ───────────────────────────────────────────────── */
 
@@ -630,26 +628,20 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
     <div className="audio-layout" {...dropProps}>
       {/* ══════════════════════ 左：素材 / 操作 / 输出 ══════════════════════ */}
       <div className="audio-col">
-        {/* ffmpeg 缺失：整块说明「怎么恢复」，不引导下载 */}
+        {/* ffmpeg 缺失：只报状态 + 一句最短的恢复提示，不引导下载 */}
         {state && !ffmpegOk && (
           <Panel>
             <PanelHead
               title="未检测到 ffmpeg"
-              desc="下面这些操作全靠它"
               extra={<Chip tone="err">未检测到</Chip>}
             />
             <div className="stack">
-              <Finding level="warn" title="怎么恢复">
-                格式转换、提取音轨、变调、变速、裁剪、响度标准化、读取媒体信息都需要 ffmpeg。
-                ffmpeg 随程序分发，不需要联网下载；这里显示未检测到，说明 tools 目录缺失或不完整
-                —— 从压缩包里把 tools 整个目录重新解压到程序根目录即可。
-              </Finding>
+              <p className="hint">tools 目录缺失，请重新解压程序包。</p>
               <div className="btn-row">
                 <Button size="lg" icon="gear" onClick={() => onNavigate('settings')}>
                   去设置看看
                 </Button>
               </div>
-              <p className="hint">也可以自己装一份 ffmpeg 并加到系统 PATH，程序会自动检测到。</p>
             </div>
           </Panel>
         )}
@@ -658,7 +650,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
         <Panel>
           <PanelHead
             title="素材"
-            desc="选一个音频或视频文件，所有处理都在本机完成"
+            desc="选一个音频或视频文件"
             extra={
               <Chip tone={ffmpegOk ? 'ok' : 'warn'}>{ffmpegOk ? 'ffmpeg 已就绪' : 'ffmpeg 未就绪'}</Chip>
             }
@@ -666,7 +658,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
           <div className="stack">
             <Field
               label="文件路径"
-              hint="点「浏览」直接在本机选文件；也可以把完整路径（含文件名）粘贴到这里，回车生效。"
+              hint="点「浏览」选文件；也可以把完整路径（含文件名）粘贴到这里，回车生效。"
             >
               <div className="input-group">
                 <TextInput
@@ -701,7 +693,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
             {/* 探测结果 */}
             {!input ? (
               <Finding level="info" title="还没有选文件">
-                选好之后这里会显示时长、编码、采样率、声道；选视频的话还会显示分辨率。
+                选好之后这里会显示时长、编码、采样率、声道。
               </Finding>
             ) : probing ? (
               <p className="muted">正在读取媒体信息…</p>
@@ -709,13 +701,9 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
               <Finding level="warn" title="读不到这个文件">
                 {probeErr}
               </Finding>
-            ) : !ffmpegOk ? (
+            ) : !ffmpegOk || !probe || probe.available === false ? (
               <Finding level="warn" title="读不出媒体信息">
-                装了 ffmpeg 之后，这里会显示时长、编码、采样率与声道（现在读不出来，但不影响先选好文件）。
-              </Finding>
-            ) : !probe || probe.available === false ? (
-              <Finding level="warn" title="读不出媒体信息">
-                装了 ffmpeg 之后，这里会显示时长、编码、采样率与声道（现在读不出来，但不影响先选文件）。
+                装了 ffmpeg 之后，这里会显示时长、编码、采样率与声道。
               </Finding>
             ) : probe.probed === false ? (
               <Finding level="info" title="没能读出媒体信息">
@@ -789,7 +777,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
 
         {/* ── 处理操作 ── */}
         <Panel>
-          <PanelHead title="处理操作" desc="一次处理一件事，选好参数再点下面的「开始处理」" />
+          <PanelHead title="处理操作" />
           <div className="stack-lg">
             <div className="audio-ops" role="group" aria-label="处理操作">
               {OPS.map((op) => (
@@ -857,7 +845,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
                       外面套我们自己的 `Field`。**`labelHidden` 不能省** ——
                       `Field` 已经把标签显示出来了，再让 `Picker` 显示一遍就是同一个词出现两次。 */}
                   <div className="audio-num-row">
-                    <Field label="采样率" hint="目标格式支持的话就跟着改；「保持原样」是不动它。">
+                    <Field label="采样率" hint="目标格式支持的话就跟着改。">
                       <Picker
                         label="采样率"
                         labelHidden
@@ -879,7 +867,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
 
                   {settings.action === 'extract' && (
                     <Finding level="info" title="从 MV 里抽出音轨">
-                      B 站的音频轨一般是 AAC，转成 WAV 之后再做后期不会二次损失。视频轨会被丢掉。
+                      转 WAV 不会二次损失；视频轨会被丢掉
                     </Finding>
                   )}
                 </>
@@ -889,7 +877,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
                 <>
                   <Field
                     label="变调（半音）"
-                    hint="正数升调、负数降调；±12 半音以内精度最好。变调后时长不变。"
+                    hint="正数升调、负数降调；±12 半音以内精度最好。"
                   >
                     <div className="audio-num-row">
                       <GlassStepper
@@ -902,10 +890,6 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
                         formatValue={(v) => `${v > 0 ? '+' : ''}${v} 半音`}
                         shiftMultiplier={1}
                       />
-                      <span className="audio-num-note">
-                        频率比 ×{ratioValue.toFixed(4)}（
-                        {settings.semitones > 0 ? '升调' : settings.semitones < 0 ? '降调' : '还没设置'}）
-                      </span>
                     </div>
                   </Field>
                   <div className="audio-presets">
@@ -927,7 +911,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
                 <>
                   <Field
                     label="速度倍率"
-                    hint="大于 1 是加速，小于 1 是减速；音高保持不变。超过 2 倍会自动串联处理。"
+                    hint="大于 1 是加速，小于 1 是减速；音高保持不变。"
                   >
                     <div className="audio-num-row">
                       <GlassStepper
@@ -988,7 +972,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
                     />
                   </Field>
                   <Finding level="info" title="响度标准化">
-                    用 EBU R128 算法。分离出来的伴奏通常比人声轻，标准化之后对轨会省事很多。
+                    分离出来的伴奏通常比人声轻，标准化之后对轨会省事很多。
                   </Finding>
                 </>
               )}
@@ -1036,8 +1020,9 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
               </Button>
             </div>
             <p className="hint audio-run-note">
-              处理在本机由 ffmpeg 完成，不联网、不上传；大文件会花点时间，进度和日志实时显示。
-              裁剪时这个按钮导出「当前选中的那一段」，要一次导出全部就在下面的分段列表里点「全部导出」。
+              大文件会花点时间，进度和日志实时显示。
+              {settings.action === 'trim' &&
+                '裁剪时这个按钮导出「当前选中的那一段」，要一次导出全部就在下面的分段列表里点「全部导出」。'}
             </p>
           </div>
 
@@ -1109,7 +1094,6 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
         <Panel>
           <PanelHead
             title="输出"
-            desc="不改的话写到系统下载目录"
             extra={
               <Button
                 size="sm"
@@ -1148,7 +1132,7 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
 
             <Field
               label="输出文件名"
-              hint="按当前操作自动推断（例如 xxx.wav、xxx_+3半音.wav、xxx_x1.25.wav）；手动改过之后就不再自动覆盖，换操作会重新推断。"
+              hint="留空 = 按操作自动命名；改过之后不再自动覆盖"
             >
               <TextInput
                 value={settings.outName}
@@ -1164,23 +1148,19 @@ export function Audio({ state, onNavigate, onToast }: PageProps) {
               {sameAsInput && <Chip tone="err">不能覆盖输入文件</Chip>}
             </div>
 
-            <p className="muted">当前操作：{opName}</p>
             {fieldErr && <Finding level="warn" title="参数还不完整">{fieldErr}</Finding>}
           </div>
         </Panel>
 
         {/* 许可与出处：这一页的活全是随包的 ffmpeg 干的 */}
         <Credit
-          desc="这一页的处理全部由随包的 ffmpeg 完成，不需要另外安装"
           items={[
             { label: '代码', value: 'GPL v3', sub: 'FFmpeg 9.0.2（gyan.dev essentials）' },
-            { label: '提供方式', value: '随包附带', sub: '离线可用，无需单独下载' },
           ]}
         >
-          转格式、提取音轨、变调变速、裁剪与响度标准化都由随包的{' '}
           <Upstream href="https://ffmpeg.org/">ffmpeg</Upstream>
-          完成，不需要另外安装；它的许可是 GPL v3，用的是 gyan.dev essentials 构建，
-          许可全文见仓库里的 THIRD-PARTY-NOTICES。
+          {' '}的许可是 GPL v3，用的是 gyan.dev essentials 构建，许可全文见仓库里的
+          THIRD-PARTY-NOTICES。
         </Credit>
       </div>
     </div>
@@ -1743,12 +1723,12 @@ function WaveEditor({
   if (decoding) {
     noteText = '正在解码波形…'
   } else if (!url) {
-    noteText = '选好文件后这里会显示波形：点波形跳转、拖两端把手裁剪、剪刀切开、分段导出。'
+    noteText = '选好文件后这里会显示波形。'
   } else if (note) {
     noteText = `${note}；仍然可以选段、分段、导出，只是看不见波形。`
     noteTone = 'warn'
   } else if (peaks) {
-    noteText = `拖两端把手裁剪、点一下跳到那里、剪刀模式点波形切开。总长 ${formatDuration(duration)}。`
+    noteText = `总长 ${formatDuration(duration)}。`
   } else {
     noteText = '还没有拿到可画的波形，选段、分段、导出照常可用。'
   }
@@ -1845,7 +1825,7 @@ function WaveEditor({
 
       <p className="hint">
         时间按「分:秒.毫秒」填，例如 1:23.456（直接写 83 也认）。
-        拖波形两端的把手裁剪，和输入框双向同步：拖完框里会变，改完框里波形跟着动。
+        拖波形两端的把手裁剪，和输入框双向同步。
         剪刀模式下点波形等于在那里切开；快捷键 S = 在播放头切开，Ctrl+Z 撤销，Delete 删除选中段。
         裁剪结果固定导出 WAV。
       </p>
@@ -1853,7 +1833,6 @@ function WaveEditor({
       {segments.length > 1 && (
         <div className="wave-segments">
           <div className="wave-seg-head">
-            <span>{`共 ${segments.length} 段，点一行选中它，再按「导出」单独导出`}</span>
             <span className="spacer" />
             <Button size="sm" variant="primary" icon="download" onClick={() => onExportAll(segments, selected)}>
               {`全部导出（${segments.length} 段）`}

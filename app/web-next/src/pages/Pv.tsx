@@ -392,13 +392,13 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
       const doc = await waitForEditor(frame, isAlive)
       if (!isAlive()) return
       if (!doc) {
-        fail('编辑器没能加载：内置编辑器文件缺失或损坏。重新解压一份完整程序即可恢复。')
+        fail('编辑器没能加载：程序文件缺失或损坏。')
         return
       }
 
       const win = frame.contentWindow as JizuraWindow | null
       if (!win?.document?.getElementById) {
-        fail('编辑器载入失败：内置编辑器没能启动。多半是程序文件被删或损坏，重新解压一份完整程序即可恢复。')
+        fail('编辑器载入失败：程序文件缺失或损坏。')
         return
       }
 
@@ -425,7 +425,7 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
       }
       // 同一份歌词只自动填一次：用户手动清空后再切回来，不该又被塞回去
       if (String(getConfig()[CFG_SENT] ?? '') === text) {
-        setStatus('编辑器已就绪（歌词已经带过来了，没有重复填写）。')
+        setStatus('编辑器已就绪（歌词已带入）。')
         return
       }
 
@@ -435,7 +435,7 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
       if (res.ok) {
         setStatus(`已把歌词填进编辑器（${text.split('\n').length} 行）。`)
       } else {
-        fail(`歌词填写可能没成功（填进去 ${res.got} / 应为 ${res.want} 字）：${res.why ?? '编辑器里的内容没对上'}`)
+        fail('歌词没能自动填进编辑器，请手动粘贴')
       }
     })()
 
@@ -487,8 +487,8 @@ export function Pv({ state, onNavigate, onToast }: PageProps) {
         onToast('歌词已导入编辑器', 'ok')
       } else {
         // 旧前端这里只改状态条；新前端的规矩是任何失败都要能被看到（状态条也可能被忽略）
-        onToast(`导入后填写可能没成功（${r.got} / 应为 ${r.want} 字）：${r.why ?? '编辑器里的内容没对上'}`, 'err')
-        setStatus(`导入后填写可能没成功（${r.got} / 应为 ${r.want} 字）：${r.why ?? '编辑器里的内容没对上'}`)
+        onToast('歌词没能自动填进编辑器，请手动粘贴', 'err')
+        setStatus('歌词没能自动填进编辑器，请手动粘贴')
       }
     } catch (e) {
       setStatus(`导入失败：${errText(e)}`)

@@ -296,7 +296,7 @@ export function Convert({ state, onToast }: PageProps) {
         <Panel>
           <PanelHead
             title="来源工程"
-            desc="把工程文件拖进来，或点「选择文件」挑；工程只在本机处理、不出这台机器"
+            desc="把工程文件拖进来，或点「选择文件」挑"
             extra={<Chip>{availableCount} 种格式可用</Chip>}
           />
           <div className="stack">
@@ -306,7 +306,6 @@ export function Convert({ state, onToast }: PageProps) {
             <div className="convert-drop" data-over={dragging ? 'true' : undefined}>
               <Icon name="upload" size={22} />
               <span className="convert-drop-title">把工程文件拖到这里</span>
-              <span className="convert-drop-note">拖到窗口任意位置都算数</span>
             </div>
 
             <div className="btn-row">
@@ -320,7 +319,7 @@ export function Convert({ state, onToast }: PageProps) {
 
             <div className="convert-sources">
               {sources.length === 0 ? (
-                <div className="convert-empty">还没有添加文件：拖进来，或点上面的「选择文件」</div>
+                <div className="convert-empty">还没有添加文件</div>
               ) : (
                 sources.map((s) => (
                   <div className="convert-source" key={s.key}>
@@ -392,7 +391,7 @@ export function Convert({ state, onToast }: PageProps) {
       {/* ══════════════════════ 右：输出 + 选项 + 预检 + 执行 ══════════════════════ */}
       <div className="convert-col">
         <Panel>
-          <PanelHead title="输出设置" desc="结果存到哪里、叫什么名字" />
+          <PanelHead title="输出设置" />
           <div className="stack">
             <Field
               label="输出目录"
@@ -405,7 +404,6 @@ export function Convert({ state, onToast }: PageProps) {
               <DirectoryInput
                 value={outDir}
                 onChange={setOutDir}
-                placeholder="留空 = 用设置里的默认输出目录…"
                 title="选输出目录"
                 onToast={onToast}
               />
@@ -420,7 +418,7 @@ export function Convert({ state, onToast }: PageProps) {
 
             <Field
               label="文件名模板"
-              hint="可用变量：{name} = 原文件名（其它形如 {xxx} 的内容会原样保留）"
+              hint="可用变量：{name} = 原文件名"
             >
               <TextInput
                 value={nameTemplate}
@@ -439,7 +437,7 @@ export function Convert({ state, onToast }: PageProps) {
         </Panel>
 
         <Panel>
-          <PanelHead title="转换选项" desc="不确定就别动，默认跟 LibreSVIP 官方一致" />
+          <PanelHead title="转换选项" desc="默认与官方一致" />
           <DisclosureGroup
             className="convert-opts-fold"
             label="展开转换选项"
@@ -447,7 +445,7 @@ export function Convert({ state, onToast }: PageProps) {
           >
             <div className="convert-opts">
               <section className="convert-opt-group">
-                <p className="group-label">导入（默认全开：工程里有什么就带什么进来）</p>
+                <p className="group-label">导入（默认全开）</p>
                 <div className="convert-opt-grid">
                   {IMPORT_SWITCHES.map(([key, label, desc]) => (
                     <SwitchRow
@@ -460,7 +458,7 @@ export function Convert({ state, onToast }: PageProps) {
                   ))}
                 </div>
                 <div className="convert-opt-fields">
-                  <Field label="音高信息输入模式" hint="完整=全部音高、颤音模式=仅已编辑颤音、平整模式=仅已编辑音高">
+                  <Field label="音高信息输入模式">
                     <Picker
                       label="音高信息输入模式"
                       labelHidden
@@ -469,7 +467,7 @@ export function Convert({ state, onToast }: PageProps) {
                       onValueChange={(v) => setOpt('音高信息输入模式', v)}
                     />
                   </Field>
-                  <Field label="换气音符处理方式" hint="源工程里的换气记号怎么处理">
+                  <Field label="换气音符处理方式">
                     <Picker
                       label="换气音符处理方式"
                       labelHidden
@@ -478,7 +476,7 @@ export function Convert({ state, onToast }: PageProps) {
                       onValueChange={(v) => setOpt('换气音符处理方式', v)}
                     />
                   </Field>
-                  <Field label="音符组导入方式" hint="拆开成单个音符，还是合成一整块">
+                  <Field label="音符组导入方式">
                     <Picker
                       label="音符组导入方式"
                       labelHidden
@@ -491,7 +489,7 @@ export function Convert({ state, onToast }: PageProps) {
               </section>
 
               <section className="convert-opt-group">
-                <p className="group-label">效果处理（默认全关；开了才动工程）</p>
+                <p className="group-label">效果处理（默认全关）</p>
                 <div className="convert-opt-grid">
                   {MIDDLEWARE_SWITCHES.map(([key, label, desc]) => (
                     <SwitchRow
@@ -538,7 +536,7 @@ export function Convert({ state, onToast }: PageProps) {
                       onValueChange={(v) => setOpt('VSQX文件版本', v)}
                     />
                   </Field>
-                  <Field label="默认语言" hint="给歌手的默认发音语言；「跟随工程」= 用工程里带的">
+                  <Field label="默认语言" hint="给歌手的默认发音语言">
                     <Picker
                       label="默认语言"
                       labelHidden
@@ -562,7 +560,7 @@ export function Convert({ state, onToast }: PageProps) {
         <Panel>
           <PanelHead
             title="转换预检"
-            desc="点了才跑（逐个文件起一次引擎，慢）；不预检也能直接转换，结果只是提示"
+            desc="点了才跑；不预检也能直接转换，结果只是提示"
             extra={
               <Button
                 size="sm"
@@ -580,14 +578,14 @@ export function Convert({ state, onToast }: PageProps) {
               <p className="muted">
                 {sources.length === 0
                   ? '先加一个源工程，这里会报出目标格式装不下哪些数据。'
-                  : '还没预检。点右上角「预检」，它要逐个文件读一遍工程，所以不会自动跑。'}
+                  : '还没预检。点右上角「预检」。'}
               </p>
             ) : null}
 
             {reports.length > 0 ? (
               okReports === 0 ? (
                 <Finding level="warn" title="这批文件都读不了">
-                  下面每一行都写了原因；工程读不出来通常意味着文件损坏，或不是该扩展名对应的格式。
+                  工程读不出来通常意味着文件损坏，或不是该扩展名对应的格式。
                 </Finding>
               ) : warnCount > 0 ? (
                 <Finding level="warn" title="目标格式装不下下列数据，转换后会丢失：">
@@ -644,9 +642,6 @@ export function Convert({ state, onToast }: PageProps) {
                 开始转换
               </Button>
             </div>
-            <p className="hint convert-note">
-              全部在本机完成：不联网、文件不出这台机器
-            </p>
           </div>
 
           <JobProgress
@@ -662,27 +657,20 @@ export function Convert({ state, onToast }: PageProps) {
                   打开输出目录
                 </Button>
               </div>
-              <p className="hint">
-                输出目录：{effectiveOutDir}
-                <br />
-                每个文件写出了什么、多大，都记在上面的日志里。
-              </p>
+              <p className="hint">输出目录：{effectiveOutDir}</p>
             </div>
           ) : null}
         </Panel>
 
         {/* 许可与出处：四十来种工程格式的读写都是 LibreSVIP 做的 */}
         <Credit
-          desc="工程格式的读写由第三方的 LibreSVIP 完成"
           items={[
             { label: '代码', value: 'Apache-2.0', sub: 'LibreSVIP 2.9.0' },
-            { label: '分发', value: '随包分发', sub: '离线可用，不用另装' },
           ]}
         >
           工程格式的读写由{' '}
           <Upstream href="https://github.com/SoulMelody/LibreSVIP">LibreSVIP</Upstream>
-          （Apache-2.0）完成：四十来种格式都归它，随程序一起分发，离线可用。
-          它自带一份 Python 运行时和一批依赖，各自的许可随包附带。
+          （Apache-2.0）完成：四十来种格式都归它。
         </Credit>
       </div>
     </div>

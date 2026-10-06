@@ -129,6 +129,57 @@ fn runtime_url() -> String {
     url_override("VSS_MIDI_RUNTIME_URL", RUNTIME_URL)
 }
 
+/// 一个地址的**境内镜像**（`ghfast.top` 前缀），拿不到就回 `None`。
+///
+/// 主地址是 GitHub release：境内直连经常是「开头连得上、下到一半断」或者干脆超时。
+/// 音轨分离那边的 Python 后端早就在用同一招（`CHIXIAOYANG_GITHUB_DOWNLOAD_MIRROR`，
+/// 默认就是这个域名），这里只是给这 78 MB 的包补一条退路。
+/// ⚠️ **只加退路、不换主地址** —— 镜像自己也会挂，能直连的人不该被它拖累。
+fn mirrored(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    Some(format!("https://ghfast.top/https://github.com/{rest}"))
+}
+
+/// 这个包按顺序要试的地址：先官方，再镜像。
+fn runtime_urls() -> Vec<String> {
+    let primary = runtime_url();
+    match mirrored(&primary) {
+        Some(m) => vec![primary, m],
+        None => vec![primary],
+    }
+}
+
+/// 依次试 `urls`，第一个成功就返回；全失败就把最后一条错误抛出去。
+///
+/// ⚠️ 与 `fetch_to_file` 的分工要清楚：**它**负责「同一个地址重试 5 轮 + 删掉半个文件」
+/// （抖动用那个），**这里**负责「这个源根本不通就换一个源」。两层都别省：
+/// 只重试同一地址会让被墙的用户白等五轮，只换源会让一次网络抖动直接劝退。
+async fn fetch_first_ok(
+    urls: &[String],
+    out: &Path,
+    ctl: &crate::svsep::DownloadCtl,
+    on_progress: &(impl Fn(u64, Option<u64>, crate::svsep::Stage) + Send + Sync),
+) -> Result<u64, String> {
+    let mut last = String::from("没有可用的下载地址");
+    for (i, url) in urls.iter().enumerate() {
+        if ctl.cancelled() {
+            return Err("已停止".into());
+        }
+        if i > 0 {
+            crate::log_line(&format!("MIDI 运行时：上一个地址失败，换镜像重试：{url}"));
+        }
+        match crate::svsep::fetch_to_file(url, out, None, ctl, |got, total, stage| {
+            on_progress(got, total, stage)
+        })
+        .await
+        {
+            Ok(n) => return Ok(n),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 // ---------------------------------------------------------------------------
 // 推理方式（自动 / GPU / CPU）
 // ---------------------------------------------------------------------------
@@ -599,7 +650,7 @@ pub fn runtime_candidates(root: &Path, writable: &Path) -> Vec<PathBuf> {
     }
     vec![
         data_dir(writable).join(crate::tools::dll("onnxruntime")),
-        crate::svsep::runtime_dir(root)
+        crate::svsep::runtime_base(root)
             .join("runtime")
             .join("Lib")
             .join("site-packages")
@@ -614,8 +665,39 @@ pub fn runtime_candidates(root: &Path, writable: &Path) -> Vec<PathBuf> {
 }
 
 /// 现在能用哪个动态库。一个都没有就是 `None`。
+///
+/// ⚠️ **优先挑「带 CUDA provider」的那一份，不是简单取候选里的第一个。**
+///
+/// 踩过的坑（2026-10，用户报「N 卡点不亮转 MIDI 的 GPU」）：界面提示「缺运行库」
+/// 时用户下了那份 **78 MB 的官方 CPU 包**，它落在 `<可写>/midi/`、排候选第一；
+/// 后来他为了 GPU 又装了音轨分离（运行时里那份 ORT 是 **GPU 构建**、能跑 CUDA），
+/// 可候选顺序让 CPU 包继续遮蔽它 —— `probe_cuda` 于是永远回
+/// 「这份 ONNX Runtime 里没有 CUDA provider（官方 CPU 包）」，GPU 那一格永远锁着。
+///
+/// 按**能力**挑而不是按下单顺序挑，这个遮蔽就不成立了。注意这不等于强制用 GPU：
+/// 用户选的推理方式（`device`）照旧说了算，这里只是别让「手里明明有一份能跑 CUDA 的」
+/// 被一份跑不了的顶掉。
 pub fn runtime_dll(root: &Path, writable: &Path) -> Option<PathBuf> {
-    runtime_candidates(root, writable).into_iter().find(|p| p.is_file())
+    let existing: Vec<PathBuf> = runtime_candidates(root, writable)
+        .into_iter()
+        .filter(|p| p.is_file())
+        .collect();
+    existing
+        .iter()
+        .find(|p| has_cuda_provider(p))
+        .cloned()
+        .or_else(|| existing.into_iter().next())
+}
+
+/// 这份 ORT 旁边有没有 CUDA provider（`onnxruntime_providers_cuda.dll`）。
+///
+/// 这是**静态分辨「官方 CPU 包」与「GPU 构建」**的唯一办法：两个 zip 里的
+/// `onnxruntime.dll` 同名，只有 GPU 构建多出这几个 provider dll
+/// （音轨分离那份在 `onnxruntime/capi/` 下，实测有 cuda / tensorrt / shared）。
+fn has_cuda_provider(dll: &Path) -> bool {
+    dll.parent()
+        .map(|d| d.join(crate::tools::dll("onnxruntime_providers_cuda")).is_file())
+        .unwrap_or(false)
 }
 
 /// 模型目录：优先用现成的那一份（可写目录里下好的，或随包的）。
@@ -787,15 +869,13 @@ pub async fn download_runtime(
     std::fs::create_dir_all(&dir).map_err(|e| format!("建目录失败：{e}"))?;
     let zip = dir.join("ort.part");
 
-    crate::svsep::fetch_to_file(
-        &runtime_url(),
-        &zip,
-        None,
-        ctl,
-        &|got, total, stage| on_progress(got, total, stage),
-    )
-    .await?;
-    on_progress(0, None, crate::svsep::Stage::Extract);
+    /* ⚠️ 走 `fetch_first_ok` 而不是直接 `fetch_to_file`：官方那个 GitHub 地址在境内
+       经常下不动，而 `fetch_to_file` 只会在**同一个**地址上重试五轮（见它的注释）。
+       这是用户报「70 MB 运行库下不下来」之后加的退路。 */
+    fetch_first_ok(&runtime_urls(), &zip, ctl, &|got, total, stage| {
+        on_progress(got, total, stage)
+    })
+    .await?;    on_progress(0, None, crate::svsep::Stage::Extract);
     // 整包解到临时目录，再把要的那一个 DLL 拎出来 —— ORT 的 zip 里
     // `onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll`，还带着头文件与
     // `onnxruntime_providers_shared.dll`（那个 dll 用不上，但同目录放着无害）。
@@ -1426,6 +1506,65 @@ mod tests {
     /// 另有一条更隐蔽的：**那 12 个组件分在四个 `bin/` 里**（cudart / cublas /
     /// cufft / cudnn），所以每个组件都得能各自定位到自己的目录 —— 夹具把这四层
     /// 都搭出来，下面逐个数一遍。
+    /// `runtime_dll` 的挑法：**带 CUDA provider 的那份优先**，别让用户下过的
+    /// 官方 CPU 包把音轨分离里那份 GPU 版遮蔽掉（用户报的「N 卡点不亮 GPU」）。
+    #[test]
+    fn a_cuda_capable_runtime_wins_over_a_downloaded_cpu_pack() {
+        // debug 构建里 `runtime_candidates` 认这个环境变量，先清掉免得干扰
+        std::env::remove_var("VSS_MIDI_DLL");
+        let base = std::env::temp_dir().join("vss-midi-pick-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let writable = base.join("writable");
+
+        // ① 用户自己下过的那份：官方 CPU 包，落在 `<可写>/midi/`（候选里的第一个）
+        let cpu = data_dir(&writable).join(crate::tools::dll("onnxruntime"));
+        std::fs::create_dir_all(cpu.parent().unwrap()).unwrap();
+        std::fs::write(&cpu, b"x").unwrap();
+
+        // ② 音轨分离运行时里那份：GPU 构建 —— 旁边躺着 CUDA provider
+        let capi = crate::svsep::runtime_dir(&root)
+            .join("runtime")
+            .join("Lib")
+            .join("site-packages")
+            .join("onnxruntime")
+            .join("capi");
+        std::fs::create_dir_all(&capi).unwrap();
+        let gpu = capi.join(crate::tools::dll("onnxruntime"));
+        std::fs::write(&gpu, b"x").unwrap();
+        let provider = capi.join(crate::tools::dll("onnxruntime_providers_cuda"));
+
+        // 只有 CPU 包时，就用它（用户没装音轨分离，这就是他能有的最好的一份）
+        assert_eq!(runtime_dll(&root, &writable).as_deref(), Some(cpu.as_path()));
+
+        // 多一份 GPU 构建之后，必须改挑 GPU 那份 —— 遮蔽 bug 就在这一行
+        std::fs::write(&provider, b"x").unwrap();
+        assert_eq!(runtime_dll(&root, &writable).as_deref(), Some(gpu.as_path()));
+
+        // 把 GPU 那份删掉，退回 CPU 包（别把「没有」当成「出错」）
+        std::fs::remove_file(&gpu).unwrap();
+        assert_eq!(runtime_dll(&root, &writable).as_deref(), Some(cpu.as_path()));
+    }
+
+    /// GitHub 的地址要能生成镜像，别的地址不许乱加前缀。
+    #[test]
+    fn github_urls_get_a_mirror_and_other_hosts_do_not() {
+        assert_eq!(
+            mirrored(RUNTIME_URL).as_deref(),
+            Some(
+                "https://ghfast.top/https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip"
+            )
+        );
+        assert!(mirrored("https://1856610041.cdn.123clouddisk.com/x.zip").is_none());
+        assert!(mirrored("http://github.com/a/b.zip").is_none(), "只认 https");
+        assert!(mirrored("not a url").is_none());
+
+        // 顺序：官方在前，镜像是退路
+        let urls = runtime_urls();
+        assert_eq!(urls.first().map(String::as_str), Some(runtime_url().as_str()));
+        assert!(urls.len() >= 1);
+    }
+
     #[test]
     fn find_dylibs_dir_needs_a_real_hit() {
         let base = std::env::temp_dir().join("vss-midi-dylib-test");

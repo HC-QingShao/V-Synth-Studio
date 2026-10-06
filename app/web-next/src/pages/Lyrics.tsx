@@ -612,11 +612,11 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
       {/* ── 左栏：取词的三个入口 ─────────────────────────────── */}
       <div className="lyrics-col">
         <Panel>
-          <PanelHead title="搜索歌曲" desc="搜到之后点一条就能取歌词" />
+          <PanelHead title="搜索歌曲" desc="点一条取歌词" />
           <div className="stack">
             <Field
               label="关键词"
-              hint="搜索、取歌词都走网易云。结果里带专辑、时长与收费标签，信息更全。"
+              hint="结果里带专辑、时长与收费标签，信息更全。"
             >
               <div className="input-group">
                 <TextInput
@@ -636,7 +636,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
             {searchErr && <p className="lyrics-error">{searchErr}</p>}
 
             {hits === null ? (
-              <p className="hint">搜到的歌会列在这里，点一条就开始取歌词。</p>
+              <p className="hint">搜到的歌会列在这里。</p>
             ) : hits.length === 0 ? (
               <p className="hint">没有结果。换个关键词再试，或者直接把歌曲链接粘到下面。</p>
             ) : (
@@ -690,8 +690,8 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
             </Field>
 
             <Field
-              label="从文件导入（本地已有的 .lrc）"
-              hint="选一个 .lrc 文件，读进来之后的预览、保存、带去「文字 PV」都和搜到的歌一样，只是来源标成「本地文件」。UTF-8 与 GBK（国内老歌词常见）都能读，读的是哪种会写在歌词预览的来源那一行。译文尽量拆出来：`原文 / 译文` 这种一行两段、以及前后两段同时间轴的写法都认；拆不出来就整份当原文。"
+              label="从文件导入 .lrc"
+              hint="UTF-8 与 GBK 都能读，读的是哪种会写在歌词预览的来源那一行。`原文 / 译文` 这类双语行会尽量拆出译文。"
             >
               <Button icon="folder" onClick={() => void pickLrc()}>
                 选 .lrc 文件
@@ -724,7 +724,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
             {/* 扫码登录已移除（服务端风控，见 AGENTS.md 第十节）—— 别再往这里加回来 */}
             <Field
               label="手机号 + 短信验证码（推荐）"
-              hint="先点「发送验证码」，收到短信后把验证码填在下面点「登录」。没收到就别重复点，多半是号码不对或今天发得太多。"
+              hint="先点「发送验证码」，收到短信后把验证码填在下面点「登录」。"
             >
               <div className="input-group">
                 <TextInput
@@ -745,7 +745,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
                 </Button>
               </div>
             </Field>
-            <Field label="短信验证码" hint="登录成功后登录态存在本机（等同网页版登录），搜索、取歌词、下封面都会带上它。">
+            <Field label="短信验证码" hint="登录成功后，搜索、取歌词、下封面都会带上它。">
               <div className="input-group">
                 <TextInput
                   inputMode="numeric"
@@ -771,7 +771,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
             )}
 
             <Field
-              label="网易云 Cookie（发不出短信、或想直接用浏览器里那个登录态时用）"
+              label="网易云 Cookie"
               hint="保存后不会回显真实值，只会显示「已设置」（输入框保持空白）。留空保存 = 清除。"
             >
               <TextArea
@@ -800,7 +800,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
                 </Button>
               </span>
             </Field>
-            <p className="lyrics-login-msg">⚠ 这个值等同于你的账号登录态，别分享给别人、别截图发出来。</p>
+            <p className="lyrics-login-msg">⚠ 等同于账号登录态，别分享、别截图</p>
 
             {/* 怎么拿 Cookie：用户基本都不知道，写细一点，能照着做 */}
             <details className="lyrics-help">
@@ -825,7 +825,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
                   <li>回到这里粘进上面的框，点「保存」。</li>
                 </ol>
                 <p className="lyrics-login-msg">
-                  只复制 MUSIC_U 那一格的值就行（保存时会自动补上 MUSIC_U=）；把整行 Cookie（MUSIC_U=xxx; __csrf=yyy; …）整个粘进来也能用。
+                  只复制 MUSIC_U 那一格的值，或把整行 Cookie 粘进来。
                 </p>
                 <p className="lyrics-alert" data-tone="warn">
                   MUSIC_U 是 HttpOnly cookie，在 Console 里敲 document.cookie 是看不到它的 —— 网上教程那招在这里没用，必须按上面的步骤在 Application → Cookies 里找。
@@ -872,9 +872,7 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
                 </div>
               </div>
             ) : (
-              <p className="hint">
-                还没有选中歌曲。上面搜一首歌、粘贴链接，或从文件导入 LRC ；歌词取回来会显示在这里。
-              </p>
+              <p className="hint">还没有选中歌曲。</p>
             )}
 
             {previewErr && <p className="lyrics-error">{previewErr}</p>}
@@ -978,7 +976,6 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
               </div>
             )}
 
-            <p className="lyrics-saved">想直接出视频（动态歌词 MP4 / PNG 序列）：把这段歌词带去「文字 PV」。</p>
             <div className="btn-row">
               <Button icon="film" onClick={toTextPv}>
                 用这段歌词做文字 PV
@@ -989,13 +986,11 @@ export function Lyrics({ state, onNavigate, onRefreshState, onToast }: PageProps
 
         {/* 许可与出处：歌词文本处理的规则是从 163MusicLyrics 移植的 */}
         <Credit
-          desc="歌词文本处理规则移植自第三方项目"
           items={[
             { label: '文本处理', value: 'Apache-2.0', sub: '移植自 163MusicLyrics' },
           ]}
         >
-          歌词文本处理规则（LRC 时间戳的多写法解析、LRC 转 SRT 的收尾、译文对齐的容错、
-          空行与纯音乐判定、双语行的组织方式）移植自{' '}
+          移植自{' '}
           <Upstream href="https://github.com/jitwxs/163MusicLyrics">jitwxs/163MusicLyrics</Upstream>
           （Apache-2.0）。
         </Credit>

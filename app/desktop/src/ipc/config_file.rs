@@ -78,6 +78,15 @@ pub fn default_config() -> Value {
         "pvSentLyrics": "",
         // 人声转 MIDI 的输出目录（原 `qingmu.midi.outDir`）
         "midiOutDir": "",
+        /* 音轨分离运行时的落点（空 = 由后端按「程序目录能不能写」自己定）。
+           为什么要给用户选：那一坨 4.7 GB / 解压后 7.4 GB，装在 C 盘紧张的人身上是灾难；
+           而安装版默认落在 Program Files 下**根本写不进去**（见 `svsep::runtime_base`）。 */
+        "svsepRuntimeDir": "",
+        /* 显卡加速（DirectML）：`auto`（默认，非 N 卡就开）/ `on` / `off`；
+           `svsepDmlSix` = 六轨（RoFormer）也走 DirectML —— 上游怕爆显存写死了 False，
+           我们替它打开这条路，界面必须提示「建议显存 ≥ 8 GB」。 */
+        "svsepDml": "auto",
+        "svsepDmlSix": false,
     })
 }
 

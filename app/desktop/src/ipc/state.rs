@@ -84,6 +84,30 @@ impl AppState {
         // 可写目录可能还不存在（首次运行安装版），先建出来
         let _ = std::fs::create_dir_all(&paths.writable);
         let config = super::config_file::load_config(&paths.writable);
+        /* 运行时落点要在建 `Svsep` **之前**定下来 —— `runtime_base()` 是进程级的，
+           凡是拼运行时路径的地方都读它（见那个函数的注释）。
+           ⚠️ 安装版默认落点是程序目录 = `Program Files` = 普通权限写不进去，
+           4.7 GB 解压必然失败 —— MSI 用户「音轨分离用不了」有这一半原因。 */
+        crate::svsep::init_runtime_base(
+            &paths.root,
+            &paths.writable,
+            paths.installed,
+            config
+                .get("svsepRuntimeDir")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        );
+        /* 显卡加速（DirectML）按配置生效：改 `._pth` 里那一行 + 六轨补丁。
+           ⚠️ 必须在 `init_runtime_base` **之后** —— 那两个文件都在运行时目录里，
+           而运行时目录刚刚才定下来。 */
+        crate::svsep::apply_dml(
+            &paths.root,
+            config.get("svsepDml").and_then(Value::as_str).unwrap_or("auto"),
+            config
+                .get("svsepDmlSix")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        );
         let svsep = crate::svsep::Svsep::new(
             paths.root.clone(),
             paths.writable.clone(),

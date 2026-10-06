@@ -1,12 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, svsepFileUrl, type SvsepOutput, type SvsepStatus, type SvsepTask } from '@/lib/api'
+import {
+  api,
+  svsepFileUrl,
+  type SvsepOutput,
+  type SvsepRuntimeDir,
+  type SvsepStatus,
+  type SvsepTask,
+} from '@/lib/api'
 import { Button, IconButton } from '@/components/Button'
 import { Credit, Upstream } from '@/components/Credit'
 import { Icon } from '@/components/Icon'
 import { Chip, Finding, Panel, PanelHead, Stat } from '@/components/Panel'
-import { GlassSegmentedControl } from '@ttqtt/liquid-glass-react'
+import { GlassDialog, GlassSegmentedControl, GlassSwitch } from '@ttqtt/liquid-glass-react'
 import { DropHint, useFilePick } from '@/components/FilePick'
+import { getConfig } from '@/lib/config'
 import { formatBytes } from '@/lib/format'
+import {
+  downloadBytes,
+  extractedBytes,
+  installLabel,
+  useInstaller,
+  type InstallStep,
+} from '@/lib/useInstaller'
 import type { PageProps } from './types'
 import './Svsep.css'
 
@@ -67,7 +82,7 @@ const ENGINES = [
 ]
 
 /** 这两条是按本机（AMD RX 580，纯 CPU）实测写的；有 CUDA 的机器会快一个数量级 */
-const ESTIMATE_NOTE = '按纯 CPU 的经验值估的时长；装了 NVIDIA 显卡会快很多'
+const ESTIMATE_NOTE = '装了 NVIDIA 显卡会快很多'
 
 /** 轮询间隔（毫秒） */
 const POLL_STATUS = 2000
@@ -100,6 +115,25 @@ const STEM_LABEL: Record<string, string> = {
 /* ══════════════════════════════════════════════════════════ 小工具 ══ */
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
+
+/**
+ * 两个模型文件（以及那几个索引文件）都在？
+ *
+ * ⚠️ 判据只能是后端状态里的 `models.items[].state` + `models.ok`，别在前端按文件大小猜。
+ * `models` 是对象、列表在 `items[]` 里（曾经写成 `models.uvr` → 恒为 false）。
+ */
+const svsepModelsOk = (s: SvsepStatus) => {
+  const items = s.models?.items ?? []
+  return items.length > 0 && items.every((m) => m.state === 'ok')
+}
+
+/**
+ * 这一次运行里「运行时装哪个目录」已经问过了吗。
+ *
+ * 放在模块级（不是 ref）：用户要求**这个确认只弹一次** —— ref 会跟着切页卸载而丢掉，
+ * 于是「确认完就切走、再回来点安装」会被再问一遍。
+ */
+let dirAskedInSession = false
 
 /** 从文件名猜一条轨是什么（上游给的是 `(Vocals)_xxx.wav` 这种） */
 function stemOf(o: SvsepOutput): string {
@@ -143,6 +177,12 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
   const [task, setTask] = useState<SvsepTask | null>(null)
   /* 「删除全部依赖」的两段式确认：第一下只是把这个立起来，第二下才真删 */
   const [armDelete, setArmDelete] = useState(false)
+  /* 运行时的落点（装之前只问一次）与那个确认弹窗 */
+  const [dirInfo, setDirInfo] = useState<SvsepRuntimeDir | null>(null)
+  const [dirAsk, setDirAsk] = useState<SvsepRuntimeDir | null>(null)
+  const dirAskResolve = useRef<((ok: boolean) => void) | null>(null)
+  /* 六轨也走 DirectML —— 后端状态里没有这一项，读配置里的 `svsepDmlSix` 当镜像 */
+  const [sixDml, setSixDml] = useState(() => Boolean(getConfig()['svsepDmlSix']))
 
   /** 拉一次总体状态。失败**不弹 toast**（轮询失败会刷屏），把错误放进 err 显示 */
   const [err, setErr] = useState<string | null>(null)
@@ -158,12 +198,135 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
     }
   }, [])
 
-  /* ── 轮询：状态 ─────────────────────────────────────── */
+  /**
+   * 要装哪几个包、按什么顺序。
+   *
+   * **顺序就是用户要的那条**：运行时 → 模型 →（没有 N 卡时）显卡加速包。
+   * 每一步的 `ready` 都来自后端状态，所以「缺哪样下哪样」不用另外维护一份账。
+   */
+  const plan = useCallback(
+    (s: SvsepStatus): InstallStep[] => {
+      /* 盘上还留着半个包（上次下到一半关了窗口、或者解压没收尾）时，即便入口文件
+         已经在了，也要让这一步重新算「没装完」—— 点安装**不会走网络**，直接把包里
+         剩下的解开（`svsep.rs::part_is_whole_zip` 那条短路）。不这么判的话按钮不会
+         出现，而下面那句「已下好 X，接着下」就指向一个不存在的按钮。 */
+      const leftover = (kind: 'runtime' | 'models') =>
+        !!s.download?.resumable && s.download?.pausedKind === kind
+      return [
+        {
+          key: 'runtime',
+          label: '运行时',
+          bytes: downloadBytes(s.runtime),
+          ready: !!s.runtimeReady && !leftover('runtime'),
+          start: api.svsepDownloadRuntime,
+        },
+        {
+          key: 'models',
+          label: '模型',
+          bytes: downloadBytes(s.models),
+          ready: svsepModelsOk(s) && !leftover('models'),
+          start: api.svsepDownloadModels,
+        },
+        {
+          key: 'dml',
+          label: '显卡加速包',
+          bytes: downloadBytes(s.dml),
+          ready: !!s.dml?.installed,
+          /* 有 N 卡时这一步**本来就不用装**：那份 DirectML ORT 里没有 CUDA，
+             给 N 卡机器装它反而更慢。标成 `skip` 而不是 `ready` —— 否则按钮会
+             把这一台机器说成「已经装过一部分」。 */
+          skip: !!s.dml?.nvidia,
+          start: api.svsepDmlDownload,
+        },
+      ]
+    },
+    [],
+  )
+
+  /** 弹一次落点确认，等用户选完（或确认默认）再开始下载 */
+  const askDirOnce = useCallback(async (): Promise<boolean> => {
+    /* 写成「先取、没有再问」而不是 `dirInfo ?? await …`：TS 7 对
+       「`??` 右边是 await」这种写法的收窄跟不过去，会报 `info` 可能是 null。 */
+    let info = dirInfo
+    if (!info) {
+      info = await api.svsepRuntimeDir()
+      setDirInfo(info)
+    }
+    if (info.hasRuntime) {
+      dirAskedInSession = true
+      return true
+    }
+    if (dirAskedInSession) return true
+    return await new Promise<boolean>((resolve) => {
+      dirAskResolve.current = resolve
+      setDirAsk(info)
+    })
+  }, [dirInfo])
+
+  const installer = useInstaller<SvsepStatus>({
+    load: refresh,
+    plan,
+    download: (s) => s.download,
+    onToast,
+    beforeInstall: askDirOnce,
+  })
+
+  /* 落点信息只读一次 —— 装好之后就不用再问了 */
   useEffect(() => {
+    let on = true
+    void api
+      .svsepRuntimeDir()
+      .then((d) => {
+        if (on) setDirInfo(d)
+      })
+      .catch(() => {
+        /* 读不到就等真点安装时再问一次（`askDirOnce` 自己会拉） */
+      })
+    return () => {
+      on = false
+    }
+  }, [])
+
+  const closeDirAsk = (ok: boolean) => {
+    setDirAsk(null)
+    const r = dirAskResolve.current
+    dirAskResolve.current = null
+    r?.(ok)
+  }
+
+  /** 「用默认位置」= 把配置清回自动（安装版落可写目录、绿色版落程序目录） */
+  const useDefaultDir = async () => {
+    try {
+      setDirInfo(await api.svsepSetRuntimeDir(''))
+      dirAskedInSession = true
+      closeDirAsk(true)
+    } catch (e) {
+      onToast(errText(e), 'err')
+    }
+  }
+
+  /** 「换个目录…」= 系统「选择文件夹」对话框，选完就落在那儿 */
+  const pickRuntimeDir = async () => {
+    try {
+      const r = await api.fsPick({ folder: true, title: '选音轨分离运行时的存放目录' })
+      if (!r.files.length) return
+      setDirInfo(await api.svsepSetRuntimeDir(r.files[0]))
+      dirAskedInSession = true
+      closeDirAsk(true)
+    } catch (e) {
+      onToast(errText(e), 'err')
+    }
+  }
+
+  /* ── 轮询：状态 ─────────────────────────────────────── */
+  /* 安装中由 `useInstaller` 每 1.75 秒拉一次（它拉的也是 `refresh`），这里让开，
+     免得同一条命令被两个定时器同时打 */
+  useEffect(() => {
+    if (installer.installing) return
     void refresh()
     const t = setInterval(() => void refresh(), POLL_STATUS)
     return () => clearInterval(t)
-  }, [refresh])
+  }, [refresh, installer.installing])
 
   const running = !!st?.running
 
@@ -236,7 +399,9 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
         if (!alive) return
         setTask(v)
         if (v.status === 'done') {
-          onToast('分离完成', 'ok')
+          /* 上游「done 但没有产出」= 处理失败被吞了（见下面那块 Finding），别报成「完成」 */
+          const n = (v.outputs ?? []).length
+          onToast(n ? '分离完成' : '分离结束，但没有产出（读不出这段音频）', n ? 'ok' : 'warn')
         } else if (v.status === 'error' || v.status === 'failed') {
           onToast(v.error || v.message || '分离失败', 'err')
         }
@@ -266,14 +431,12 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
   const dlPct = dl && dl.total > 0 ? Math.min(100, Math.round((dl.done / dl.total) * 100)) : 0
 
   /* 缺哪样、还要下多少 —— 数字全部来自后端（字节），**不要在界面里硬编码容量** */
-  const modelBytes = modelItems.reduce(
-    (n, m) => n + (m.state === 'ok' ? 0 : (m.expectedSize || 0)),
-    0,
-  ) || (st?.models?.expectedBytes || 0)
-  const needBytes = (runtimeReady ? 0 : (st?.runtime?.expectedBytes || 0)) + (modelsOk ? 0 : modelBytes)
   /* 压缩包大小（下的是 zip），与解压后的大小是两回事 —— 两个数都给用户看 */
-  const DL_RUNTIME_ZIP = '4.7 GB'
-  const DL_MODELS_ZIP = '462 MB'
+  const steps = useMemo(() => (st ? plan(st) : []), [st, plan])
+  /** 那颗大按钮的文案；`null` = 全装好了，那时不画按钮（上面那排 Stat 就是摘要） */
+  const installText = installLabel(steps)
+  /** 删依赖之后要重新下多少 —— 与安装按钮同一个来源 */
+  const allBytes = steps.reduce((n, s) => n + (s.bytes || 0), 0)
 
   const inference = (backend?.inference || {}) as Record<string, unknown>
   const acceleration = (backend?.acceleration || {}) as Record<string, unknown>
@@ -304,28 +467,6 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
 
   /* ── 动作 ───────────────────────────────────────────── */
 
-  const doDownloadModels = async () => {
-    try {
-      await api.svsepDownloadModels()
-      /* ⚠️ 说的是**压缩包**大小（462 MB），和界面上那个「解压后」的数是两回事。
-         之前这里写「约 730 MB」（那是解压后的大小），用户会以为下 730 MB 就够了。 */
-      onToast(`开始下载模型（压缩包约 ${DL_MODELS_ZIP}，解压后约 731 MB）`, 'info')
-      void refresh()
-    } catch (e) {
-      onToast(errText(e), 'err')
-    }
-  }
-
-  const doDownloadRuntime = async () => {
-    try {
-      await api.svsepDownloadRuntime()
-      onToast(`开始下载运行时（压缩包约 ${DL_RUNTIME_ZIP}，解压后约 7.4 GB），会下一阵子`, 'info')
-      void refresh()
-    } catch (e) {
-      onToast(errText(e), 'err')
-    }
-  }
-
   /* 暂停：`.part` 留着，下次点下载会带 Range 接着下。
      ⚠️ 后端是在**下一块数据到达时**才收手，所以按钮按下去到进度条停住之间
      还有一两秒 —— toast 说的是「正在暂停」，不是「已暂停」。 */
@@ -348,6 +489,35 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
       onToast(errText(e), 'err')
     }
   }
+
+  /**
+   * 开 / 关显卡加速（以及「六轨也用」）。
+   *
+   * ⚠️ 只传要改的那一项，另一项由后端从配置里读 —— 传全量的话，两个开关几乎同时
+   * 被点时会互相盖掉。回包是权威值（`six` 会被它纠正），照它写回本地镜像。
+   */
+  const doSetDml = async (patch: { mode?: 'auto' | 'on' | 'off'; six?: boolean }) => {
+    try {
+      const r = await api.svsepSetDml(patch)
+      setSixDml(r.six)
+      void refresh()
+    } catch (e) {
+      onToast(errText(e), 'err')
+    }
+  }
+
+  /** 进度条标签上「正在装什么」—— 优先用安装循环正在装的那一步，退回下载状态里的种类 */
+  const stepName =
+    installer.stepLabel ||
+    (dl?.kind === 'runtime'
+      ? '运行时'
+      : dl?.kind === 'models'
+        ? '模型'
+        : dl?.kind === 'dml'
+          ? '显卡加速包'
+          : '')
+  /** 安装失败要显示的那句话：循环自己撞上的错优先，否则是后端留下的那一句 */
+  const installError = installer.error || dl?.error || null
 
   /* 一键删掉所有下下来的依赖（模型 730 MB + 运行时 7.4 GB + ffmpeg）。
      ⚠️ **不在这里弹确认框**：这个页面没有确认对话框组件，`window.confirm` 又和
@@ -459,7 +629,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
         <Panel>
           <PanelHead
             title="音频素材"
-            desc="选一个本地音频，交给分离引擎"
+            desc="交给分离引擎"
             extra={file ? <Chip tone="ok">已选</Chip> : <Chip>未选</Chip>}
           />
           {/*
@@ -494,13 +664,12 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
             </div>
           )}
           <p className="hint">
-            上限 {formatBytes(MAX_UPLOAD)}。超过就先在「音频工具」里裁一段或转成 mp3 ——
-            多出来的长度对分离结果没有帮助。
+            上限 {formatBytes(MAX_UPLOAD)}；超过先在「音频工具」里裁一段。
           </p>
         </Panel>
 
         <Panel>
-          <PanelHead title="分离模式" desc="两种引擎模型不同，产出也不同" />
+          <PanelHead title="分离模式" desc="两种引擎产出不同" />
           <div className="choice-grid">
             {ENGINES.map((e) => (
               <button
@@ -537,50 +706,13 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
               </Button>
             )}
           </div>
-          {!runtimeReady && st && (
-            <Finding level="warn" title="分离引擎还没装">
-              离线分离要用的运行时与模型都不随程序分发，要下两次：
-              运行时压缩包约 {DL_RUNTIME_ZIP}、解压后 7.4 GB
-              {!modelsOk && <>，模型压缩包约 {DL_MODELS_ZIP}、解压后 731 MB</>}。
-              {needBytes > 0 && (
-                <>
-                  {' '}
-                  这次总共还要下 <strong>约 {formatBytes(needBytes)}</strong>。
-                </>
-              )}
-              到右边「离线引擎」那张卡上点对应的按钮，下完会自动解压到 <code>{st.dir}</code>，
-              不用手动放。<strong>只需要下一次</strong>（之后升级工作站不用再下）。
-              {!st.runtime?.downloadUrl && (
-                <>
-                  {' '}
-                  ⚠️ 现在还没有可用的下载地址，点了会提示「还没配置下载地址」。
-                </>
-              )}
-            </Finding>
-          )}
-          {runtimeReady && !modelsOk && (
-            <Finding level="warn" title="还没有模型，先下载">
-              模型单独打包：压缩包约 {DL_MODELS_ZIP}、解压后 731 MB（六轨那个 BS-RoFormer
-              自己就 667 MB，二轨的 UVR 只有 64 MB）。到右边「离线引擎」那张卡上点「下载模型」，
-              下完会自动解压，不用手动放。<strong>只需要下一次</strong>。
-              {!st.models?.downloadUrl && (
-                <>
-                  {' '}
-                  ⚠️ 现在还没有可用的下载地址，点了会提示「还没配置下载地址」。
-                </>
-              )}
-            </Finding>
-          )}
         </Panel>
 
         <Panel>
-          <PanelHead title="分离完做什么" desc="结果能直接拿回工作站继续用" />
+          <PanelHead title="分离完做什么" />
           <ol className="svsep-steps">
             <li>在右边试听每一轨，确认分得干净。</li>
-            <li>
-              「下载」会把 WAV 存到浏览器的下载目录；文件其实一直在本机分离引擎的输出目录里，
-              点「打开输出目录」就能看到。
-            </li>
+            <li>「下载」存到系统下载目录；也可点「打开输出目录」直接看。</li>
             <li>
               要变调、变速、转格式，把它带回
               <button type="button" className="svsep-link" onClick={() => onNavigate('audio')}>
@@ -608,7 +740,6 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
         <Panel>
           <PanelHead
             title="离线引擎"
-            desc="在你自己电脑上跑，音频不出本机"
             extra={running ? <Chip tone="ok">运行中</Chip> : <Chip>空闲</Chip>}
           />
           <div className="svsep-stats">
@@ -622,7 +753,11 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
               value={runtimeReady ? '就绪' : '缺失'}
               /* ⚠️ `expectedBytes` 是**解压后**的容量（7.4 GB），要下的是 4.7 GB 的压缩包。
                  缺的时候两个数都给，不然用户会以为要下 7.4 GB。 */
-              sub={runtimeReady ? undefined : `下 ${DL_RUNTIME_ZIP} · 解压 ${formatBytes(st?.runtime?.expectedBytes ?? 0)}`}
+              sub={
+                runtimeReady
+                  ? undefined
+                  : `下 ${formatBytes(downloadBytes(st?.runtime))} · 解压 ${formatBytes(extractedBytes(st?.runtime))}`
+              }
             />
             <Stat
               label="模型"
@@ -630,22 +765,19 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
               sub={
                 modelsOk
                   ? modelItems.map((m) => formatBytes(m.size)).join(' + ')
-                  : `下 ${DL_MODELS_ZIP} · 解压 ${formatBytes(modelBytes)}`
+                  : `下 ${formatBytes(downloadBytes(st?.models))} · 解压 ${formatBytes(extractedBytes(st?.models))}`
               }
             />
             {badge && <Stat label="设备" value={badge} />}
           </div>
 
-          {dl?.active && (
+          {dl && (installer.installing || dl.active) && (
             <div className="svsep-progress">
               <div className="svsep-progress-head">
                 {/* 下载与解压共用这一条进度条，标签必须说清是哪一段：解压的分母跟
                     整包字节数差不多大，只写「正在下载…」就成了「下到 100% 又归零
                     重爬」，看着像下完又重下了一遍（见 api.ts 里 `stage` 的注释） */}
-                <span>
-                  {dl.stage === 'extract' ? '正在解压' : '正在下载'}
-                  {dl.kind === 'runtime' ? '运行时…' : '模型…'}
-                </span>
+                <span>{dl.stage === 'extract' ? '正在解压…' : `正在装${stepName}…`}</span>
                 <span className="svsep-dim">
                   {formatBytes(dl.done)}
                   {dl.total > 0 ? ` / ${formatBytes(dl.total)}` : ''}
@@ -675,18 +807,11 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
                   </Button>
                 </div>
               )}
-              {dl.kind === 'runtime' && (
-                <p className="hint">
-                  {dl.stage === 'extract'
-                    ? '整包已经下到磁盘上了，现在在解压（两万多个文件）。这一步不走网络、也不能暂停 —— 别关工作站，关了就白解，下次还得从头解一遍。'
-                    : '这一包几 GB，下完还要解压两万多个文件，可能要几十分钟 —— 下的时候可以让它自己跑，别关工作站。暂停只是不再往下拿数据，已经下好的那部分留着，下次点「继续下载」接着下。'}
-                </p>
-              )}
             </div>
           )}
-          {dl?.error && (
-            <Finding level="warn" title="上次下载没成功">
-              {dl.error}
+          {installError && (
+            <Finding level="warn" title="安装失败">
+              {installError}
             </Finding>
           )}
           {/* 删到一半就别让用户以为卡住了 —— 几万个文件，几十秒很正常 */}
@@ -704,6 +829,59 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
             </div>
           )}
 
+          {/* ── 一个按钮：把还缺的包按顺序装完 ──────────────────
+              顺序是「运行时 → 模型 →（没有 N 卡时）显卡加速包」，中间不需要再点
+              任何东西（状态机在 `lib/useInstaller.ts`）。
+              全装好之后这颗按钮**不出现** —— 上面那排 Stat 就是状态摘要。 */}
+          {installText && (
+            <div className="btn-row">
+              <Button
+                variant="primary"
+                icon="download"
+                loading={installer.installing}
+                disabled={!!dl?.active || !!dl?.delete?.active}
+                onClick={() => installer.install()}
+              >
+                {installText}
+              </Button>
+            </div>
+          )}
+
+          {/* ── 显卡加速（DirectML：A 卡 / 核显）───────────────
+              只在装了加速包（或者正在装它）之后出现 —— 没装的时候摆一排开关，
+              用户点了只会拿到一句「还没下加速包」。 */}
+          {(st?.dml?.installed || installer.stepKey === 'dml') && (
+            <>
+              {/* ⚠️ 这两行用 `.btn-row` 而不是自己造类名：面板里的行距只认
+                  `.field` / `.btn-row` / `.drop-hint` 这三种（见 `index.css`），
+                  用别的容器两行会贴在一起。 */}
+              <div className="btn-row">
+                <span className="field-label">显卡加速（A 卡 / 核显）</span>
+                <span className="spacer" />
+                <GlassSwitch
+                  aria-label="显卡加速"
+                  checked={!!st?.dml?.active}
+                  disabled={!st?.dml?.installed || installer.installing || !!dl?.active}
+                  onCheckedChange={(on) => void doSetDml({ mode: on ? 'on' : 'off' })}
+                />
+              </div>
+              {st?.dml?.nvidia && <p className="hint">检测到 NVIDIA 显卡，自动走 CUDA（更快）</p>}
+              <div className="btn-row">
+                <span className="field-label">六轨也用显卡</span>
+                <span className="spacer" />
+                <GlassSwitch
+                  aria-label="六轨也用显卡"
+                  checked={sixDml}
+                  disabled={!st?.dml?.installed || installer.installing || !!dl?.active}
+                  onCheckedChange={(on) => void doSetDml({ six: on })}
+                />
+              </div>
+              <p className="hint">
+                DirectML 跑六轨容易爆显存，建议显存 ≥ 8 GB；爆了就把它关掉。
+              </p>
+            </>
+          )}
+
           <div className="btn-row">
             {/* 推理方式（自动 / GPU / CPU）：原版软件在标题栏上就有这个三选一。
                 服务开着时改它立刻转给 Python（它清了引擎单例，下个任务按新方式来）；
@@ -717,37 +895,6 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
                 onValueChange={(v: string) => void doSetInfer(asInferMode(v))}
               />
             </div>
-            {/* 运行时不齐备、**或者盘上还留着半个运行时的包** → 都给这个按钮。
-                第二种情况是「上次下完了、没解完就关了窗口」：包就在盘上，点它不会
-                重新下，直接接着解压（见 svsep.rs::part_is_whole_zip）。原来只看
-                `runtimeReady`，而半解压的运行时照样算「就绪」—— 于是按钮不出现，
-                下面那句「再点上面的下载按钮」指向一个不存在的按钮。 */}
-            {(!runtimeReady || (dl?.resumable && dl?.pausedKind === 'runtime')) && (
-              <Button
-                icon="download"
-                disabled={!!dl?.active || !!dl?.delete?.active}
-                onClick={() => void doDownloadRuntime()}
-              >
-                {dl?.active && dl.kind === 'runtime'
-                  ? '下载中…'
-                  : dl?.pausedKind === 'runtime'
-                    ? '继续下载运行时'
-                    : '下载运行时'}
-              </Button>
-            )}
-            {((runtimeReady && !modelsOk) || (dl?.resumable && dl?.pausedKind === 'models')) && (
-              <Button
-                icon="download"
-                disabled={!!dl?.active || !!dl?.delete?.active}
-                onClick={() => void doDownloadModels()}
-              >
-                {dl?.active && dl.kind === 'models'
-                  ? '下载中…'
-                  : dl?.pausedKind === 'models'
-                    ? '继续下载模型'
-                    : '下载模型'}
-              </Button>
-            )}
             <Button
               variant="ghost"
               icon="folder"
@@ -760,17 +907,10 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
               而用户真正需要知道的是「再点就是接着下，已经下过的那部分还在」 */}
           {dl?.resumable && !dl.active && (
             <p className="hint">
-              {dl.pausedKind === 'runtime' ? '运行时' : '模型'}已经下好{' '}
-              {formatBytes(dl.pausedBytes)}，就存在磁盘上 —— 再点上面的下载按钮是
-              <b>接着下</b>，不会从头再来（程序重启过也一样）。要是那一包其实已经
-              下完整了（上次解压到一半被打断），这一下<b>不会再走网络</b>，直接把
-              剩下的解开。
+              {dl.pausedKind === 'runtime' ? '运行时' : '模型'}已下好{' '}
+              {formatBytes(dl.pausedBytes)}，点「继续安装」会接着下。
             </p>
           )}
-          <p className="hint">
-            分离服务不用你管：点「开始分离」时它自动起（第一次要十几秒），任务跑完
-            自动关 —— 它常驻会占约 5 GB 内存。关闭工作站时也会一起停掉。
-          </p>
           {/* 一键删依赖：两段式确认，因为删完要重下 8 GB 才能再用离线分离。
               不做条件渲染 —— 引擎还没下全的时候也该留着这个入口，用户可能想
               把之前下了一半的东西清掉。 */}
@@ -779,13 +919,14 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
               {armDelete ? (
                 <>
                   <p className="hint">
-                    要删掉：运行时（解压后 7.4 GB）、模型（解压后 730 MB）、分离引擎自带的 ffmpeg。
-                    删完离线分离就用不了了，得重新下 <strong>约 8 GB</strong>。
+                    要删掉：运行时（解压后 {formatBytes(extractedBytes(st?.runtime))}）、模型（解压后{' '}
+                    {formatBytes(extractedBytes(st?.models))}）、分离引擎自带的 ffmpeg。
+                    删完离线分离就用不了了，得重新下 <strong>约 {formatBytes(allBytes)}</strong>。
                     已经分离出来的音频<strong>不会被删</strong>。
                   </p>
                   <div className="btn-row">
                     <Button icon="trash" onClick={() => void doDeleteDeps()}>
-                      确认删除（要重下约 8 GB）
+                      确认删除（要重下约 {formatBytes(allBytes)}）
                     </Button>
                     <Button variant="ghost" onClick={() => setArmDelete(false)}>
                       算了
@@ -795,7 +936,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
               ) : (
                 <>
                   <p className="hint">
-                    离线分离的引擎和模型占了约 8 GB。用不上了可以删掉腾地方，什么时候想用再下回来。
+                    离线分离的引擎和模型约占 {formatBytes(extractedBytes(st?.runtime) + extractedBytes(st?.models))}。
                   </p>
                   <div className="btn-row">
                     <Button variant="ghost" icon="trash" onClick={() => void doDeleteDeps()}>
@@ -820,7 +961,6 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
         <Panel>
           <PanelHead
             title="分离进度"
-            desc="提交后会自动刷新"
             extra={
               task ? (
                 <Chip
@@ -868,11 +1008,18 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
               </div>
               {!settled && (
                 <p className="hint">
-                  这个百分比是引擎按时间估的，不是真进度 —— 会长时间停在 90% 再跳到 100%，
-                  看到不动不用重试。图上那句「已用时 N 秒」才是真信息。
+                  百分比是按时间估的，会停在 90% 再跳到 100%；「已用时 N 秒」才是真信息。
                 </p>
               )}
               {task.error && <Finding level="warn" title="分离失败">{task.error}</Finding>}
+              {/* ⚠️ 上游把「处理失败」也标成 done：`separator_engine` 吞掉异常、回一个空结果，
+                 于是任务收场是「完成 100%」而 `outputs` 是空的 —— 界面什么都不显示，
+                 看着就是「点了没反应」。实测给一个没有 RIFF 头的假 wav 就是这个下场。 */}
+              {task.status === 'done' && outputs.length === 0 && (
+                <Finding level="warn" title="没有分离出结果">
+                  引擎读不出这段音频，换个文件或换个格式再试。
+                </Finding>
+              )}
 
               {outputs.length > 0 && (
                 <>
@@ -921,12 +1068,11 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
         <Panel>
           <PanelHead
             title="在线分离：MVSEP"
-            desc="效果最好的一档，代价是音频要传到别人的服务器"
+            desc="效果最好；音频会上传到 MVSEP 服务器"
             extra={<Chip tone="warn">需上传</Chip>}
           />
           <Finding level="warn" title="隐私提示">
-            MVSEP 在云端跑模型，你上传的音频会离开这台电脑。介意的话用左边的离线引擎 ——
-            它拿本机 CPU / 显卡算，一个字节都不外发。
+            上传的音频会发到 MVSEP 的服务器；介意就用离线引擎。
           </Finding>
           <p className="svsep-url">{MVSEP_URL}</p>
           <div className="btn-row">
@@ -935,8 +1081,7 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
             </Button>
           </div>
           <p className="hint">
-            在系统浏览器里打开（不是站内窗口），因为 MVSEP 要你登录才能下结果。
-            下载回来的音频可以直接拖进左边当素材，也可以拿回「音频工具」处理。
+            要登录才能下结果；拿回来的音频可以直接拖进左边当素材。
           </p>
         </Panel>
 
@@ -976,9 +1121,37 @@ export function Svsep({ onNavigate, onToast }: PageProps) {
           <Upstream href="https://github.com/nomadkaraoke/python-audio-separator">
             nomadkaraoke/python-audio-separator
           </Upstream>
-          （audio-separator，MIT，作者 Andrew Beveridge）：运行时与模型都不随程序打包，第一次用要先下好依赖。
+          （MIT，作者 Andrew Beveridge）。
           它调用的 UVR 系列模型由 @Anjok07 训练，许可见模型自己带的那份说明。
         </Credit>
+
+        {/* ── 装之前先定落点（**只问一次**）─────────────────────
+            这一坨 7.4 GB 默认解到哪，安装版（程序目录只读）与绿色版不一样，用户
+            也可能想挪到别的盘 —— 所以第一次下载之前问一次，选完/确认完才开始下。
+            ⚠️ 只在**运行时还没装好**时弹（`askDirOnce` 判的），装好之后同一个会话
+            里不再出现。 */}
+        <GlassDialog
+          open={!!dirAsk}
+          onOpenChange={(o) => {
+            if (!o) closeDirAsk(false)
+          }}
+          title="选运行时的存放位置"
+          description={`要下 ${formatBytes(downloadBytes(st?.runtime))}，解开后占 ${formatBytes(extractedBytes(st?.runtime))}`}
+        >
+          <p className="hint">默认位置：{dirAsk?.writableDefault}</p>
+          {dirAsk && !dirAsk.rootWritable && (
+            <p className="hint">程序目录不可写，所以要另选一个位置。</p>
+          )}
+          <div className="dir-actions">
+            <span className="spacer" />
+            <Button size="sm" onClick={() => void pickRuntimeDir()}>
+              换个目录…
+            </Button>
+            <Button size="sm" variant="primary" onClick={() => void useDefaultDir()}>
+              用默认位置
+            </Button>
+          </div>
+        </GlassDialog>
       </div>
     </div>
   )

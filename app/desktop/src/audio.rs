@@ -39,9 +39,7 @@ fn ffprobe_path(ffmpeg: &Path) -> Option<PathBuf> {
 }
 
 fn ffmpeg_error() -> String {
-    "未找到 ffmpeg。它随程序一起打包，出现这个提示说明 tools 目录缺失或不完整 —— \
-     从压缩包里把 tools 整个目录重新解压到程序根目录即可。音频工具需要它。"
-        .to_string()
+    "未找到 ffmpeg：tools 目录缺失，请重新解压程序包。".to_string()
 }
 
 /* ══════════════════════════════════ 基础执行 ══════════════════════════════════ */

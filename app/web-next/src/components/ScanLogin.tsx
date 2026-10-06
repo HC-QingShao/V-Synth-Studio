@@ -97,7 +97,7 @@ export function ScanLogin({
         if (stopped || !alive.current) return
         if (r.loggedIn) {
           setPhase('ok')
-          setStatus(r.message || '登录成功，Cookie 已经写进本机配置')
+          setStatus(r.message || '登录成功')
           if (!done.current) {
             done.current = true
             onToast?.('B 站登录成功', 'ok')
@@ -143,7 +143,7 @@ export function ScanLogin({
       open={open}
       onOpenChange={(o) => !o && onClose()}
       title="扫码登录 B 站"
-      description="登录只是为了解锁 1080P+ 与大会员画质，画质取址仍在本机完成"
+      description="登录只是为了解锁 1080P+ 与大会员画质"
     >
       <div className="qr-login">
         <div className="qr-box">
@@ -169,8 +169,7 @@ export function ScanLogin({
 
         <p className="qr-status">{status}</p>
         <p className="hint">
-          手机上用 B 站 App 扫这个码、点确认即可。登录态只写进本机配置文件
-          （Cookie 不回传到界面），不会上传到任何地方；想退出在设置页点「退出登录」。
+          手机上用 B 站 App 扫这个码、点确认即可。想退出在设置页点「退出登录」。
         </p>
 
         <div className="dir-actions">
