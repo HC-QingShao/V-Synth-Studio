@@ -1,122 +1,68 @@
-# ════════════════════════════════════════════════════════════════════════════
-#  V-Synth-Studio —— 忽略规则
-#
-#  原则：**仓库只放源码**（约 7 MB）。凡是大二进制、构建产物、本机状态，
-#  一律不入库；其中「编译/打包要用」的那几样由脚本在构建前补齐：
-#
-#    tools/ 与 app/web/vendor/jizura/  →  app\desktop\fetch-tools.ps1（联网 288 MB + 54 MB）
-#    app/web/assets/                   →  build.ps1 第一步的 `npm run build`
-#
-#  ⚠️ 判断标准是「**干净 clone 之后，build.ps1 能不能自己把它弄回来**」：
-#     能 → 可以忽略；不能 → 必须入库，否则新机器既跑不起来也打不出包。
-# ════════════════════════════════════════════════════════════════════════════
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# ── 上传 Release 用的大存档（本地打包产物）──────────────────────────────────
-# tools\zip-assets.ps1 打出来放这儿，再由 tools\upload-assets.ps1 传到
-# tag 为 `assets-v1` 的 Release（fetch-tools.ps1 就是从那个 Release 取）。
-/资料归档/
-
-# ── 仓库根目录的运行期数据 ─────────────────────────────────────────────────
-# ⚠️ 前面的斜杠**不能省**：`data/` 会匹配任意层级的 data 目录，那样会连
-#    app/data/（资源库、拼音词典，必须入库）一起排除掉。
-/data/
-/downloads/
-
-# ── 外部工具：ffmpeg / yt-dlp / LibreSVIP CLI（约 288 MB）──────────────────
-# ⚠️ 这三行**必须按这个顺序**写，别合并成一句 `/tools/`：
-#    git 不会进入被排除的目录，所以「排除 tools/ 再放行里面的脚本」是无效的
-#    （!/tools/*.ps1 永远匹配不上，因为 git 压根没往里走）。
-#    正确写法是先让 tools/ 本身不被排除，再逐层排除里面的二进制。
-/tools/*
-!/tools/*.ps1
-
-# ── JIZURA 文字 PV（构建产物 2.3 MB + 2335 个 woff2 字体，合计约 54 MB）────
-# PV 页的 iframe 指向 /vendor/jizura/index.html，离线可用靠的就是它。
-# ⚠️ **2026-10-05 起放行 index.html 与 LICENSE 这两个文件**：
-#    首页是 JIZURA 上游（github.com/852wa/JIZURA，MIT）的**构建产物**，
-#    仓库里没有任何脚本能重新产出它 —— 不入库的话，jizura.zip 就永远只能在本机
-#    手工打包再上传（51 MB 上行）。放行它俩（2.3 MB）换来的是
-#    「.github/workflows/publish-assets.yml 能在云端把 jizura.zip 完整重建」。
-#    剩下的 fonts/ 与 fonts.css 仍然不入库：由 tools\fetch-jizura-fonts.ps1
-#    现场从 Google Fonts 抓（云端 runner 直连即可，本机自动走 7890 代理）。
-# ⚠️ 只忽略 jizura 这一层的内容，别写成 app/web/vendor/（以后往里加别的东西不被连坐）。
-app/web/vendor/jizura/*
-!app/web/vendor/jizura/index.html
-!app/web/vendor/jizura/LICENSE
-
-# ── 本机状态（app/data/ 本身不在忽略之列，只排除下面几个子项）─────────────
-# 配置：含个人路径与登录 Cookie，程序首次运行会按默认值自己生成。
-# ⚠️ 它同时是「用户偏好」的唯一真相（前端那份 localStorage 已整体退役）。
-app/data/config.json
-app/data/app.log
-# 音轨分离引擎：Python + torch + CUDA 运行库（解压 7.4 GB）与两个模型（730 MB）。
-# 引擎与模型都不随包分发，由分离页按需下载，不进仓库。
-app/data/svsep/
-# 人声转 MIDI 的模型（376 MB）—— 许可是 CC BY-NC-SA 4.0（非商业），
-# 进仓库等于随源码分发，除体积之外**许可本身也不允许**。
-app/data/game/
-# 人声转 MIDI 的可写数据：推理方式设置、下下来的 onnxruntime.dll、任务临时目录。
-app/data/midi/
-
-# ── 前端构建 ───────────────────────────────────────────────────────────────
-# ⚠️ `app/web/assets/` **不入库**：里面是带内容哈希的文件名，而 vite.config.ts 的
-#    `emptyOutDir: false` 让每次构建都往里加新文件、旧的也不自动删 ——
-#    入库的话每构建一次就多几个永不被引用的文件，历史里越堆越多。
-#    产物由 build.ps1 第一步重新生成。
-# ⚠️ 但 `app/web/index.html` **必须入库**：它既是 Vite 的入口，也是
-#    `resolve_paths()` 判定程序根目录的哨兵（`app/web/index.html`）。
-# ⚠️ `app/web/img/`（logo 与两张背景图）是**随包静态资源、不是产物**，同样入库。
-app/web/assets/
-app/web-next/node_modules/
-# 这条是通用的：现在只有 app/web-next 一个前端，但哪天再起一个包也不会漏。
-node_modules/
+node_modules
+dist
+dist-ssr
+*.local
+# `tsc -b` 的增量编译信息（tsconfig.app.tsbuildinfo 等）：每次构建都重写，
+# 内容随机器与时间变，入库只会制造无意义的 diff。
 *.tsbuildinfo
 
-# ── Rust / Tauri 构建产物 ──────────────────────────────────────────────────
-app/desktop/target/
-# gen/ 是 tauri-build 每次编译重写的 schema（capabilities / ACL / windows 三份），
-# 一个字节都不是手写的；以前误当源码入过库，于是每次编译都制造一堆假改动。
-app/desktop/gen/
-# 可执行程序的锁文件**应当入库**（锁定依赖版本、保证可复现构建）。
-# 这一行本身不排除任何东西，写在这儿是提醒别哪天顺手把它 ignore 掉。
-!app/desktop/Cargo.lock
+# ── 运行期状态（data/ 里的只读数据仍入库，只排除程序自己写的那几个）──
+# config.json 是**用户偏好 + 登录 Cookie 的唯一真相**，程序首次运行自己生成。
+# 含个人路径（outDir / lastUrl / svsepRuntimeDir）与 neteaseCookie / bilibiliCookie。
+# ⚠️ 别把 data/ 整个 ignore 掉：resources.json 与 pinyin.json 是随包分发的只读数据，
+#    必须入库 —— 它们同时还是 lib.rs::resolve_paths 判定「程序根目录」的哨兵。
+data/config.json
+data/app.log
+# 音轨分离引擎（解压 7.4 GB）与两个模型（730 MB）：按需下载，不随包分发。
+data/svsep/
+# 人声转 MIDI 的模型（376 MB）—— 许可是 CC BY-NC-SA 4.0（非商业），
+# 除体积之外**许可本身也不允许**随源码分发。
+data/game/
+# 人声转 MIDI 的可写数据：推理方式设置、下下来的 onnxruntime、任务临时目录。
+data/midi/
 
-# ── 探针输出（tests/manual/*.mjs 写的截图与 JSON）──────────────────────────
-tests/manual/out/
+# ── 外部工具：ffmpeg / yt-dlp / LibreSVIP CLI（约 288 MB）──────────────────
+# 由 tools/fetch_tools.mjs 补齐，tauri.conf.json 的 bundle.resources 打进安装包。
+# ⚠️ 这两行**必须按这个顺序**写，别合并成一句 `/tools/`：
+#    git 不会进入被排除的目录，所以「排除 tools/ 再放行里面的脚本」是无效的
+#    （`!/tools/*.mjs` 永远匹配不上，因为 git 压根没往里走）。
+#    正确写法是先让 tools/ 本身不被排除，再放行里面的脚本。
+#    脚本全是 .mjs（`tools/*.mjs`），二进制与上游产物一律不进库。
+/tools/*
+!/tools/*.mjs
+# 构建缓存（抓字体 / 下工具的中间产物）在 `src-tauri/target/vss-cache/`，
+# 由 `src-tauri/.gitignore` 的 `/target/` 一并忽略 —— 它必须在随包范围外，
+# 否则会被 bundle.resources 的 `../tools` 之外的目录映射漏进来。
 
-# ── 真实工程样本（版权原因不入库）──────────────────────────────────────────
-# 真实歌曲工程与用户自己的 OpenUtau 备份。合成出来的 sample-* 夹具仍然入库。
-tests/samples/real-sample-*
-tests/samples/openutau-*
+# ── JIZURA 文字 PV（页面 2.3 MB + 2335 个 woff2 字体，合计约 54 MB）────────
+# PV 页的 iframe 指向 /vendor/jizura/index.html，离线可用靠的就是它。
+#
+# 这一层全部由 `tools/fetch_jizura_fonts.mjs` 现场产出，一件都不入库：`index.html`
+# 与 `LICENSE` 从上游（github.com/852wa/JIZURA，MIT）按钉住的 commit 直取（index.html
+# 还要打上「字体自托管」的补丁），`fonts/` 与 `fonts.css` 从 Google Fonts 抓。
+# `index.html` 是打过补丁的衍生副本，入库等于让仓库里躺一份与上游不同的副本。
+# ⚠️ 只忽略 jizura 这一层，别写成 public/vendor/（以后往里加别的东西不被连坐）。
+public/vendor/jizura/*
 
-# ── 智能体说明书（本地留着，不推送到 GitHub）───────────────────────────────
-# 给 AI 编码智能体看的「看代码看不出来的东西」，也是本工作区的指令文件。
-# ⚠️ 它**仍然在磁盘上**（删掉它，以后的智能体会丢掉全部项目规矩），
-#    只是不进版本库 —— 见 README 的「给接手的人」一节。
-/AGENTS.md
+# Python
+__pycache__/
 
-# ── 临时与调试文件 ─────────────────────────────────────────────────────────
-# ⚠️ 写 `tmp-*`（不带斜杠）而不是 `tmp-*/`：后者只匹配目录，
-#    根目录下随手留一个 `tmp-commit-msg.txt` 就会被 `git add -A` 带进提交。
-/tmp-*
-/_tmp-*
-/_diag-*
-*.part
-*.tmp
-*.orig
-*.rej
-*.bak
-*.log
-
-# ── 二进制（防手滑；正常路径下它们都在上面被忽略的目录里）──────────────────
-*.exe
-*.dll
-*.pdb
-*.obj
-
-# ── 编辑器 / 系统 ──────────────────────────────────────────────────────────
-.vscode/
-.idea/
-*.swp
-Thumbs.db
-desktop.ini
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

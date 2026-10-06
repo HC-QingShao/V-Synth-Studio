@@ -1,0 +1,105 @@
+/*
+ * 设置页专属样式（`pages/Settings.tsx`）。只有这一页用的类不放 `index.css` ——
+ * 那一份每个页面都要下载。
+ */
+
+/* ── 关于页的「源码许可总表」（pages/Settings.tsx）─────────────────────
+   一行一个功能：左列功能名，右列「上游 + 许可 + 用法」。分隔线靠 `border-block-start`
+   画在行上、首行去掉，所以整块不用额外上边距（`.panel-head` 自带下边距）。
+   窄窗口把左列收进同一行，不然功能名会把右侧挤成一条。 */
+.lic-list {
+    display: grid;
+}
+
+.lic-row {
+    display: grid;
+    /* 左列必须用**固定长度**：每行是各自独立的 grid 容器，写 `max-content` 会按「本行」
+       那条功能名算宽 —— 实测 6 种不同的右列起点（510/536/562/581.5/620.5/568.5），
+       14 行的链接全部错位。也不能用 `em`：它按行自己的字号算（10em = 140px），
+       装不下最长的那条「人声转 MIDI（推理运行时）」（13px 字号实测 162.5px、会折行）。
+       `rem` 按根字号算，10.5rem = 168px，刚好放下最长的一条还留几像素。 */
+    grid-template-columns: 10.5rem minmax(0, 1fr);
+    gap: var(--lg-space-1) var(--lg-space-4);
+    padding-block: var(--lg-space-3);
+    border-block-start: 1px solid var(--lg-separator);
+}
+
+.lic-row:first-child {
+    padding-block-start: 0;
+    border-block-start: 0;
+}
+
+.lic-feature {
+    font-size: 13px;
+    font-weight: var(--lg-weight-semibold);
+    color: var(--lg-label);
+}
+
+.lic-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--lg-space-2);
+}
+
+.lic-upstream {
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--lg-label);
+}
+
+.lic-row .hint {
+    margin-block-start: var(--lg-space-1);
+}
+
+@media (max-width: 720px) {
+    .lic-row {
+        grid-template-columns: 1fr;
+    }
+}
+/* 许可表里那一行的上游列（设置页的 `lic-row`）字号跟正文一格 */
+.lic-upstream.upstream {
+    margin: 0;
+}
+/* ── 设置页：左分节 + 右内容 ─────────────────────────────────── */
+.settings {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--lg-space-4);
+}
+
+/* 设置页的小节导航 —— **和主侧栏同一种东西**（一块玻璃 + 滑动高亮块）。
+   里面的 `.app-nav` / `.nav-row` / `.nav-lens` 直接复用主侧栏那套，
+   这里只管它在两栏布局里的位置和宽度。 */
+.settings-nav {
+    width: 142px;
+    flex: none;
+    position: sticky;
+    /**
+     * ⚠️ **`top` 必须等于初始位置**（和 `.app-sidebar` 同一条规矩）。写 `16px` 这类
+     * 小于初始值的数，页面一滚这块玻璃先自己往上爬、最后停进顶栏那条带子底下
+     * （看到的是「子侧边栏跟着滚轮走」）。
+     *
+     * 初始位置 = `.app` 上内边距 16 + 顶栏 26 + 一个间距 16 + `.page-head` 高 74 = **132**。
+     * 那个 74 是「设置 / 外观、路径、外部工具」这行的实测高度（`.page-title` 28px/34px
+     * + `.page-sub` 15px + 上边距 4 + `.page-head` 的下内边距 16）；将来改标题字号或
+     * 副标题文案要重新量一次 —— 写小了就是「跟着滚轮走」，写大了页面一打开就会看到它被顶下去。
+     */
+    top: calc(var(--lg-space-4) * 2 + 26px + 74px);
+}
+
+.settings-body {
+    flex: 1;
+    min-width: 0;
+}
+
+/* 窄屏：两栏塌成一栏，左导航整个收掉（`.app-sidebar` 那条在 `index.css`）。 */
+@media (max-width: 900px) {
+    .settings-nav {
+        display: none;
+    }
+
+    .settings {
+        flex-direction: column;
+    }
+}

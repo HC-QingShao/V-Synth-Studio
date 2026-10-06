@@ -1,36 +1,45 @@
-# 首次注册：这个文件先前没被 Actions 索引到，2026-10-02 空提交一次强制重新解析。
-#   ⚠️ 2026-10-05 补充（仓库重建后再踩一次，结论更准）：**空提交救不了**。
-#      新仓库首次推送后，`GET /repos/…/actions/workflows` 回 `total_count = 0`，
-#      Actions 页也是空的（但文件在树上、Actions 权限是开的、编辑器不报语法错）。
-#      必须**改到这个文件本身**（路径进 `.github/workflows/**`）才会被重新解析注册 ——
-#      而且只有被改动的那一个文件会注册，所以同一次推送里的每个 workflow 都要碰一下。
 # 编译 + 打包 Windows 安装包（MSI）
 #
 # 手动跑：Actions → 打包 Windows (MSI) → Run workflow
 #   勾上 release 就顺手把 MSI 传到 Release 上（只有 tag 触发才需要勾，平时留空即可）
 # 打 tag 跑：`git tag v1.2.0 && git push origin v1.2.0` —— 自动编译并把 MSI 传上 Release
-#   ⚠️ MSI 里的版本号**不来自 tag**，来自 `app/desktop/tauri.conf.json` 的 `version`。
-#      tag 只要匹配 `v*` 就会触发，所以两者写岔了也不报错 —— 出包前对一眼。
 #
-# ── 这个仓库里没有任何二进制 ────────────────────────────────────────────────
+# ⚠️ 首次推送后这个文件可能不会被 Actions 索引（Actions 页是空的、`total_count = 0`，
+#    但文件在树上、Actions 权限也是开的）。**空提交没用** —— 必须改到这个文件本身
+#    （路径进 `.github/workflows/**`）才会被重新解析注册，而且只有被改动的那一个文件会注册。
+#
+# ── 这个仓库里没有任何大二进制 ──────────────────────────────────────────────
 #
 # 源码不到 7MB。两块「随程序分发但不属于源码」的大件不入库，由编译前的步骤补进工作区：
 #
-#   tools\                      ffmpeg 201MB + LibreSVIP 70MB + yt-dlp 17MB ≈ 288MB
-#   app\web\vendor\jizura\      JIZURA 文字 PV：index.html + 2335 个 woff2 ≈ 54MB
+#   tools/                      ffmpeg 105MB + LibreSVIP 13MB + yt-dlp 18MB ≈ 188MB
+#   public/vendor/jizura/       index.html + LICENSE（上游直取）+ 2335 个 woff2 ≈ 50MB
 #
-# 补齐源是本仓库 Release 上的两个附件（tag `assets-v1`），由 tools\zip-assets.ps1 打出：
-#   tools.zip（129MB）  jizura.zip（51MB）
-# 下面第一个 job 把它们从 Release 取下来并**存进 Actions 缓存** ——
-# 之后每次跑都走缓存，只有附件版本变了才重新下（180MB 从 GitHub 下大约一分钟）。
+# 两块由 `pnpm exec tauri build` 的 `beforeBuildCommand`（= `pnpm prepare:assets`）补齐：
 #
-# ⚠️ 前提：assets-v1 这个 Release 必须先建好、两个 zip 必须传上去。没传的话
-#    job `assets` 会在「取存档」那一步直接失败（不会白跑十几分钟才失败）。
+#   tools/    ← ffmpeg / yt-dlp / LibreSVIP / onnxruntime，各自上游发布点直取
+#               （URL 在 `fetch_tools.mjs::UPSTREAM`，按平台分列；这里是 win-x64）
+#   jizura/   ← 上游源码（github.com/852wa/JIZURA，按 commit 直取）+ Google Fonts
 #
-# ⚠️ 这个工作流还没在真 CI 上跑过（本机没有 gh、仓库也还没有远端）。第一次 push 上去跑时，
-#    最可能出问题的是**第三方 action 的版本号**：如果 GitHub 报 "Unable to resolve action"，
-#    把 @ 后面那串换成当时的最新大版本即可。编译/打包那几行是照 app\desktop\build.ps1
-#    本机实测的命令抄的，风险低。
+# 都不缓存：上游 URL 决定内容，缓存只会多一层可能过期的状态。
+#
+# ── 编译链上的几条硬约束 ────────────────────────────────────────────
+#
+# **不做 `cargo install tauri-cli`**：`@tauri-apps/cli` 已在 devDependencies 里，
+# `pnpm exec tauri` 直接可用。
+#
+# **不需要 Python**：`tools/` 全是 Node 脚本（`tools/*.mjs`），补齐与两个检查都跑在
+# 已有的 Node 上 —— 所以这个 workflow 不再有 `actions/setup-python`。
+#
+# **`bundle.resources` 里没有前端**：`frontendDist` 是 `dist/`，被 Tauri
+# **嵌进 exe**（`tauri-codegen`）。所以 jizura 的文件**不会出现在 MSI 的 File 表里**，
+# 冒烟测试不能用「查 File 表里有没有 index.html」当判据（查不出来），见下面「冒烟」那步。
+#
+# **没有 `ffprobe.exe`**：媒体信息由 `ffmpeg -i` 自己读（见 audio.rs）。
+#
+# **版本号只有一处**：`src-tauri/Cargo.toml`。`tauri.conf.json` 不写 `version`，
+# Tauri 会自己用 Cargo 的值；界面上显示的那个也从 `CARGO_PKG_VERSION` 取。
+# 版本号是什么就是什么，不改 MSI 文件名。
 
 name: 打包 Windows (MSI)
 
@@ -46,266 +55,199 @@ on:
         type: boolean
         default: false
   push:
-    # ⚠️ 必须带数字：附件那个 Release 的 tag 是 `assets-v1`，宽泛的 `v*` 会让
-    # 「建附件 Release」这个动作顺手触发一次没用的构建。版本 tag 记得写成 `v1.2.0`。
+    # 版本 tag 是 `v1.2.0` 这种。带数字是为了不误触发：宽泛的 `v*` 会连
+    # 「随手建的 v-something」也一起跑。
     tags: ['v[0-9]*']
 
 permissions:
   contents: write          # tag 触发时要把 MSI 传上 Release，需要写权限
 
-env:
-  # 附件所在 Release 的 tag。换 tag 时改这一行，并同步改 app\desktop\fetch-tools.ps1
-  # 里的 $assetsTag —— 两处都指同一批附件，别只改一边。
-  # ⚠️ 别改成 `v` 开头的（会和版本 tag 撞上，见上面 on.push.tags 的注释）。
-  ASSETS_TAG: assets-v1
-
 jobs:
-  # ── 第一个 job：把两个存档准备好并缓存起来 ────────────────────────────────
-  #
-  # 为什么单独拆一个 job：这 180MB 跟「MSI 有没有变」无关，而 Actions 的缓存
-  # **跨 run 复用、跨 job 也能命中**，所以后面 msi job 直接 restore 就行，
-  # 每次跑省下一分钟加上 GitHub Release 的带宽。
-  assets:
-    name: 准备存档（工具与字体）
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - name: 取缓存
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            data/.cache/tools.zip
-            data/.cache/jizura.zip
-          key: assets-${{ env.ASSETS_TAG }}-${{ runner.os }}
-
-      # 缓存没命中才下。附件不在（tag 写错、Release 没建、附件没传）时这里就失败 ——
-      # 这是**故意的**：宁可在第 1 分钟失败，也不要等编译完 20 分钟才发现工具是空的。
-      - name: 从 Release 取存档
-        if: steps.cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path 'data/.cache' | Out-Null
-          $base = "https://github.com/${{ github.repository }}/releases/download/${{ env.ASSETS_TAG }}"
-          foreach ($n in 'tools', 'jizura') {
-            $url = "$base/$n.zip"
-            Write-Host "下载 $url"
-            curl.exe -L --fail --connect-timeout 30 --speed-limit 2048 --speed-time 60 -o "data/.cache/$n.zip" $url
-            if ($LASTEXITCODE -ne 0) { throw "下载 $n.zip 失败（附件传了吗？tag ${{ env.ASSETS_TAG }}）" }
-          }
-          Get-ChildItem 'data/.cache/*.zip' | Format-Table Name, Length
-
-      # cache-hit 时上面的步骤被跳过，这时探针是唯一能证明「缓存真的还在」的东西。
-      # 少了它，缓存半途坏掉会表现成后面解压出一堆残缺文件。
-      - name: 校验存档完整
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          foreach ($n in 'tools', 'jizura') {
-            $f = "data/.cache/$n.zip"
-            if (-not (Test-Path $f)) { throw "缺少 $f" }
-            $mb = (Get-Item $f).Length / 1MB
-            Write-Host ("{0}.zip  {1:N1} MB" -f $n, $mb)
-            # tools.zip 实测 129MB、jizura.zip 51MB。阈值取得很松，只拦「下了一半」这种。
-            if ($mb -lt 20) { throw "$n.zip 只有 $mb MB，明显不完整" }
-          }
-
-  # ── 第二个 job：编译 + 打包 + 冒烟 ────────────────────────────────────────
+  # ── 编译 + 打包 + 冒烟 ────────────────────────────────────────────────────
   msi:
     name: 编译并打包 MSI
-    needs: assets
-    # windows-latest 上预装了：MSVC + Windows SDK（链接需要）、Node.js、Edge。
-    # 本机那几个 H 盘自装路径由 build.ps1 自己探测，这里不用管。
+    # windows-latest 上预装了 MSVC + Windows SDK（链接需要）、Node.js、Edge。
     runs-on: windows-latest
-    timeout-minutes: 120   # release 编译 + 含 ~340MB 资源的 MSI 打包（主要是压缩慢）
+    timeout-minutes: 120   # release 编译 + 含 ~240MB 资源的 MSI 打包（主要是压缩慢）
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: 取存档（与 assets job 同一份缓存）
-        uses: actions/cache/restore@v4
+      - name: 装 pnpm
+        uses: pnpm/action-setup@v6
         with:
-          path: |
-            data/.cache/tools.zip
-            data/.cache/jizura.zip
-          key: assets-${{ env.ASSETS_TAG }}-${{ runner.os }}
-          fail-on-cache-miss: true   # 空的 tools\ 会打出一个缺工具的安装包，不能放过去
+          version: 12
 
-      # Node 只在这一步需要：前端是 Vite 构建的（见 AGENTS.md「Node 只在构建期出现」）。
-      # 版本照本机实测的 v24 写；Vite 8 要求 Node 20.19+ / 22.12+，24 稳。
+      # Node 既是前端构建（Vite）要的，也是 `tools/*.mjs` 要的 —— 全仓不再依赖 Python。
+      # Vite 8 要求 Node 20.19+ / 22.12+。
       - name: 装 Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
-          cache: npm
-          cache-dependency-path: app/web-next/package-lock.json
+          cache: pnpm
+
+      # 仓库与 workflow 自身对不对得上 —— 这类漂移在本地跑不到（YAML 读不到 JS 常量），
+      # 只会在 CI 里炸，而那时每轮要等十几分钟。放在前面，早失败。
+      # 两个检查只用 Node 内建模块，所以放在 `pnpm install` 之前也行。
+      - name: 核对仓库与 workflow 一致
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node tools/check-artifact-paths.mjs
+          if ($LASTEXITCODE -ne 0) { throw "check-artifact-paths.mjs 失败" }
+          node tools/check_assets_agree.mjs
+          if ($LASTEXITCODE -ne 0) { throw "check_assets_agree.mjs 失败" }
+
+      - name: 装前端依赖
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
 
       - name: 装 Rust（stable + MSVC）
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      # 缓存 cargo。含 ~340MB 资源的 MSI 每次都要重新打包，但增量编译能省下大头
+      # 缓存 cargo。含 ~240MB 资源的 MSI 每次都要重新打包，但增量编译能省下大头
       # （第一次跑会慢，之后就快了）。
       - name: 缓存 cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            app/desktop/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('app/desktop/Cargo.lock') }}
+            src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
 
-      # ⚠️ 必须先装 tauri-cli：build.ps1 走的是 `cargo tauri build`，
-      #    而 GitHub 的 runner 只装 rustc/cargo，**没有 tauri 子命令**。实测报：
-      #      error: no such command: `tauri`
-      #      help: a command with a similar name exists: `miri`
-      #      → 编译失败（退出码 101）
-      #    版本跟本机对齐（本机 `cargo tauri --version` = 2.12.0）。
-      # ⚠️ 可执行文件叫 **`cargo-tauri.exe`，不是 `tauri.exe`**（cargo 子命令的命名规则）。
-      #    本机实测：H:\DevTools\cargo\bin 下只有 cargo-tauri.exe。
-      #    第一次写成 tauri.exe，结果 12 分钟后「装是装成了」却被自己的检查判死：
-      #      Installed package `tauri-cli v2.12.1` (executable `cargo-tauri.exe`)
-      #      → 装完了但 PATH 里没有 tauri
-      # 顺序也很关键：**先 restore 再判断**。反过来的话判断完才 restore，等于每次都不命中。
-      - name: 取缓存（tauri-cli）
-        id: tauri-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cargo/bin/cargo-tauri.exe
-          key: tauri-cli-2.12-cargo-tauri-${{ runner.os }}
+      # 两块产物（tools/ 与 public/vendor/jizura/）与前端都由 `beforeBuildCommand`
+      # （= `pnpm prepare:assets && pnpm build`）在 **cargo build 之前**补齐 —— 那是唯一
+      # 正确的位置：字体要先进 `public/`，Vite 才可能把它拷进 `dist/`，`dist/` 才可能被
+      # `tauri-codegen` 读进去嵌进二进制。这里不再单独 fetch / build 一遍。
+      #
+      # ⚠️ 顺序反了**不报错**，只会打出一个缺字体的包 —— 所以下面冒烟那步还会用
+      #    **exe 体积**兜一道。补齐失败时 `prepare:assets` 退出 1，这一步照样会红。
 
-      - name: 装 tauri-cli
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $cli = Join-Path $env:CARGO_HOME 'bin\cargo-tauri.exe'
-          if (Test-Path $cli) {
-            Write-Host "tauri-cli 命中缓存：$cli"
-          } else {
-            Write-Host "没有缓存，现装 tauri-cli 2.12.*（第一次要 7 分钟左右：cargo install 是源码编译）"
-            cargo install tauri-cli --version '^2.12' --locked
-            if ($LASTEXITCODE -ne 0) { throw "cargo install tauri-cli 失败（退出码 $LASTEXITCODE）" }
-          }
-          # 真验一次，别拿文件名猜。注意是 `cargo tauri`（bin 名是 cargo-tauri）
-          $v = (cargo tauri --version) 2>&1
-          if ($LASTEXITCODE -ne 0) { throw "cargo tauri 调不通：$v" }
-          Write-Host "tauri 就绪：$v"
-
-      # 没命中才存（命中时不必再存一遍，省几十秒）
-      - name: 存缓存（tauri-cli）
-        if: steps.tauri-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cargo/bin/cargo-tauri.exe
-          key: tauri-cli-2.12-cargo-tauri-${{ runner.os }}
-
-      # 解存档 → tools\ 与 app\web\vendor\jizura\，并逐项核对（缺什么这里就说，
-      # 不让它变成「装出来的程序点按钮没反应」）。-Local 让它只用缓存里的 zip，不联网。
-      - name: 补齐工具与字体
-        shell: pwsh
-        run: ./app/desktop/fetch-tools.ps1 -Local 'data/.cache'
-
+      # `pnpm exec tauri` 而不是 `cargo tauri`：CLI 在 devDependencies 里，
+      # 不需要 `cargo install tauri-cli`，也不需要为它单独缓存或预编译。
       - name: 编译并打包
         shell: pwsh
         env:
           # tauri 的详细日志。打包失败时最有用的是它的 Wix 那几行输出。
           TAURI_LOG: ${{ inputs.verbose && 'debug' || '' }}
-        # -Release：release 版（体积小、跑得快），-Bundle 才会打 MSI
-        # -NoCopy：CI 不需要把 exe 复制到仓库根目录（那是给本机启动器用的）
-        run: ./app/desktop/build.ps1 -Release -Bundle -NoCopy
+        run: pnpm exec tauri build
 
-      # MSI 文件名带 beta（用户要的「安装包名称也带 beta」）。
-      #
-      # ⚠️ 只能在**文件名**上做：MSI 的 ProductVersion 字段只接受纯数字 `x.y.z`
-      #    （Windows Installer 的硬规矩），`1.3.1beta` 那种不是合法 semver，
-      #    写进 tauri.conf.json 会让 WiX 直接报错。所以版本号写 `1.3.1`、
-      #    文件名在这里补 `beta` —— 界面上显示的版本号另有其处
-      #    （`config_file.rs` 的 APP_VERSION，它是自由字符串，就是 `1.3.1beta`）。
+      # 安装包文件名里的 `beta` 只能在这里补。
+      # Windows Installer 的 `ProductVersion` 只吃纯数字 `x.y.z`，所以 `Cargo.toml`
+      # 是 `1.3.2`、MSI 天生叫 `v-synth-studio_1.3.2_x64_zh-CN.msi`；而用户要的名字
+      # 与界面显示的版本（`config_file.rs::APP_VERSION`）都带 `beta`。
+      # ⚠️ 改名必须在下面几步**之前**：冒烟要求「恰好一个 MSI」，传 artifact 与传
+      #    Release 都按 `*.msi` 取，改完名这三处都跟着走。
       - name: MSI 文件名加 beta
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $msi = @(Get-ChildItem 'app/desktop/target/release/bundle/msi/*.msi')
-          if ($msi.Count -ne 1) { throw "期望恰好一个 MSI，实际 $($msi.Count) 个" }
-          $old = $msi[0]
-          # 名字形如 V-Synth-Studio_1.3.1_x64_zh-CN.msi → 在版本段后面补 beta
-          $new = $old.Name -replace '^(V-Synth-Studio_[0-9]+\.[0-9]+\.[0-9]+)_', '$1beta_'
-          if ($new -eq $old.Name) { throw "文件名里没找到版本段，改不了名：$($old.Name)" }
-          Rename-Item -LiteralPath $old.FullName -NewName $new
-          Write-Host "$($old.Name)  →  $new"
+          $old = @(Get-ChildItem 'src-tauri/target/release/bundle/msi/*.msi')[0]
+          # 名字形如 v-synth-studio_1.3.2_x64_zh-CN.msi → 在版本段后面补 beta
+          $new = $old.Name -replace '^(v-synth-studio_[0-9]+\.[0-9]+\.[0-9]+)_', '$1beta_'
+          if ($new -eq $old.Name) { throw "MSI 名字没匹配上版本段，改名正则要跟着 productName 改：$($old.Name)" }
+          Rename-Item $old.FullName $new
+          Write-Host "MSI: $new"
 
       # ⚠️ 产物**先**传成 build artifact，再跑冒烟：这样万一冒烟红了，MSI 仍然能在
       #    Actions 页面下载到（少一次「白等 30 分钟什么都没拿到」）。传 Release 仍在冒烟之后。
       - name: 传 MSI（build artifact）
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: v-synth-studio-msi
           # target 目录被 .gitignore 忽略，但 artifact 是文件系统层面的，照传不误
-          path: app/desktop/target/release/bundle/msi/*.msi
+          path: src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error      # 没打出 MSI 却"成功"，比失败更糟
 
       # 让「编出来的东西真的能装、装出来是对的」有个证据，而不是只看编译退出码。
       #
-      # ⚠️ 2026-10-05 改了两轮，两轮的教训都留在这儿：
+      # jizura 的文件在盘上（Vite 要把它拷进 `dist/`），但它**不在** `bundle.resources`
+      # 里 —— `frontendDist = dist/` 由 `tauri-codegen` **嵌进 exe**，所以 MSI 的
+      # File 表里既没有 `index.html`、也没有任何 jizura 文件。别去 File 表里查它们。
       #
-      #  ① 第一版（内嵌 HTTP 服务时代）：`--serve --port=8891` + `/api/health` + 契约用例。
-      #     `--serve` 那天一起删了、契约用例也随 tests/contract 删了、next-smoke.mjs 退役 ——
-      #     它必然抛「服务没能起来（8891 无应答）」，还把后面的「传 MSI」整步跳过。
-      #
-      #  ② 第二版（真窗口 + CDP）：在 GitHub 托管的 Windows runner 上**起不来** ——
-      #     agent 跑在服务会话（session 0），没有交互桌面，WebView2 建不出窗口。
-      #     实测日志：VS_EXE 路径正确，34 秒内 CDP 9349 一直无应答。
-      #     **真窗口验证留在开发机上手动跑**（`node tests\manual\cdp-window-check.mjs 9349`），
-      #     别往 CI 里搬。
-      #
-      #  ③ 现在这版：**读 MSI 自己的 File 表**（WindowsInstaller COM）—— 不需要桌面、
-      #     不安装任何东西、秒级。核对「代码真去找的那几个文件」在不在、总量对不对，
-      #     正是 AGENTS.md 那条「『打包好了』≠『装机装得上』」的自动化：
-      #     `bundle.resources` 少打包是**静默**的，缺了要到用户手里才现形。
-      - name: 冒烟（读 MSI 表：装出来的布局对不对）
+      # 所以判据分两层：
+      #   ① MSI 的 File 表里该有的（`bundle.resources` 那几项 + 程序本体）
+      #   ② 嵌入资源的**证据**：exe 的体积。2335 个 woff2（50MB）与前端产物都压在里面，
+      #      而「忘了建 dist」或「build 早于 fetch」会让它明显变小。这不是精确核对
+      #      （做不到：资源在 exe 内部，MSI 表里看不见），是**拦大错**。
+      #      精确核对在 `build.rs` 里（它在 cargo build 时会逐个查源文件在不在）。
+      - name: 冒烟（读 MSI 表 + exe 体积）
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $msi = @(Get-ChildItem 'app/desktop/target/release/bundle/msi/*.msi')
+          $msi = @(Get-ChildItem 'src-tauri/target/release/bundle/msi/*.msi')
           if ($msi.Count -ne 1) { throw "期望恰好一个 MSI，实际 $($msi.Count) 个" }
           $msi = $msi[0].FullName
           Write-Host ("MSI: {0}   {1:N1} MB（压缩后）" -f $msi, ((Get-Item $msi).Length / 1MB))
 
-          # ⚠️ 两条姿势（项目里踩过）：SQL 的列名要**反引号**；
+          # ⚠️ 两条姿势：SQL 的列名要**反引号**；
           #    InvokeMember 的每个返回值都要 $null = 接住，否则会混进函数输出。
           $installer = New-Object -ComObject WindowsInstaller.Installer
           $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msi, 0))
           $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT `File`, `FileName`, `FileSize` FROM `File`'))
           $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
 
-          $names = New-Object System.Collections.Generic.List[string]
+          # 一遍收完：名字、逐个体积、总体积。别为了拿某一项的体积再查一遍
+          # （同一个视图再跑一次 = 同一份逻辑写两遍，改一处忘一处的那种重复）。
+          $sizes = @{}                       # 长名 → 字节数
           $total = 0
           while ($true) {
             $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
             if (-not $rec) { break }
             $fn = [string]$rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, 2)
-            $total += [int]$rec.GetType().InvokeMember('IntegerData', 'GetProperty', $null, $rec, 3)
+            $sz = [int]$rec.GetType().InvokeMember('IntegerData', 'GetProperty', $null, $rec, 3)
+            $total += $sz
             if ($fn -match '\|') { $fn = ($fn -split '\|')[-1] }   # FileName 是「短名|长名」
-            $names.Add($fn)
+            $sizes[$fn] = $sz
           }
-          Write-Host ("File 表：{0} 个文件，{1:N1} MB（未压缩）" -f $names.Count, ($total / 1MB))
+          Write-Host ("File 表：{0} 个文件，{1:N1} MB（未压缩）" -f $sizes.Count, ($total / 1MB))
 
-          # 这几个就是后端真正去找的文件（resolve_paths / detect_tools / libresvip::cli_path）
-          $need = 'v-synth-studio.exe', 'index.html', 'resources.json', 'pinyin.json',
-                  'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'libresvip-cli.exe'
-          $miss = @($need | Where-Object { -not $names.Contains($_) })
+          # ① `bundle.resources` 真去装的那几个 + 程序本体。
+          #    **不要**加 `index.html` / `ffprobe.exe` —— 前者走 `frontendDist`
+          #    嵌在 exe 里、不在磁盘上，后者不由我们的产物表产出。加了必然误报。
+          $need = 'v-synth-studio.exe', 'resources.json', 'pinyin.json',
+                  'ffmpeg.exe', 'yt-dlp.exe', 'libresvip-cli.exe', 'onnxruntime.dll'
+          $miss = @($need | Where-Object { -not $sizes.ContainsKey($_) })
           if ($miss.Count) { throw "MSI 里少了：$($miss -join '、') —— bundle.resources 少打包是静默的" }
 
-          # 阈值按实测定（留足余量）：tools 1,385 + jizura 2,338 + app\web 14 + 程序本体 + WiX 那几件
-          if ($names.Count -lt 3000) { throw "MSI 里只有 $($names.Count) 个文件，明显少打包了" }
-          if ($total -lt 300MB) { throw "MSI 内容只有 $([math]::Round($total / 1MB, 1)) MB，明显少打包了" }
+          # ② 总量下限。**这几个数要按仓库里的实际内容算**，不能凭印象写。
+          #
+          #    这个数**得按「干净机器上的 tools/」算**，不是本机那个：
+          #        CI 干净机器（fetch 完）：1,378 文件 / 187.5 MB
+          #        本机（多一个 `ffprobe.exe`）：1,395 文件 / 288.1 MB
+          #     在 MSI 里还要加上 resources.json / pinyin.json / 程序本体（≈90 MB）。
+          #     ⇒ File 表 ≈ 1,390 个文件、≈ 280 MB（未压缩）
+          #
+          #    ⚠️ 两个坑：
+          #      · 别把 jizura 的文件数/体量算进来 —— 它走 `frontendDist`（嵌进 exe），
+          #        File 表里看不见它们。
+          #      · 别按本机目录算 —— 本机可能多一个 `ffprobe.exe`（105 MB），
+          #        而它不在产物表里。
+          if ($sizes.Count -lt 1150) { throw "MSI 里只有 $($sizes.Count) 个文件，明显少打包了（期望 ≈1390）" }
+          if ($total -lt 150MB) { throw "MSI 内容只有 $([math]::Round($total / 1MB, 1)) MB，明显少打包了（期望 ≈280MB）" }
+
+          # ③ exe 本身的体积：前端（含 2335 个字体，约 64MB）嵌在里面。
+          #    本机 Linux release 实测 61.8MB；Windows 上（WebView2 + MSVC）会更大。
+          #    40MB 这条拦的是「dist/ 是空的/很旧」—— 那种情况下 exe 只有几十 MB 的一半。
+          if (-not $sizes.ContainsKey('v-synth-studio.exe')) { throw 'MSI 里没有 v-synth-studio.exe' }
+          $exeMb = $sizes['v-synth-studio.exe'] / 1MB
+          Write-Host ("程序本体 {0:N1} MB（前端与 jizura 嵌在里面）" -f $exeMb)
+          if ($exeMb -lt 40) {
+            # ⚠️ 双引号字符串里**不要写反引号**：PowerShell 里反引号是转义符
+            #    （`` `f `` 是换页符），`frontendDist` 这种写法会被吃掉一个字。
+            #    要强调就用「」。
+            throw ("程序本体只有 {0:N1} MB —— 嵌入的前端/jizura 太小了。「dist/」是在 " +
+                   "cargo build 时被 tauri-codegen 嵌进 exe 的，只有它为空或很旧才会这么小。" +
+                   "检查 pnpm exec tauri build 有没有正常跑它的 beforeBuildCommand（pnpm build）。" -f $exeMb)
+          }
           Write-Host '布局与总量都对 ✓'
 
       - name: 传 MSI 到 Release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          files: app/desktop/target/release/bundle/msi/*.msi
+          files: src-tauri/target/release/bundle/msi/*.msi
           generate_release_notes: true

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "v-synth-studio",
+  "identifier": "com.qingmu.vocalworkstation",
+  "build": {
+    "beforeDevCommand": "pnpm prepare:assets dev && pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm prepare:assets && pnpm build",
+    "frontendDist": "../dist",
+    "removeUnusedCommands": true
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "V-Synth-Studio",
+        "visible": false,
+        "width": 1360,
+        "height": 880,
+        "minWidth": 960,
+        "minHeight": 640,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../data/resources.json": "data/resources.json",
+      "../data/pinyin.json": "data/pinyin.json",
+      "../tools": "tools"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "wix": {
+        "language": "zh-CN"
+      }
+    },
+    "shortDescription": "翻调 P 主的本地工作台",
+    "longDescription": "工程格式互转、MV 解析下载、人声分离、资源导航。完全离线运行。工具（ffmpeg / yt-dlp / LibreSVIP）随包分发，不需要联网下载。"
+  }
+}

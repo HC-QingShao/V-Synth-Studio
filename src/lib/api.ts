@@ -1,0 +1,880 @@
+/**
+ * 后端调用 —— **每个方法就是一条 Tauri IPC 命令**。
+ *
+ * 后端命令只走 `call('命令名', args)`（实现见 `lib/ipc.ts`）。75 条命令的唯一登记处
+ * 是 `src-tauri/src/lib.rs` 的 `generate_handler!`。
+ *
+ * ⚠️ **没有 `{ok:true}` 信封。** 成功就是业务对象本身，失败是后端抛出来的一句
+ * 中文（`call()` 会把它变成 `Error`）。**别再读 `res.ok`。**
+ */
+
+import {call, fileUrl, joinPath} from './ipc'
+import type {AppState, Job, ToolInfo} from './types'
+
+export const api = {
+    /* ── 基础 ─────────────────────────────────────────────── */
+    /**
+     * 首屏聚合状态。**取代旧的三条**（状态 + 健康检查 + 工具探测）：
+     * 版本、路径、工具、格式表、配置（Cookie 已打码）全在这一个回包里。
+     *
+     * ⚠️ 它会**探测外部工具**（真的 spawn `yt-dlp --version` / `python --version`），
+     * 不过后端有 60 秒缓存 + 启动预热，正常情况下是毫秒级。界面那边仍有 1.2 秒兜底揭遮罩。
+     */
+    state: () => call<AppState>('get_state'),
+    /** 全量配置（Cookie 已打码）。日常读写走 `lib/config.ts` 的 `getConfig()` / `saveConfig()` */
+    config: () => call<{ config: Record<string, unknown> }>('get_config').then((r) => r.config),
+    /** 配置补丁（局部更新）。回的是**更新后**的完整配置（同样打码） */
+    saveConfig: (patch: Record<string, unknown>) =>
+        call<{ config: Record<string, unknown> }>('set_config', {patch}),
+
+    /* ── 音轨分离（内嵌离线引擎）──────────────────────────── */
+    /**
+     * 状态。页面每 2 秒轮询一次它 —— 服务的生死、模型的多少、下载的进度
+     * 全在这一个回包里（少一个轮询目标就少一处不一致）。
+     */
+    svsepStatus: () => call<SvsepStatus>('svsep_status'),
+    /** 起分离服务。已经起着就原样回（`started: false`）。**没有端口了**，别读 `port`。 */
+    svsepStart: () => call<{ running: boolean; started: boolean; baseUrl?: string | null }>('svsep_start'),
+    svsepStop: () => call<{ running: boolean }>('svsep_stop'),
+    /**
+     * 下模型（压缩包 462 MB，解压后 730 MB）。**立刻返回**，进度靠
+     * `svsepStatus().download` 看 —— 后端那边是在一个后台任务里下的，不占着这个请求。
+     *
+     * ⚠️ 上次是**暂停**收场的话，后端自己会带 `Range` 接着下 —— 前端不用传任何
+     * 「从哪继续」的参数，`.part` 在不在、链接还对不对是后端的事。
+     */
+    svsepDownloadModels: () => call<{ started: boolean }>('svsep_models_download'),
+    /**
+     * 下运行时（Python + torch，压缩包 4.7 GB、解压后 7.4 GB，**只该下一次**）。
+     *
+     * 与 `svsepDownloadModels` 同一套：立刻返回，进度看 `svsepStatus().download`
+     * （`download.kind` 会告诉你是 `'runtime'` 还是 `'models'`，同一时刻只有
+     * 一个下载在跑）。⚠️ 它解到**程序目录** `data/svsep/` —— 安装版装在
+     * `Program Files` 下时那里不可写，后端会以「建目录失败」失败，页面照实显示。
+     */
+    svsepDownloadRuntime: () => call<{ started: boolean }>('svsep_runtime_download'),
+    /**
+     * 运行时现在装在哪、默认会装到哪。
+     *
+     * 安装版（装在 `Program Files`）里程序目录**不可写**，那 7.4 GB 解压必然失败 ——
+     * `rootWritable: false` 就是这个情形，所以装之前必须先问一次落点。
+     */
+    svsepRuntimeDir: () => call<SvsepRuntimeDir>('svsep_runtime_dir'),
+    /** 换运行时落点。**`dir: ""` = 回到自动**（安装版落可写目录、绿色版落程序目录）。 */
+    svsepSetRuntimeDir: (dir: string) => call<SvsepRuntimeDir>('svsep_set_runtime_dir', {dir}),
+    /**
+     * 下显卡加速包（24 MB，A 卡 / Intel 核显用的 DirectML）。
+     *
+     * ⚠️ 它和「运行时 / 模型」**共用同一份下载状态**（`svsepStatus().download`，
+     * `kind` 是 `'dml'`）—— 界面不用为它学第二套进度。
+     */
+    svsepDmlDownload: () => call<{ started: boolean }>('svsep_dml_download'),
+    /**
+     * 开 / 关显卡加速，以及「六轨也用」。
+     *
+     * ⚠️ 有 NVIDIA 显卡时**不要**自动打开：DirectML 那份 ORT 里没有 CUDA，
+     * 给 N 卡机器开它反而更慢。这件事由后端探（`dml.nvidia`），前端不猜。
+     */
+    svsepSetDml: (patch: { mode?: 'auto' | 'on' | 'off'; six?: boolean }) =>
+        call<SvsepDmlState>('svsep_set_dml', {mode: patch.mode, six: patch.six}),
+    /**
+     * 暂停下载：`.part` 留着，下次点下载会带 `Range` 接着下。
+     *
+     * 不是立刻停 —— 后端是在下一块数据到达时才收手，所以按完按钮界面还会走一两秒。
+     * 真正的「停了」由 `svsepStatus().download.active` 变 false 表示。
+     */
+    svsepPauseDownload: () => call<{ pausing: boolean }>('svsep_download_pause'),
+    /**
+     * 停止下载：连 `.part` 一起删掉，下次从头下。
+     *
+     * 和暂停的区别只有这一个 —— 用户看到的是「要不要重新下 4.7 GB」。
+     */
+    svsepStopDownload: () => call<{ stopping: boolean }>('svsep_download_stop'),
+    /**
+     * 一键删掉**所有下下来的依赖**：模型（730 MB）+ 运行时（7.4 GB）+ ffmpeg。
+     *
+     * ⚠️ 界面必须先让用户确认 —— 删完要重新下 4.7 GB 才能再用离线分离。
+     * ⚠️ 这个调用**立刻返回**（几万个文件，后端在后台删），进度看
+     * `svsepStatus().download.delete`；删完 `status` 里的 `runtimeReady` / `models.ok`
+     * 自己就变 false 了。
+     */
+    svsepDeleteDeps: () => call<{ started: boolean }>('svsep_deps_delete'),
+    /**
+     * 提交一次分离。
+     *
+     * ⚠️ **收的是本机路径，不是文件字节。** Python 服务要的本来就是**一个文件**，
+     * 让前端把音频读成 multipart 传上来只是白搬一趟字节。
+     * 所以调用方必须先拿到路径（`pick_paths` 或拖放给的**真路径**）。
+     */
+    svsepSeparate: (engine: 'uvr' | 'roformer', path: string) =>
+        call<{ task: SvsepTask }>('svsep_separate', {path, engine}),
+    svsepTask: (id: string) => call<SvsepTask>('svsep_task', {id}),
+    svsepCancel: (id: string) => call<Record<string, unknown>>('svsep_cancel', {id}),
+    /** 分离后端自己的设备 / 队列 / 输出目录（我们只透传） */
+    svsepBackendStatus: () => call<Record<string, unknown>>('svsep_backend_status'),
+    /**
+     * 推理方式：自动 / GPU / CPU。
+     *
+     * 分离服务在跑就问它（它顺手探硬件、给 badge）；**服务没跑就读盘**上的
+     * `inference_settings.json` —— 任务一结束服务会自动关，可这个开关得一直能用。
+     * 回包键跟上游 `public_settings()` 一致：`{mode, effective_mode, badge, detail, offline?}`。
+     */
+    svsepInference: () => call<Record<string, unknown>>('svsep_inference_get'),
+    svsepSetInference: (mode: 'auto' | 'cpu' | 'gpu') =>
+        call<Record<string, unknown>>('svsep_set_inference', {mode}),
+
+    /* ── 人声转 MIDI（原生 Rust，无子进程）──────────────────── */
+    /**
+     * 状态。页面每 2 秒轮询它 —— 动态库、模型、下载进度全在这一个回包里。
+     *
+     * 和音轨分离那套的区别只有一个：**没有「服务起没起」**。这边不拉子进程、
+     * 不占端口，`running` 装的是「正在跑的那次任务 id」（同时只允许一个）。
+     */
+    midiStatus: () => call<MidiStatus>('midi_status'),
+    /**
+     * 下官方 ONNX 权重包（压缩包 364 MB，解压后 376 MB）。**立刻返回**，
+     * 进度靠 `midiStatus().download` 看。
+     *
+     * ⚠️ 这个包**不支持续传**（后端 `svsep::fetch_to_file` 的注释说明了原因）——
+     * 暂停就是重来一遍，所以界面上给的是「停止」而不是「暂停」。
+     */
+    midiDownloadModels: () => call<{ started: boolean }>('midi_models_download'),
+    /** 停止下载并删掉半个包（不支持续传，所以没有「暂停」这个动作）。 */
+    midiStopDownload: () => call<{ stopping: boolean }>('midi_download_stop'),
+    /**
+     * 删掉下下来的模型与动态库。界面必须先让用户确认 —— 删完要重下 364 MB。
+     *
+     * ⚠️ `note` 是**后端算好的中文说明**，必须显示给用户。它要说的是**安装版**
+     * 才有的那种情况：可写目录在 `%APPDATA%`，而引擎可能正用着随包只读那份，
+     * 删完状态仍是「就绪」、下载按钮不会出现。绿色版两层是同一个路径
+     * （`models.origin === 'local'`），删掉就是真没了，这时 `note` 是空串。
+     * 不把这话说出来，用户看到的就是「点了删除没反应、按钮也没了」。
+     */
+    midiDeleteDeps: () => call<{ files: number; bytes: number; note: string }>('midi_deps_delete'),
+    /**
+     * 提交一次扒谱。传的是**本机音频路径**，不是文件字节 ——
+     * 音频本来就在用户盘上，多传一遍只是把同一份数据从磁盘搬到磁盘。
+     *
+     * 立刻返回 `jobId`，进度走 `job_watch`（`useJob` 已封装）。
+     */
+    midiTranscribe: (body: {
+        input: string
+        outDir?: string
+        /** 去噪步数，1~32。上游默认 8；**耗时几乎与它成正比**。 */
+        steps?: number
+        /** 语言 id：0 通用 / 1 en / 2 ja / 3 yue / 4 zh。 */
+        language?: number
+        /** ONNX 的 intra 线程数，1~32。本机实测 4 最快（见 `engine.rs` 注释）。 */
+        threads?: number
+    }) => call<{ jobId: string }>('midi_transcribe', {args: body}),
+    /** 取消任务。**不是立刻停** —— 去噪循环在下一个 step 边界才收手。 */
+    midiCancel: (id: string) => call<{ canceled: boolean }>('midi_cancel', {id}),
+    /**
+     * 在资源管理器里选中输出目录。
+     *
+     * ⚠️ 结果落在用户任选的目录里（不是固定的 `<数据目录>/outputs/<id>`），
+     * 所以**必须把 `result.dir` 传回来**；`dir` 空串只会打开本功能的数据目录。
+     */
+    midiOpenOutput: (dir: string) => call<{ path: string }>('midi_open_output', {args: {dir}}),
+
+    /* 类型定义在文件末尾，见 `MidiStatus`。 */
+
+    /* ── 外部工具 ─────────────────────────────────────────── */
+    /**
+     * 重新检测外部工具。**它本来就绕过缓存**（这条命令的全部价值就是这个），
+     * 所以没有 `force` 参数 —— 旧签名那个 `force` 保留在形参里只为不改调用点。
+     */
+    detect: (_force = true) =>
+        call<{
+            tools: Record<string, ToolInfo>;
+            editors: unknown[];
+            formats: FormatInfo[];
+            summary: Record<string, unknown>
+        }>(
+            'tools_detect',
+        ),
+    launch: (payload: { path: string; file?: string }) =>
+        call<{ launched: string }>('tools_launch', {path: payload.path, file: payload.file}),
+
+    /* ── 文件系统 ─────────────────────────────────────────── */
+    /**
+     * 弹**系统**对话框，回选中的绝对路径。
+     *
+     * 四条入口合一：`folder` 选目录、`multi` 多选、`save` 另存、默认单选。
+     *
+     * ⚠️ 取消**不是错误**：回的是空数组（`files: []`）。
+     * ⚠️ 选中的东西会**同时被放行给 asset 协议**（选目录是递归放行），所以前端拿到
+     * 路径就能直接 `fileUrl(path)` 播放，不用再问一次权限。
+     *
+     * （返回字段仍叫 `files` 是为了少改调用点；后端回的是 `{paths}`，这里归一了一下。）
+     */
+    fsPick: async (
+        opts: { exts?: string[]; label?: string; title?: string; dir?: string; multi?: boolean; folder?: boolean } = {},
+    ) => {
+        const mode = opts.folder ? 'folder' : opts.multi ? 'open-multi' : 'open'
+        const r = await call<{ paths: string[] }>('pick_paths', {
+            mode,
+            title: opts.title,
+            dir: opts.dir,
+            exts: opts.exts?.length ? opts.exts : undefined,
+            label: opts.label,
+        })
+        return {files: r.paths ?? []}
+    },
+    /** 把**只有 `File` 对象、没有路径**的场合兜底成一条本机路径（落进临时目录）。 */
+    fsUpload: async (file: File) => {
+        const bytes = new Uint8Array(await file.arrayBuffer())
+        return call<{ path: string; name: string; bytes: number }>('upload_dropped', {
+            name: file.name,
+            bytes,
+        })
+    },
+    /** 新建目录 */
+    fsMkdir: (path: string) => call<{ path: string }>('mkdir', {path}),
+    /** 在文件管理器里**选中**它（`select = false` 则是直接打开） */
+    fsReveal: (path: string, select = true) => call<{ path: string }>('open_path', {path, reveal: select}),
+    /**
+     * 打开一个路径或网址。
+     *
+     * ⚠️ 两条路在 IPC 里是**两条命令**（`open_path` / `open_url`）——旧 HTTP 那条
+     * `fs/open` 把两种参数混在一个入口里，结果是「传了 url 却被当成不存在的路径」
+     * 这种必然 400 的 bug 藏了很久。这里按参数分派，行为与旧入口一致。
+     */
+    fsOpen: (payload: { path?: string; url?: string }) =>
+        payload.url
+            ? call<{ ok: boolean; url: string }>('open_url', {url: payload.url})
+            : call<{ path: string }>('open_path', {path: payload.path ?? ''}),
+    /**
+     * 放行一个目录给 **asset 协议**。
+     *
+     * ⚠️ 这条不是可选的：asset 协议的 scope 是**空**的（用户挑的目录在编译期不可能
+     * 知道），所以凡是「播放一个不是用户刚选的文件」（分离产物、扒谱产物）都要先放行
+     * 一次 —— 漏了的症状是 `<audio>` **静默**不播、控制台一条 403。
+     */
+    allowPath: (path: string) => call<{ allowed: string }>('allow_path', {path}),
+
+    /* ── 工程转换 ─────────────────────────────────────────── */
+    /**
+     * 递归收集一个目录里的工程文件（本地路径数组）。
+     *
+     * ⚠️ 后端读的是 **`dirs`（数组）**，不是 `dir` —— 旧界面发的是 `{dir, recursive}`，
+     * Rust 后端整个忽略它、永远回 `files: []`。这里按后端契约发。
+     */
+    collect: (dir: string) =>
+        call<{ files: string[]; count: number; extensions: string[] }>('convert_collect', {
+            args: {dirs: [dir]},
+        }),
+    /**
+     * 读一个工程，给出轨道 / 音符概览。请求体是 `{inputPath}`（或 `{path}`），
+     * 回 `{stats:{trackCount,noteCount}, tracks, tempos, timeSignatures, lyrics}`。
+     */
+    inspect: (payload: { inputPath: string }) => call<ConvertInspect>('convert_inspect', {args: payload}),
+    /**
+     * 转换前预检：`{inputs, toFormat}` → `findings`（info/warn/err）。
+     *
+     * ⚠️ 后端**只分析 `inputs[0]`**，批量要逐个文件调。
+     */
+    preview: (payload: { inputs: string[]; toFormat: string }) =>
+        call<{ findings: Finding[]; inputCount: number }>('convert_preview', {args: payload}),
+    /**
+     * 真转。`{inputs, toFormat, outDir?, nameTemplate?, overwrite?, options?}` → `{jobId}`
+     *
+     * ⚠️ `inputs` 是**本机路径**。旧 HTTP 时代还有一对 `*-upload`（JSON + base64 编码
+     * 的文件内容），那是「页面拿不到本机路径」逼出来的；现在对话框与拖放都给真路径，
+     * **那条路整个删了，别再把它加回来**。
+     */
+    convert: (payload: Record<string, unknown>) => call<{ jobId: string }>('convert_run', {args: payload}),
+
+    /* ── 文字 PV 的分块落盘 ───────────────────────────────── */
+    /**
+     * 写一块二进制到 `<dir>/<name>`（文字 PV 导出 MP4 / PNG 序列 / WAV 用）。
+     *
+     * `part` 从 0 开始，**0 是新建**（同名自动挑一个不重名的），之后是追加；
+     * `total` 是一共几块，只用来算 `done`。
+     *
+     * ⚠️ **为什么是分块**：4K 的 MP4 有几百 MB，一次传完等于把几百 MB 同时按在
+     * WebView 和 Rust 两边的内存里。分块之后峰值内存只有一块的大小。
+     * ⚠️ 单块上限 **16 MB**（`ipc/pv.rs::PV_CHUNK_LIMIT`，IPC 没有 body limit 这个概念了，
+     * 这个上限是后端自己守的），前端按 8 MB 切。
+     */
+    pvSaveChunk: (dir: string, name: string, part: number, total: number, bytes: Uint8Array) =>
+        call<{ path: string; name: string; size: number; part: number; done: boolean }>('pv_save_chunk', {
+            dir,
+            name,
+            part,
+            total,
+            bytes,
+        }),
+
+    /* ── 视频解析下载 ─────────────────────────────────────── */
+    parseVideo: (payload: { url: string; cookie?: string }) => call<VideoParse>('video_parse', {args: payload}),
+    downloadVideo: (payload: Record<string, unknown>) =>
+        call<{ jobId: string }>('video_download', {args: payload}),
+    /**
+     * 把一条远端直链**缓存成本机文件**，回它的路径。
+     *
+     * 这是旧那条本机反代路由的替代品：`<video src>` 要的是一个可寻址的地址，
+     * 而 IPC 是请求-应答、没有流也没有 Range。所以改成先落盘、再 `fileUrl(path)`
+     * 交给 `<video>`（Range 由 asset 协议内置）。
+     *
+     * ⚠️ **首播要等几秒**（一支 1080P 的 MV 几百 MB），界面必须给「缓存中…」的提示；
+     * 同一支看第二次是瞬时的（`cached: true`）。
+     * ⚠️ 只接受**本进程解析结果里出现过的主机** —— 先 `parseVideo` 再预览。
+     */
+    previewFetch: (url: string, src: 'bilibili' | 'ytdlp' = 'bilibili') =>
+        call<{ path: string; bytes: number; cached: boolean }>('preview_fetch', {url, src}),
+    /** 清掉整个预览缓存，回删掉多少字节。 */
+    previewClear: () => call<{ freedBytes: number }>('preview_clear'),
+
+    /* ── B 站扫码登录（Cookie 后端落盘，回包里永远没有 Cookie）── */
+    biliQrGenerate: () => call<{ url: string; qrcodeKey: string }>('bili_qr_generate'),
+    biliQrPoll: (qrcodeKey: string) =>
+        call<{ code: number; message: string; loggedIn: boolean }>('bili_qr_poll', {qrcodeKey}),
+    biliLogout: () => call<{ loggedOut: boolean }>('bili_logout'),
+
+    /* ── 音频 ─────────────────────────────────────────────── */
+    audioProbe: (input: string) => call<AudioProbe>('audio_probe', {input}),
+    audioRun: (payload: Record<string, unknown>) => call<{ jobId: string }>('audio_run', {args: payload}),
+
+    /* ── 资源库 ───────────────────────────────────────────── */
+    resources: (reload = false) => call<Resources>('get_resources', {reload}),
+    /**
+     * 外链校验。⚠️ 后端**还是占位实现**（回 `{results: [], pending: true}`，没有 `jobId`），
+     * 页面认这个形状并提示「后端还没接上链接校验」。
+     * `jobId` 留在类型里是为了「哪天后端接上真实校验时页面不用改」。
+     */
+    checkLinks: () => call<{ results: unknown[]; pending?: boolean; jobId?: string }>('check_resources'),
+
+    /* ── 歌词（网易云专区）───────────────────────────────── */
+    /* 歌词页只有网易云，`source` 只剩 'netease' 一个值。
+       后端仍然**收**这个字段（回包里也带 `source`），所以这里继续传 —— 只是没有第二档可选。 */
+    lyricsSearch: (payload: { source: LyricsSource; keyword: string }) =>
+        call<{ source: LyricsSource; keyword: string; songs: LyricsHit[] }>('lyrics_search', {args: payload}),
+    lyricsGet: (payload: { source: LyricsSource; id: string | number }) =>
+        call<LyricsDoc>('lyrics_get', {args: payload}),
+    /** 后端现在只认网易云的 `?id=` / `/song/<id>` / 纯数字；认不出来会明确报错 */
+    lyricsParseLink: (payload: { url: string }) =>
+        call<{ source: LyricsSource; id: string }>('lyrics_parse_link', {args: payload}),
+    /** 回包是 { source, id, song, lyric, trans, encoding }（与 get 同形，另加 encoding: utf-8 | gbk） */
+    lyricsImport: (payload: { path: string }) =>
+        call<LyricsDoc & { encoding?: string }>('lyrics_import', {args: payload}),
+    lyricsSave: (payload: Record<string, unknown>) =>
+        call<{ path: string; name: string; format: string; size: number }>('lyrics_save', {args: payload}),
+    lyricsCover: (payload: { url: string; outDir: string; name?: string }) =>
+        call<{ path: string; name?: string; size?: number }>('lyrics_cover', {args: payload}),
+    /* 歌曲直链下载的回包是 `{ path, name, size, level, format }`。
+       ⚠️ 拿不到直链时后端**抛一句给用户看的中文**（版权受限 / 只有会员能听），
+       页面直接 `toast(e.message)`，不要再包一层「下载失败」。 */
+    lyricsSong: (payload: { id: string | number; outDir: string; name?: string }) =>
+        call<{ path: string; name: string; size: number; level: string; format: string }>('lyrics_song', {
+            args: payload,
+        }),
+    lyricsSms: (phone: string) => call<{ ok?: boolean }>('lyrics_login_sms', {args: {phone}}),
+    lyricsCellphone: (phone: string, captcha: string) =>
+        call<{ loggedIn: boolean; phone: string; nickname: string }>('lyrics_login_cellphone', {
+            args: {phone, captcha},
+        }),
+    lyricsLogout: (source: LyricsSource) => call<Record<string, unknown>>('lyrics_logout', {args: {source}}),
+
+    /* ── 任务 ─────────────────────────────────────────────── */
+    jobs: () => call<{ jobs: Job[] }>('list_jobs'),
+    job: (id: string) => call<{ job: Job }>('get_job', {id}),
+    cancelJob: (id: string) => call<{ job: Job }>('cancel_job', {id}),
+}
+
+/* ── 一些共用的数据形状（只写页面真会用到的字段）────────────── */
+
+export interface Finding {
+    level: 'info' | 'warn' | 'err'
+    message: string
+}
+
+interface ConvertInspect {
+    /** 概览：轨道数 / 音符数 */
+    stats?: { trackCount?: number; noteCount?: number }
+    tracks?: unknown[]
+    tempos?: unknown[]
+    timeSignatures?: unknown[]
+    lyrics?: unknown
+
+    [k: string]: unknown
+}
+
+/**
+ * `video_parse` 的回包 —— 照后端源码（`ipc/media.rs`、`bili.rs`、`ytdlp.rs`）声明。
+ *
+ *   - `currentPage` 是**对象**（`{cid,page,title,durationSec,width,height}`），不是页码数字；
+ *   - 流对象带 `kind / url / backupUrls / mimeType`；
+ *   - `streams` 还有 `acceptQuality / acceptDescription / videoAvc / videoHevc / durationMs / isPreview`；
+ *   - durl 回退是 `mode:'durl'` + `streams[]`（分段，带 `index/size/lengthMs`），没有 `video`/`audio`；
+ *   - 解析失败时 `streams` 是 `{ error }` —— **这种回包没有 `mode`**，所以 `mode` 是可选的；
+ *   - yt-dlp 来源**没有 `streams`**（是缺字段，不是 `null`），`info` 走 yt-dlp 那套字段；
+ *   - 番剧多一个 `info.episodes`，且**没有 `currentPage`**。
+ */
+export interface VideoParse {
+    source: string
+    kind: 'video' | 'bangumi'
+    info: VideoInfo
+    /** ⚠️ 对象，不是数字 */
+    currentPage?: VideoPage
+    /** ⚠️ yt-dlp 来源没有它；B 站超出可解析范围时是 `{ error: ... }` */
+    streams?: VideoStreams | null
+    hasCookie?: boolean
+}
+
+export interface VideoInfo {
+    kind?: string
+    bvid?: string
+    aid?: number
+    title: string
+    cover?: string
+    desc?: string
+    durationSec?: number
+    publishDate?: string
+    uploader?: string
+    uploaderMid?: number
+    /* 播放量 / 点赞：后端是把 B 站的 stat.view / stat.like 原样拷过来，取不到就补 0 —— 都是 JSON 数字。 */
+    view?: number
+    like?: number
+    pages?: VideoPage[]
+    /** 番剧剧集（`kind === 'bangumi'` 时）；普通视频是 `null` */
+    episodes?: VideoEpisode[]
+    season?: { title?: string; episodes?: VideoEpisode[] } | null
+    /** 番剧：当前这一集的 epId（剧集行靠它高亮） */
+    epId?: number
+    url?: string
+    /* ── 以下是 yt-dlp 来源专有，B 站那份 info 不发这些字段 ── */
+    id?: string
+    thumbnail?: string
+    description?: string
+    uploadDate?: string
+    viewCount?: number
+    extractor?: string
+    webpageUrl?: string
+    /** 字幕**语言键**数组（`ytdlp.rs` 只取 key）；没有字幕时是 `[]` */
+    subtitles?: string[]
+    formats?: VideoFormat[]
+}
+
+export interface VideoPage {
+    cid?: number
+    page?: number
+    title?: string
+    durationSec?: number
+    width?: number
+    height?: number
+}
+
+export interface VideoEpisode {
+    /** 番剧用 epId 定位，不是 cid */
+    epId?: number
+    id?: number
+    bvid?: string
+    title?: string
+    /** 番剧的长标题（`title` 为空时页面拿它兜底） */
+    longTitle?: string
+    durationSec?: number
+    cover?: string
+}
+
+export interface VideoStream {
+    kind?: 'video' | 'audio' | 'segment'
+    id: number
+    qualityName: string
+    url?: string
+    backupUrls?: string[]
+    bandwidth?: number
+    mimeType?: string
+    codecs?: string
+    width?: number
+    height?: number
+    frameRate?: string
+    /* ── 只有 durl 的分段（`kind: 'segment'`）有这三个 ── */
+    index?: number
+    size?: number
+    lengthMs?: number
+}
+
+export interface VideoStreams {
+    /** ⚠️ 出错时后端只发 `{ error }`，没有 `mode` —— 所以是可选的 */
+    mode?: 'dash' | 'durl'
+    acceptQuality?: number[]
+    acceptDescription?: string[]
+    video?: VideoStream[]
+    /** 按编码分好组的三份（同一批流） */
+    videoAvc?: VideoStream[]
+    videoHevc?: VideoStream[]
+    audio?: VideoStream[]
+    /** durl 回退：整段流的各分段（没有 `video`/`audio`） */
+    streams?: VideoStream[]
+    durationMs?: number
+    isPreview?: boolean
+    error?: string
+}
+
+/** yt-dlp 的一条可下载格式（`ytdlp.rs` 归一化后的形状） */
+export interface VideoFormat {
+    formatId?: string
+    ext?: string
+    resolution?: string
+    fps?: number
+    vcodec?: string
+    acodec?: string
+    filesize?: number
+    isVideo?: boolean
+    /**
+     * 直链。**只给预览用**（页面里的 `<video>` 要它），下载一律走后端、不用这个 URL。
+     * ⚠️ 预览也不能直接用它 —— 要先 `api.previewFetch(url, 'ytdlp')` 缓存成本机文件。
+     */
+    url?: string
+}
+
+interface AudioProbe {
+    info: {
+        durationSec: number
+        audio?: { codec?: string; sampleRate?: number; channels?: number; bitRate?: number }
+        video?: { codec?: string; width?: number; height?: number }
+    }
+}
+
+/** 一种工程格式（40 种），`tools_detect` 与 `get_state` 都发 */
+interface FormatInfo {
+    id: string
+    name: string
+    exts: string[]
+    group: string
+    available: boolean
+}
+
+interface Resources {
+    version: number
+    updatedAt: string
+    notice?: string
+    verifySummary?: { checkedAt: string; total: number; ok: number; warn: number; dead: number; passRate: number }
+    groups: {
+        id: string
+        name: string
+        description: string
+        icon: string
+        items: ResourceItem[]
+    }[]
+}
+
+export interface ResourceItem {
+    id: string
+    name: string
+    url: string
+    home: string
+    tags: string[]
+    region: '国内' | '海外' | '均可'
+    cost: string
+    official: boolean
+    desc: string
+    tip?: string
+    verified?: { verdict: 'ok' | 'warn' | 'dead'; status?: number; checkedAt?: string }
+}
+
+/**
+ * 歌曲来源。2026-10-02 起歌词页是**网易云专区**，只剩这一个值 ——
+ * 类型留成联合是为了让「以后再加来源」时改动点集中在这里（`'file'` 只在
+ * 本地 `.lrc` 导入的回包里出现，不参与请求）。
+ */
+type LyricsSource = 'netease'
+
+/** 搜索结果里的一条（字段名以后端为准：`name` / `artists`，不是 `title` / `artist`） */
+interface LyricsHit {
+    /** 网易云歌曲 id（数字串）—— 统一按字符串传回去 */
+    id: string
+    name: string
+    artists?: string
+    album?: string
+    cover?: string
+    durationSec?: number
+    /**
+     * 网易云的收费标记：0 免费、1 VIP、8 低音质免费（还有 4 等）。
+     * ⚠️ **不是「能不能下载」**：实测同为 0 的歌，有的拿得到直链、有的拿不到。
+     * 界面只把它当标签，真正决定能不能下的看下面那个 `playable`。
+     */
+    fee?: number
+    /**
+     * 这个版本能不能拿到直链 —— 后端在搜索后**批量**打一次播放接口标出来的。
+     * 探测失败时后端**不写这个字段**，所以是可选值：`undefined` = 没探测到，
+     * 界面别显示成「不能下」。
+     */
+    playable?: boolean
+}
+
+/** `lyrics_get` / `lyrics_import` 里那个 `song`：与搜索结果同形，但**没有 `id`**（id 在外层） */
+type LyricsSongInfo = Omit<LyricsHit, 'id'>
+
+/**
+ * `lyrics_get` 与 `lyrics_import` 的回包。
+ *
+ * ⚠️ 歌曲信息**嵌在 `song` 里**，`source` / `id` / `lyric` / `trans` 在外层平铺 —— 不是全平铺。
+ */
+interface LyricsDoc {
+    /** netease（取词）/ file（本地导入）—— 2026-10-02 起没有 qq 了 */
+    source: string
+    /** 网易云歌曲 id、或导入时的完整路径 */
+    id: string
+    song?: LyricsSongInfo
+    /** 原文 LRC */
+    lyric?: string
+    /** 译文（可能没有） */
+    trans?: string
+    /** 仅导入本地文件时有：utf-8 / gbk */
+    encoding?: string
+    /**
+     * 「这个版本能不能下」—— **不是后端回的**，是页面从搜索结果那条 `LyricsHit` 上带过来的。
+     * `undefined` = 从链接/导入进来的，没探测过。
+     */
+    playable?: boolean
+}
+
+/* ── 音轨分离（内嵌的离线引擎）─────────────────────────────
+ *
+ * 这一组和别的都不一样：它转发给一个**跑在本机的 Python 子进程**（见 Rust 的 `svsep.rs`）。
+ * 三条不成文的规矩：
+ *
+ *  1. **它不是随叫随到的。** 服务没起时所有命令都会报「分离服务还没启动」，
+ *     页面必须先看 `svsep_status` 的 `running` 再决定给不给按钮。
+ *  2. **第一次用之前没有模型**（730 MB，不随包发）。
+ *  3. **一次任务几分钟到几十分钟**。提交完只拿 `task`，进度靠轮询 `svsepTask`。
+ */
+
+/** 一个模型的落盘状态。⚠️ `size` 与 `expectedSize` 都是**字节**。 */
+export interface SvsepModel {
+    /** `uvr` | `roformer` */
+    key: string
+    name: string
+    label: string
+    /** `missing` | `partial`（下了一半）| `ok` */
+    state: string
+    size: number
+    expectedSize: number
+}
+
+/** `status` 回包里 `models` 那一整块 */
+export interface SvsepModels {
+    dir: string
+    ok: boolean
+    downloadedBytes: number
+    /** ⚠️ 解压后的体积，**不是要下多少** —— 要下的那个看 `zipBytes` */
+    expectedBytes: number
+    /**
+     * 压缩包体积（真正要下的字节）。
+     * ⚠️ 后端目前**只发 `expectedBytes`**；这个字段是照契约留的，补上之后界面上的
+     * 「要下多少」自动变准（`lib/useInstaller.ts` 的 `downloadBytes` 就是这条回退）。
+     */
+    zipBytes?: number
+    downloadUrl: string
+    items: SvsepModel[]
+    missingIndex: string[]
+}
+
+/** 运行时（Python + torch）的状态。**几 GB，只该下一次**。 */
+export interface SvsepRuntime {
+    dir: string
+    /** `python.exe` 与 `backend/app.py` 都在 —— 这才是判据 */
+    ready: boolean
+    downloadUrl: string
+    /** ⚠️ 解压后的体积，**不是要下多少** */
+    expectedBytes: number
+    /** 压缩包体积（见 `SvsepModels.zipBytes` 那条同样的话） */
+    zipBytes?: number
+    python: boolean
+    backend: boolean
+    pythonPath: string
+    backendPath: string
+}
+
+/**
+ * 显卡加速（DirectML，A 卡 / Intel 核显）的现状。
+ *
+ * `installed` = 包装没装；`active` = 那份 ORT 是不是真排在 `site-packages` 前面；
+ * `nvidia` = 这台机器有没有 N 卡（有就该走 CUDA，`auto` 模式下不会开 DML）。
+ */
+export interface SvsepDml {
+    installed: boolean
+    active: boolean
+    nvidia: boolean
+    dir: string
+    /** 压缩包体积（24 MB 上下） */
+    zipBytes: number
+}
+
+/** `svsep_set_dml` 的回包 —— 比状态里那一块多一个「六轨补丁生效没」 */
+export interface SvsepDmlState {
+    mode: 'auto' | 'on' | 'off'
+    six: boolean
+    active: boolean
+    sixActive: boolean
+    installed: boolean
+    nvidia: boolean
+}
+
+/**
+ * 运行时的落点（`svsep_runtime_dir` / `svsep_set_runtime_dir` 的回包）。
+ *
+ * 安装版程序目录只读，那 4.7 GB 下载 + 7.4 GB 解压必须落到别处 —— 所以界面在
+ * **第一次下载之前**要拿这份信息问一次用户（见 `Svsep.tsx`）。
+ */
+export interface SvsepRuntimeDir {
+    /** 这一次运行真正用的落点 */
+    dir: string
+    /** 安装版还是绿色版 */
+    installed: boolean
+    /** 程序目录可写吗。安装版是 `false`，界面据此说「另选一个位置」 */
+    rootWritable: boolean
+    /** 用户没选过时的默认落点 */
+    writableDefault: string
+    /** 运行时已经装好了吗（`python.exe` 与 `backend/app.py` 都在） */
+    hasRuntime: boolean
+    /** 换过落点后老位置可能还留着一份 —— 没换过就是 `null` */
+    legacyDir: string | null
+}
+
+/** 大包 zip 的下载进度（后端内存里的一份，不是磁盘上的） */
+export interface SvsepDownload {
+    active: boolean
+    /** `'dml'` 是显卡加速包（24 MB，走同一份状态） */
+    kind?: 'runtime' | 'models' | 'dml' | null
+    done: number
+    total: number
+    /**
+     * `'download'` = 还在从网上拿字节，`'extract'` = 整包已经下完、正在解压。
+     *
+     * ⚠️ 两个阶段的**进度分母差不多一样大**，所以不分段的界面看着就是「下到 100% →
+     * 归零 → 再爬一遍」。别把这个字段删了。
+     */
+    stage: 'download' | 'extract'
+    error?: string | null
+    resumable: boolean
+    pausedKind: 'runtime' | 'models' | null
+    pausedBytes: number
+    delete: { active: boolean; files: number; bytes: number }
+}
+
+export interface SvsepStatus {
+    runtimeReady: boolean
+    dir: string
+    modelsDir: string
+    dataDir: string
+    /** 分离结果落在 `<outputsDir>/<task_id>/<文件名>` */
+    outputsDir: string
+    runtime: SvsepRuntime
+    models: SvsepModels
+    /** 显卡加速那一块（`installed` / `active` / `nvidia` / `zipBytes`） */
+    dml?: SvsepDml
+    download: SvsepDownload
+    /** 分离服务在不在听 */
+    running: boolean
+    lastError: string | null
+}
+
+/** 分离后端自己的一条输出轨 */
+export interface SvsepOutput {
+    filename: string
+    /** 给人看的文件名（`(Vocals)_xxx.wav`） */
+    download_name?: string
+    /** 上游给的相对地址 —— **前端不用它**，播放/下载都按文件名自己拼本机路径 */
+    download_url?: string
+    preview_url?: string
+    size?: number
+    stem?: string
+}
+
+export interface SvsepTask {
+    id: string
+    engine: 'uvr' | 'roformer'
+    status: string
+    /** ⚠️ 上游是**按时间估的**，不是真进度：会长时间卡在 90% 再跳 100% */
+    progress: number
+    message?: string
+    outputs?: SvsepOutput[]
+    error?: string | null
+}
+
+/**
+ * 一条分离输出轨的地址。
+ *
+ * 落盘位置是 `<outputsDir>/<task_id>/<文件名>`（`svsep.rs::output_path`）——
+ * 任务结束分离服务会自动关，而文件就在盘上，所以服务关着也能试听、也能下载。
+ *
+ * ⚠️ 传进来的 `outputsDir` 得是**放行过给 asset 协议**的那个（`api.allowPath`），
+ * 否则 `<audio>` 会静默 403。
+ */
+export const svsepFileUrl = (outputsDir: string, taskId: string, filename: string) =>
+    fileUrl(joinPath(outputsDir, taskId, filename))
+
+/* ── 人声转 MIDI（GAME 的原生 Rust 移植）─────────────────────
+ *
+ * 这一组和音轨分离**形态上像、底下完全不同**：那边转发给一个 Python 子进程，
+ * 这边直接在工作站进程里算。所以这里没有端口、没有「服务起没起」。
+ */
+
+/** 一个结果音符。`pitch` 是**半音浮点**（69 = A4），`midi` 是它四舍五入后的整数。 */
+export interface MidiNote {
+    onset: number
+    offset: number
+    pitch: number
+    midi: number
+}
+
+export interface MidiRuntime {
+    ready: boolean
+    dll: string | null
+}
+
+export interface MidiModels {
+    ready: boolean
+    missing: string[]
+    dir: string
+    /**
+     * 引擎此刻用的模型**在哪个目录**：
+     * - `'downloaded'` —— `<可写>/game/models`
+     * - `'bundled'` —— `<root>/data/game/models`，且它**不是**下载落点（只可能出现在安装版）
+     * - `'local'` —— 绿色版：两层是**同一个绝对路径**
+     *
+     * ⛔ 别在前端按 `dir` 的尾巴猜：三种情况的路径都以 `\game\models` 结尾。
+     */
+    origin: 'downloaded' | 'bundled' | 'local'
+    zipBytes: number
+    extractBytes: number
+    partBytes: number
+}
+
+export interface MidiDownload {
+    active: boolean
+    kind: string | null
+    stage: string
+    done: number
+    total: number
+    error: string | null
+    /** 恒为 false —— 这个包不支持续传（停下就是重来），前端据此不画「继续」 */
+    resumable: boolean
+}
+
+export interface MidiStatus {
+    runtime: MidiRuntime
+    models: MidiModels
+    license: string
+    source: string
+    download: MidiDownload
+    /** 正在跑的那次任务 id；null = 空闲（同时只允许一个） */
+    running: string | null
+}
+
+/**
+ * 语言 id。**照官方 `config.json` 的 `languages` 映射**，不是自己编的
+ * （实测 `{'en':1,'ja':2,'yue':3,'zh':4}`，0 = 通用）。
+ */
+export const MIDI_LANGUAGES = [
+    {id: 0, label: '通用（不告诉它语言）'},
+    {id: 4, label: '中文'},
+    {id: 1, label: '英语'},
+    {id: 2, label: '日语'},
+    {id: 3, label: '粤语'},
+] as const
+
+export default api

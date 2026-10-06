@@ -1,0 +1,1323 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   外壳样式。
+
+   ## 玻璃在哪儿？
+   **这个文件里没有一行玻璃。** 模糊、折射、发丝边、色差全部来自
+   `@ttqtt/liquid-glass-react`（`main.tsx` 里先 import 它自己的 `style.css`）。
+   这里只做三件事：
+
+     1. 把顶栏 / 侧栏 / 内容区摆成窗口布局
+     2. **内容层的卡片**（实色）—— `.panel` 一组
+     3. 几个排版辅助类
+
+   ## 颜色从哪来
+   全部用库的令牌，**没有任何写死的颜色**（这一点很重要，写死 = 亮色下瞎掉）：
+
+     文字   --lg-label / --lg-label-secondary / --lg-label-tertiary
+     底色   --lg-bg / --lg-bg-grouped / --lg-bg-secondary
+     填充   --lg-fill-quaternary
+     分隔线 --lg-separator
+     强调   --lg-accent（图形）/ --lg-accent-fill（白字压在上面的底色）
+     间距   --lg-space-1…10    圆角 --lg-radius-xs…xxl    可读宽度 --lg-readable
+
+   库的 token **全部挂在 `[data-lg-theme="light|dark"]` 下**（`:root` 上没有裸定义），
+   而写那个属性的是 `GlassProvider`。所以主题只有一个来源，别自己去写。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+    --shell-max: 1360px;
+    --sidebar-w: 228px;
+
+    /* 背景图。⚠️ 必须用**绝对路径** —— 界面就在根路径，但仍然不能用相对路径：
+       相对路径 `img/bg/light.jpg` 跟着「当前文档所在目录」走，前缀一改就会
+       静默解析成 `/<前缀>/img/...` → 404（实测过）。
+       图在 `public/img/bg/`，由 Vite 原样拷进 `dist/`。 */
+    --bg-image-dark: url('/img/bg/dark.jpg');
+    --bg-image-light: url('/img/bg/light.jpg');
+}
+
+/* 主题相关的背景参数。库的 `GlassProvider` 会把解析后的主题写到
+   `<html data-lg-theme="light|dark">`（它自己的 token 也用这个属性分组），
+   所以这里跟着它走，不用再记一份。 */
+[data-lg-theme='dark'] {
+    --bg-image: var(--bg-image-dark);
+    /**
+     * ⚠️ **背景自身的模糊必须很小 —— 它直接决定玻璃还看不看得出来。**
+     *
+     * 14px（亮色 12px）时整页先被自己糊成一团奶白，玻璃压上去再糊一次，
+     * **等于没糊** —— 唯一还能看出差别的只剩 40px 模糊的侧栏。
+     *
+     * 图一旦有细节，玻璃边缘立刻把背后的东西糊开了，材质成立。
+     * 玻璃的观感来自「背后有东西被它糊掉」，不是来自玻璃自己。
+     *
+     * 「通透」仍然靠低不透明度 + 低模糊，但**背景这一层要留住细节**。
+     */
+    --bg-blur: 4px;
+    --bg-dim: 100%;
+    --bg-contrast: 118%; /* 暗色图本身有对比（黑底 + 白锐利细节 + 青绿色块），再拉一点更锐 */
+    --bg-veil: rgba(9, 11, 16, 0.3);
+}
+
+[data-lg-theme='light'] {
+    --bg-image: var(--bg-image-light);
+    /* ⚠️ 亮色图和暗色图的取参**方向相反**，别照抄。
+
+       这张是故障艺术（glitch art）：有文字、条码、彩色色散的细节，但**整体极浅**
+       （像素挤在 #e0–#f5）。
+
+       所以取的是**压暗 + 撤遮罩**：模糊把噪点揉开、压到 86% 让白底落回中调、遮罩全撤。
+       模糊降到 3px / 对比拉到 145% / 不压暗会让原始亮噪点全暴露出来，高频白斑扎眼，
+       而有效信息（43 / 94 / 条码）反而被淹没。
+       三者都别过量 —— 任一过量都会让图彻底消失。 */
+    --bg-blur: 5px;
+    --bg-dim: 86%;
+    --bg-contrast: 112%;
+    --bg-veil: transparent;
+}
+
+/**
+ * 亮色 + 玻璃档 ≥3 时，**分段控件里选中的那一项文字看不见**（白字压白胶囊）。
+ *
+ * 成因在库里，两处叠起来的：
+ *   · `components.css:68` —— `.lg-root[data-material="clear"] { --lg-fg: #fff }`
+ *     （档 ≥3 的材质就是 clear，见 `lib/useGlass.ts` 的 `levelMaterial()`），
+ *     而 `.lg-segment:has(input:checked) { color: var(--lg-fg) }`（:206）；
+ *   · `tokens.css:461` —— 亮色的选中胶囊底色 `--lg-lens-bg: rgb(255 255 255)`，
+ *     **不透明纯白**（库故意如此：亮色下白轨道上的半透明白胶囊会看不见）。
+ * 于是选中项 = 白字 + 白底。档 1 不中招（它走 `data-transparency="opaque"`，
+ * 库自己有 `--lg-fg: rgb(0 0 0)` 兜底，:102），暗色也不中招（`--lg-label` 本来就是白的）。
+ *
+ * 库那个 `#fff` 是「clear 玻璃浮在暗色素材上」的假设；我们亮色主题里玻璃背后是亮背景，
+ * 所以把前景色给回 `--lg-label`（亮色 = 黑），与库对 opaque 材质那条兜底规则同义。
+ * 作用域只到 clear 材质的玻璃根；带 variant 的组件（按钮等）有自己的 color 声明，不受影响。
+ */
+[data-lg-theme='light'] .lg-root[data-material='clear'] {
+    --lg-fg: var(--lg-label);
+}
+
+html,
+body,
+#root {
+    min-height: 100%;
+}
+
+body {
+    margin: 0;
+    background: var(--lg-bg-grouped);
+    color: var(--lg-label);
+    font-family: var(--lg-font-text);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100dvh;
+}
+
+/**
+ * 背景层：图 + 遮罩。
+ *
+ * ⚠️ **图不是装饰，玻璃靠它才成立。** 库的设计文档第 5 节：
+ *
+ * > 材质由三样东西定义：折射、一条发丝边、干净的内部。
+ * > …这些会把材质变成 2008 年的光泽塑料按钮，而且**在纯色背景上最难看 ——
+ * > 那里根本没有东西可折射**。
+ *
+ * 纯渐变这一层会让两种材质在这个页面上几乎看不出区别 ——
+ * 模糊一片灰和折射一片灰是一样的。
+ *
+ * 几条硬性注意（都会导致「图压根不显示」）：
+ *   - **不要**用 `html::before` / `html::after` 做背景层。Chromium 对
+ *     `backdrop-filter` 采样 `position: fixed` 的伪元素有怪癖，会渲染到内容之上。
+ *     用 `body` 的伪元素。
+ *   - **溢出量要跟着模糊走**：`inset` 是给 `blur()` 留的采样空间，不留就会在四周
+ *     露一圈底色。但它**同时会放大图**（层比视口大，`cover` 就得再放大一档去填满）。
+ *     写死 `-10%` 等于把图额外放大 20% 再裁 —— 模糊 12px 时看不出来，
+ *     模糊降到 3~5px 之后用户一眼就看出「比例被裁切不成样子」。
+ *     现在按 `-2 × blur` 算，够采样、几乎不放大。
+ *   - `filter` 写在这一层上，**不能**写在整个 `body` 上（那会把正文一起模糊）。
+ *   - 遮罩用 `linear-gradient` 叠在 `background-image` **里面**，不要用
+ *     `color-mix()` 塞进渐变 —— 那不是合法语法，会**静默丢掉整条声明**，背景直接没。
+ */
+body::before {
+    content: '';
+    position: fixed;
+    inset: calc(var(--bg-blur) * -2);
+    z-index: -1;
+    pointer-events: none;
+    background-color: var(--lg-bg-grouped); /* 图没加载出来时也不至于崩成纯色 */
+    background-image: linear-gradient(var(--bg-veil), var(--bg-veil)), var(--bg-image);
+    background-size: cover;
+    background-position: center;
+    filter: blur(var(--bg-blur)) brightness(var(--bg-dim)) contrast(var(--bg-contrast));
+}
+
+/* ── 整体布局 ────────────────────────────────────────────────── */
+.app {
+    /* 顶栏是绝对定位（见下），靠这里做定位上下文 */
+    position: relative;
+    max-width: var(--shell-max);
+    margin-inline: auto;
+    padding: var(--lg-space-4) var(--lg-margin) var(--lg-space-8);
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-4);
+}
+
+/* ── 入场：窗口显示时的交接 ────────────────────────────────────
+   窗口在 `main.tsx` 的 `ensureConfig()` 落定后才 `show()`（`tauri.conf.json` 的
+   `visible: false`）。`main.tsx` 在 show 前打上 `html[data-enter='out']`，侧栏与
+   内容区各自往上浮 10px、淡入 —— 否则界面在窗口出现前就画好了，看着就是「啪」地出现。
+
+   ⚠️ **只给这两个元素加 transform，别给 `.app`**：`.app` 里有两个 `position: fixed`
+   的直接子元素（`.app-top-edge`、`.toasts`），父级一有 transform 它们就不再贴着视口。
+   这两个元素里面没有 fixed 后代，安全。动画结尾是 `transform: none`，不会留下包含块。 */
+html[data-enter='out'] .app-sidebar,
+html[data-enter='out'] .app-main {
+    animation: app-enter 720ms var(--lg-ease-out) both;
+}
+
+@keyframes app-enter {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html[data-enter='out'] .app-sidebar,
+    html[data-enter='out'] .app-main {
+        animation: none;
+    }
+}
+
+/* ── 顶栏：**本身没有底**，玻璃在里面的控件上 ──────────────────
+   库的 `GlassToolbar` 注释：「工具栏本身不携带背景 —— 它是一行**分组**，玻璃是每一组」。
+   给顶栏自己加整块玻璃就会「玻璃叠玻璃」；手写平控件则用户看到的是「除了侧栏都没材质」。 */
+.app-topbar {
+    flex: none;
+    /**
+     * 吸顶：内容从它下面滚过去 —— 玻璃的观感来自「有东西从背后经过」。
+     * 平栏吸顶本身不需要模糊，但里面的玻璃控件（分段控件 / 按钮）需要。
+     *
+     * ⚠️ **必须是 `sticky`，不能是 `absolute` / `fixed`。**
+     * `absolute` 的包含块是 `.app`（`position: relative`）的内边距盒，而 `.app` 是
+     * `min-height: 100dvh` 的普通流内元素 —— 页面一滚，`.app` 整体滚走，顶栏跟着滚走，
+     * 根本不吸顶。`fixed` 的包含块是视口，`left` 就只在窗口刚好等于 `--shell-max`
+     * 时才对得齐，宽屏下品牌会比侧栏偏左一大截；要对齐就得把 `--shell-max` 再抄一份进
+     * `calc()`，两个值以后必然走岔。`sticky` 留在流内，左右由 `.app` 的内边距自然管住
+     * （`.app-sidebar` 同款做法）。
+     *
+     * ⚠️ **`inset-block-start` 必须等于静止时的 y（16px），滚动时才零位移。**
+     * 直觉上「sticky 的 `top` 相对滚动容器上沿算，所以 `top: 0` 停在视口顶 + 内边距」；
+     * 实际粘性包含块上沿就在 y=0，`top` 写多少、吸顶后 `getBoundingClientRect().y`
+     * 就是多少：
+     *
+     *   | `top`   | 静止 y | 滚到 400 后 y | Δ                     |
+     *   |---------|--------|---------------|-----------------------|
+     *   | `0`     | 16     | 0             | −16 ❌                 |
+     *   | `8px`   | 16     | 8             | −8  ❌                 |
+     *   | **16px**| 16     | **16**        | **0 ✅**               |
+     *   | `−16px` | 16     | −16           | −32 ❌（品牌被顶上去） |
+     *
+     * 别用负值「补偿」，直接写 16。改这个值之前先跑 `node tests\manual\topbar-probe.mjs 8891`。
+     *
+     * ⚠️ **侧栏 `.app-sidebar` 的 `top` 必须与此值一致**：sticky 的 `top` 等于初始位置
+     * 才不跳。改这里就同步改侧栏。
+     *
+     * ⚠️ 顶栏**真的占位**（26px + 一个 `--lg-space-4` 间距），所以内容整体比顶栏不占位时
+     * 低 42px（16 → 58）；不要再靠侧栏的 `margin-block-start` 手工让位。
+     */
+    position: sticky;
+    inset-block-start: var(--lg-space-4);
+    /**
+     * 水平方向走 `.app` 的内边距，**这条 `inset-inline` 仍然要留着**：
+     * `absolute` 时代包含块是内边距盒，`inset-inline: 0` 贴的是内边距外沿，
+     * 品牌会比其它所有东西偏左一个 `--lg-margin`（实测 12.5 vs 32.5）。
+     * sticky 下包含块是同一个 `.app`，这条约束不变。
+     */
+    inset-inline: var(--lg-margin);
+    z-index: 10;
+}
+
+/**
+ * 内容从平栏下面经过时的「溶解边」—— 库的 `ScrollEdge`。
+ *
+ * 它默认是 `position: absolute`；库自己对「页面滚动」的做法是改成 fixed
+ * （`Screen[data-scroll="page"] > .lg-screen-edge`），这里照做。
+ * 层级压在顶栏**下面**一层：顶栏里的玻璃控件要盖在它上面。
+ */
+.app-top-edge {
+    position: fixed;
+    inset-inline: 0;
+    inset-block-start: 0;
+    z-index: 9;
+}
+
+.app-topbar-inner {
+    display: flex;
+    align-items: center;
+    gap: var(--lg-space-3);
+    /* 高度归品牌自己（26px 图标）。别给它更大的固定高度 —— 空出来的部分只会压着内容。 */
+    min-height: 26px;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: var(--lg-space-2);
+    min-width: 0;
+    /**
+     * ⚠️ 品牌要与侧栏玻璃面板的**内容列**对齐，而不是与面板外沿对齐 ——
+     * 侧栏里的内容是从内边距之后才开始的，只对齐外沿会让图标看着比下面
+     * 所有东西都靠左。
+     *
+     * 这里补的正是侧栏那份内边距（同一个 `--lg-space-3` = 12px），补完品牌与
+     * `.app-sidebar-inner` 的内容列对齐（124.5 = 112.5 + 12，与「工作台」那类分组标题同一条竖线）。
+     *
+     * ⚠️ **只加在 `.brand` 上，别加在 `.app-topbar` 上** —— 顶栏自己的左边缘必须继续与
+     * 侧栏玻璃外沿逐像素对齐。
+     */
+    padding-inline-start: var(--lg-space-3);
+}
+
+/* 顶栏应用图标。图在 `public/img/logo.png`，由 Vite 原样拷进 `dist/`。 */
+.brand-mark {
+    width: 26px;
+    height: 26px;
+    flex: none;
+    border-radius: var(--lg-radius-xs);
+    object-fit: contain;
+}
+
+.brand-name {
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    white-space: nowrap;
+}
+
+
+/* ── 主体：侧栏 + 内容 ───────────────────────────────────────── */
+.app-body {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--lg-space-4);
+    flex: 1;
+    min-height: 0;
+}
+
+/* ── 侧栏（玻璃）──────────────────────────────────────────────── */
+.app-sidebar {
+    position: sticky;
+    width: var(--sidebar-w);
+    flex: none;
+    /**
+     * ⚠️ **`top` 必须等于初始位置**：写小于初始值，页面一滚侧栏先自己往上跳一截再吸附
+     * （看到的是「侧栏跟着滚轮走」）。
+     *
+     * 初始位置 = `.app` 上内边距 16 + 顶栏 26 + 一个间距 16 = **58**。
+     */
+    top: calc(var(--lg-space-4) * 2 + 26px);
+    /* 吸附后底边还要留一个 --lg-space-4，别顶到视口外 */
+    max-height: calc(100dvh - var(--lg-space-4) * 2 - 26px);
+}
+
+.app-sidebar-inner {
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-1);
+    padding: var(--lg-space-3);
+    height: 100%;
+    max-height: calc(100dvh - 128px);
+    overflow-y: auto;
+}
+
+.nav-group {
+    padding: var(--lg-space-3) var(--lg-space-3) var(--lg-space-1);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--lg-label-secondary);
+}
+
+/**
+ * 导航：**外面只有面板那一层框**（玻璃面自己），行一律透明。
+ *
+ * 选中态不是给那一行加底色，而是让一块高亮**滑过去** —— 位置由 `App.tsx` 的
+ * `useNavLens()` 实测后写进 `--lg-slot-x/y`，块本身是库的 `.lg-selection-lens`。
+ * 所以这里的行只需要三件事：不画自己的框、**绝对定位的块不会盖住它**、形状和块一致。
+ */
+.app-nav {
+    /* 高亮块是绝对定位的，量位置（offsetTop）要有这个作基准 */
+    position: relative;
+}
+
+.nav-lens {
+    /* 与行同心同形：面板 26px 圆角 − 12px 内边距 = 14px */
+    border-radius: 14px;
+    /**
+     * 选中块**是玻璃**，不是贴上去的白纸。
+     *
+     * 库的 `.lg-selection-lens` 外观来自 `--lg-lens-bg`，而那个 token **只按主题分档、
+     * 不按材质**：亮色是 `rgb(255 255 255)`（库的注释：白轨道上放半透明白胶囊会看不见，
+     * 所以故意做成不透明）、暗色才是 20% 白。放在**玻璃侧栏**上时，亮色下就是一块
+     * 白贴纸 —— 用户报的「选择框不能正确应用液态玻璃」就是这个。
+     *
+     * 改法：底改半透明，并**消费面板自己的 `--lg-backdrop`** —— 液态档下那个值里带
+     * 位移贴图（`url(#lg-…)`），于是选中块和面板一起折射，才真的是同一块玻璃。
+     * ⚠️ **fallback 必须给**：档 1（不透明）没有 `--lg-backdrop`，而未定义的 `var()`
+     * 会让整条声明失效。
+     */
+    --lg-lens-bg: rgb(255 255 255 / 0.22);
+    --lg-lens-border: rgb(255 255 255 / 0.5);
+    -webkit-backdrop-filter: var(--lg-backdrop, blur(10px) saturate(1.5));
+    backdrop-filter: var(--lg-backdrop, blur(10px) saturate(1.5));
+}
+
+/* 滑动时挤压。只改喂进 transform 的那个变量 —— 另起一条 animation 会整个接管 transform，
+   过渡就完全不生效了（表现是「瞬移」）。 */
+.app-nav[data-moving='true'] .lg-selection-lens {
+    --lg-lens-swell-x: 1.02;
+    --lg-lens-swell-y: 0.86;
+}
+
+.nav-row {
+    position: relative; /* z-index 只对定位元素生效，漏了这行就会被高亮块盖住 */
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--lg-space-2);
+    width: 100%;
+    min-height: 38px;
+    padding-inline: var(--lg-space-3);
+    border: 0;
+    border-radius: 14px; /* 同上，与高亮块同心 */
+    background: transparent;
+    color: var(--lg-label);
+    font: inherit;
+    font-size: 14.5px;
+    text-align: start;
+    cursor: pointer;
+}
+
+.nav-row:hover {
+    background: var(--lg-fill-quaternary);
+}
+
+/* 选中态：颜色来自库的 `--lg-glass-fg`（浅色近黑 / 深色近白）—— 它就是配在那块
+   高亮上的文字色。底色交给高亮块，这里一行都不画。 */
+.nav-row[aria-current='page'] {
+    color: var(--lg-glass-fg);
+    font-weight: var(--lg-weight-semibold);
+}
+
+.nav-row[aria-current='page'] svg {
+    color: var(--lg-glass-fg);
+}
+
+/* 指向当前行时不能把选中态洗掉 */
+.nav-row[aria-current='page']:hover {
+    background: transparent;
+}
+
+.nav-row-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.nav-row[aria-current='page'] .nav-row-label {
+    color: inherit;
+}
+
+/* 内容层自己撑满玻璃面。这一步必须在**内容层**上做，不能写在外层 ——
+   外层的盒高由内容决定，写 height:100% 反而是循环依赖。 */
+.glass-fill {
+    height: 100%;
+}
+
+.sidebar-foot {
+    margin-block-start: auto;
+    padding-block-start: var(--lg-space-3);
+}
+
+/* ── 内容区：**不是玻璃**。实色卡片，字才读得清 ──────────────── */
+.app-main {
+    flex: 1;
+    min-width: 0;
+    outline: none;
+}
+
+.page-head {
+    padding-block: 0 var(--lg-space-4);
+}
+
+.page-title {
+    margin: 0;
+    font-size: 28px;
+    line-height: 34px;
+    font-weight: 700;
+    letter-spacing: -0.014em;
+}
+
+.page-sub {
+    margin: var(--lg-space-1) 0 0;
+    font-size: 15px;
+    color: var(--lg-label-secondary);
+}
+
+.page-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-4);
+}
+
+/* ── 卡片：**现在是玻璃面**（`GlassSurface`，用户要求「全局玻璃」）──
+   ⚠️ 这里**不要**写 `background`、也**不要**写描边 —— 玻璃自己有一条发丝边
+   （`.lg-rim`）。再叠一条 `--lg-separator` 边框就是两条边，看着发脏。
+   我只补库没给的部分：内边距、头部排布。 */
+.panel {
+    /* 有意留空：材质全在库那一层 */
+}
+
+.panel-padded {
+    padding: var(--lg-space-5);
+}
+
+/* ── 面板体内的行距 ──────────────────────────────────────────────
+   `.field` / `.btn-row` / `.drop-hint` 这三种块**自己都没有外边距**，平级相邻时
+   首尾严丝合缝 —— 人声转 MIDI 与音轨分离页看起来就像「控件堆在一起」。
+   这里只给它们补「上面那 16px」：
+     · `.hint`（自带 `margin-block-start`）与 `.panel-head`（自带 `margin-block-end`）
+       不动 —— 相邻外边距会合并，不会叠成两倍；
+     · 列表类面板里的行不在这个名单里，一行行的紧排不受影响；
+     · `.panel > div` 同时命中两个分支：非玻璃档是 `.panel` 里那层无类名的 div，
+       玻璃档是那层 `.panel-padded`（见 components/Panel.tsx:89）。 */
+.panel > div > * + :is(.field, .btn-row, .drop-hint) {
+    margin-block-start: var(--lg-space-4);
+}
+
+.panel-head {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--lg-space-4);
+    margin-block-end: var(--lg-space-4);
+}
+
+.panel-head-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.panel-title {
+    margin: 0;
+    font-size: 19px;
+    line-height: 24px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+.panel-desc {
+    margin: var(--lg-space-2) 0 0;
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--lg-label-secondary);
+    max-width: var(--lg-readable);
+}
+
+.panel-head-extra {
+    flex: none;
+}
+
+/* ── 排版辅助 ───────────────────────────────────────────────── */
+.stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-3);
+}
+
+.stack-lg {
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-5);
+}
+
+.muted {
+    margin: 0;
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--lg-label-secondary);
+    max-width: var(--lg-readable);
+}
+
+.hint {
+    margin: var(--lg-space-3) 0 0;
+    font-size: 13px;
+    line-height: 18px;
+    color: var(--lg-label-secondary);
+}
+
+.group-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--lg-label-secondary);
+}
+
+.empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--lg-space-4);
+    padding: var(--lg-space-8) var(--lg-space-4);
+    text-align: center;
+}
+
+/* ── 统计 ───────────────────────────────────────────────────── */
+.stats-row {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--lg-space-8);
+    flex-wrap: wrap;
+}
+
+.stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.stat-label {
+    font-size: 12px;
+    color: var(--lg-label-secondary);
+}
+
+.stat-value {
+    font-size: 26px;
+    line-height: 32px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.stat-sub {
+    font-size: 12px;
+    color: var(--lg-label-secondary);
+}
+
+.stats-action {
+    margin-inline-start: auto;
+}
+
+/* ── 许可与出处（`components/Credit.tsx`）──────────────────────────────
+   和上面 `.stats-row` 同形的一排统计格 + 一段说明。单列一个类是因为它要在多处
+   复用（音轨分离 / 音频 / 视频 / 转换 / 歌词 / 文字 PV），而 `.stats-row` 的
+   `align-items: flex-end` 是给「右边挂一个动作」准备的，这里不需要。 */
+.credit-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--lg-space-4) var(--lg-space-5);
+    margin-bottom: var(--lg-space-3);
+}
+
+
+/* 说明里的上游链接：浏览器默认的蓝紫压在暗色玻璃上太跳，跟着强调色走
+   （资源库的收录条目也是这个做法）。人声转 MIDI 那份老文案里的链接一并受益。 */
+.hint a {
+    color: var(--lg-accent);
+    text-decoration: none;
+}
+
+.hint a:hover {
+    text-decoration: underline;
+}
+
+/* ── 上游链接（`components/Credit.tsx` 的 `Upstream`）──────────────────
+   **是 `<button>` 不是 `<a>`**：窗口加载的是 `http://127.0.0.1:17878`，
+   真链接会把整个页面换成上游网站（WebView 里没有后退键可回）。所以它在
+   正文里当链接用、行为却是「交给系统默认浏览器打开」，样式得自己写成链接的样子。
+   段落里的字要跟着正文走（`font: inherit` + `color`），不然按钮的默认字体
+   会在说明文字中间显出来。 */
+.upstream {
+    margin: 0 2px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--lg-accent);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: none;
+    text-underline-offset: 2px;
+}
+
+.upstream:hover {
+    text-decoration: underline;
+}
+
+
+/* ── 快捷入口：实色可点卡片 ─────────────────────────────────── */
+.quick-grid {
+    display: grid;
+    gap: var(--lg-space-3);
+    grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+}
+
+.quick {
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-2);
+    padding: var(--lg-space-4);
+    min-height: 84px;
+    text-align: start;
+    font: inherit;
+    color: inherit;
+    background: var(--lg-fill-quaternary);
+    border: 1px solid var(--lg-separator);
+    border-radius: var(--lg-radius-m);
+    cursor: pointer;
+    transition: transform 220ms cubic-bezier(0.2, 0.9, 0.25, 1),
+    background 140ms ease-out;
+}
+
+.quick:hover {
+    background: var(--lg-fill-quaternary);
+    transform: translateY(-2px);
+}
+
+.quick:active {
+    transform: translateY(0);
+}
+
+.quick-title {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.quick-desc {
+    font-size: 13px;
+    line-height: 19px;
+    color: var(--lg-label-secondary);
+}
+
+/* ── 工具行 ─────────────────────────────────────────────────── */
+.tool-list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--lg-separator);
+    border-radius: var(--lg-radius-m);
+    overflow: hidden;
+}
+
+.tool-row {
+    display: flex;
+    align-items: center;
+    gap: var(--lg-space-3);
+    padding: var(--lg-space-3) var(--lg-space-4);
+    min-height: 56px;
+}
+
+.tool-row + .tool-row {
+    border-block-start: 1px solid var(--lg-separator);
+}
+
+.tool-row-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.tool-name {
+    font-size: 14.5px;
+    font-weight: 500;
+}
+
+.tool-desc {
+    font-size: 12.5px;
+    color: var(--lg-label-secondary);
+}
+
+.tool-version {
+    font-family: var(--lg-font-mono);
+    font-size: 12px;
+    color: var(--lg-label-secondary);
+    white-space: nowrap;
+}
+
+.tool-version[data-ok='true'] {
+    color: var(--lg-label);
+}
+
+/* ── 标签 ───────────────────────────────────────────────────── */
+.chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px var(--lg-space-2);
+    border-radius: var(--lg-radius-xs);
+    border: 1px solid var(--lg-separator);
+    font-size: 12px;
+    color: var(--lg-label-secondary);
+    white-space: nowrap;
+}
+
+.chip[data-tone='ok'] {
+    color: var(--lg-label);
+    border-color: color-mix(in srgb, var(--lg-accent) 35%, transparent);
+}
+
+.chip[data-tone='accent'] {
+    color: var(--lg-accent-contrast);
+    background: var(--lg-accent-fill);
+    border-color: transparent;
+}
+
+.chip-ext {
+    font-family: var(--lg-font-mono);
+    font-size: 10.5px;
+    color: var(--lg-label-tertiary);
+}
+
+/* ── 次要数字 / 说明文字（表格右边的字节数、进度条右边的百分比）── */
+.dim {
+    color: var(--lg-label-secondary);
+    font-size: 0.92em;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── 进度条（`components/Panel.tsx` 的 `ProgressBar`）───────────── */
+
+.progress-bar {
+    height: 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--lg-label) 12%, transparent);
+    overflow: hidden;
+}
+
+.progress-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--lg-accent);
+    transition: width 320ms var(--lg-ease-out);
+}
+
+/* 拿不到分母时让它来回扫，别停在一根空条上 */
+.progress-unknown {
+    width: 34%;
+    animation: progress-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-sweep {
+    0% {
+        transform: translateX(-110%);
+    }
+    100% {
+        transform: translateX(320%);
+    }
+}
+
+/* ── 一条「发现」───────────────────────────────────────────── */
+.finding {
+    padding: var(--lg-space-3) var(--lg-space-4);
+    border-radius: var(--lg-radius-m);
+    border-inline-start: 3px solid var(--lg-label-tertiary);
+    background: var(--lg-fill-quaternary);
+}
+
+.finding[data-level='warn'] {
+    border-inline-start-color: var(--lg-orange);
+}
+
+.finding-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.finding-text {
+    margin: 4px 0 0;
+    font-size: 13px;
+    line-height: 19px;
+    color: var(--lg-label-secondary);
+}
+
+/* ── 按钮 ─────────────────────────────────────────────────────
+   按钮**没有自己的样式了** —— 全部是库的 `GlassButton`（见 `components/Button.tsx`）。
+   这里只留「排成一行」。删掉的手写 `.btn` / `.btn-*` / 加载转圈（`GlassButton` 自带）
+   是死代码：手写按钮的材质是零，正是用户说的「除了侧栏都没实现玻璃材质」。 */
+.btn-row {
+    display: flex;
+    align-items: center;
+    gap: var(--lg-space-3);
+    flex-wrap: wrap;
+}
+
+/* ── 分段控件（材质 / 主题切换）───────────────────────────────── */
+.seg {
+    display: inline-flex;
+    padding: 2px;
+    gap: 2px;
+    border-radius: var(--lg-radius-s);
+    background: var(--lg-fill-quaternary);
+}
+
+.seg-block {
+    display: flex;
+    width: 100%;
+}
+
+.seg-item {
+    flex: 1;
+    min-height: 28px;
+    padding-inline: var(--lg-space-3);
+    border: 0;
+    border-radius: calc(var(--lg-radius-s) - 2px);
+    background: transparent;
+    color: var(--lg-label);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.seg-item[aria-pressed='true'] {
+    /* 选中的那一段：**填充，不是不透明的页面底** —— 这个 `.seg` 坐在侧栏玻璃里面，
+       写 `--lg-bg` 等于在材质上凿一块洞（库的规矩：玻璃上的元素用填充和透明度）。 */
+    background: var(--lg-fill-tertiary);
+    font-weight: 600;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 10%);
+}
+
+.seg-item:focus-visible {
+    outline: 2px solid var(--lg-accent);
+    outline-offset: 1px;
+}
+
+/* ── 表单 ─────────────────────────────────────────────────────
+   字段容器（`.field*`）在文件末尾那节，和 `components/Field.tsx` 一起。 */
+.input,
+.textarea {
+    /* ⚠️ 这行不能省：玻璃档 1~3 的面板是普通 `div.panel`，**不是 `.lg-root`**，
+       拿不到库那条 `.lg-root * { box-sizing: border-box }`；`<input>` 的 UA 默认又是
+       content-box，于是 `width:100%` 按内容盒算，加上 24px 内边距与 2px 边框就比容器宽
+       26px、右边缘压出面板边框（人声转 MIDI 页的路径框与「线程数」框最明显），
+       高度也比旁边的 `<select class="input">` 高 17px。玻璃档 4 自动变好就是这个原因。 */
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 38px;
+    padding: 8px var(--lg-space-3);
+    font: inherit;
+    font-size: 14px;
+    color: var(--lg-label);
+    background: var(--lg-fill-quaternary);
+    border: 1px solid var(--lg-separator);
+    border-radius: var(--lg-radius-s);
+}
+
+.input:focus-visible,
+.textarea:focus-visible {
+    outline: 2px solid var(--lg-accent);
+    outline-offset: 1px;
+}
+
+/* 设置-关于 页「关于作者」里的 ID 一行：比正文大一号、半粗，和 `Stat` 的数值同档 */
+.author-name {
+    font-size: 17px;
+    font-weight: var(--lg-weight-semibold);
+    color: var(--lg-label);
+}
+
+/* 设置页的标题行（「设置 / 外观、路径、外部工具」）**也是左边这条轨的一部分**：
+   它和下面那块玻璃导航同一个左边缘、副标题写的就是导航的小节名，所以页面一滚
+   它自己飘走、玻璃却钉住 —— 表现是「左边还在跟着鼠标动」。
+   这里把它一起钉住。`top` 仍然是它自己的初始位置 **58**（和 `.app-sidebar` 同一条
+   规矩，理由见那条注释：写小了会先往上跳一截）。
+
+   只对带 `.settings` 两栏布局的页面生效 —— 别的页正文是全宽的，标题钉住会被
+   正文从底下穿过去（设置页右侧面板从 x≈429 起，跟标题、导航都不会重叠）。 */
+.app-main:has(.settings) .page-head {
+    position: sticky;
+    top: calc(var(--lg-space-4) * 2 + 26px);
+    z-index: 1; /* 压在正文之上、顶栏（10）之下 */
+}
+
+
+.choice-grid {
+    display: grid;
+    gap: var(--lg-space-3);
+    grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+}
+
+.choice {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: var(--lg-space-4);
+    text-align: start;
+    font: inherit;
+    color: inherit;
+    background: var(--lg-fill-quaternary);
+    border: 1px solid var(--lg-separator);
+    border-radius: var(--lg-radius-m);
+    cursor: pointer;
+    transition: border-color 140ms ease-out;
+}
+
+.choice:hover {
+    border-color: color-mix(in srgb, var(--lg-accent) 40%, var(--lg-separator));
+}
+
+.choice[aria-pressed='true'] {
+    border-color: var(--lg-accent);
+    box-shadow: inset 0 0 0 1px var(--lg-accent);
+}
+
+.choice-head {
+    display: flex;
+    align-items: center;
+    gap: var(--lg-space-2);
+}
+
+.choice-label {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+/* ── 玻璃等级的滑块一组 ──────────────────────────────────────
+   滑块本身是**库的 `GlassSlider`**（真 `<input type=range>` 打底，键盘/读屏都能用），
+   这里只排它下面那三档说明：竖排、可点、当前档高亮。 */
+.slider-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-4);
+    max-width: 520px;
+}
+
+.slider-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.slider-legend-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--lg-space-3);
+    border: 0;
+    border-radius: var(--lg-radius-s);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    transition: background var(--lg-duration-layout) var(--lg-ease-out);
+}
+
+.slider-legend-item:hover {
+    /* 玻璃上的元素用填充，不再叠一层玻璃（库的规矩） */
+    background: var(--lg-fill-quaternary);
+}
+
+.slider-legend-item[aria-pressed='true'] {
+    background: var(--lg-fill-tertiary);
+}
+
+.slider-legend-label {
+    font-size: 13.5px;
+    font-weight: 600;
+}
+
+.slider-legend-desc {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--lg-label-secondary);
+}
+
+/**
+ * ── 滑块补动效：位置也要有弹簧 ───────────────────────────────────────
+ *
+ * 用户报「调整玻璃等级那个滑条 没有任何动画 甚至是一帧拉过去的」。查库的 CSS
+ * （`node_modules/@ttqtt/liquid-glass-react/dist/components.css:317-323`）——
+ * **库真就是这么写的，不是样式冲突**：
+ *
+ *   .lg-slider-lens   { inset-inline-start: calc(var(--lg-progress) * (100% - 26px));
+ *                       transition: scale …, translate …, box-shadow …; }   ← 没有位置
+ *   .lg-slider-fill   { width: calc(var(--lg-progress) * 100%); }           ← 一条 transition 都没有
+ *
+ * 滑块的位置来自 `inset-inline-start`，它不在 `transition` 列表里；填充条同理。
+ * 所以点刻度、按方向键、点轨道时，滑块**确实是一帧到位**。
+ * （库只给「按住抬起」做了弹簧：`scale` / `translate` / `box-shadow` 那三条都在，
+ *   按住时滑块会放大、跟手挤压 —— 拖的时候有反馈，改完值松手时反而没有。）
+ *
+ * ## 为什么只补「位置」，不补别的
+ *
+ * 拖拽时**不该**给位置加过渡：手指到哪滑块就该到哪，动画只会拖后腿（iOS、Material
+ * 都是这个取舍）。而库里 `inset-inline-start` 是**一个连续量**，拖拽和点击走的是同一条
+ * 属性 —— 没法只给「点击」开动画。所以这里让它带上弹簧：慢速拖拽几乎看不出来，
+ * 快速拖拽会有一点液体感，点刻度和按方向键则是明显滑过去。这正是用户要的效果。
+ *
+ * ⚠️ **必须 `!important`**：库有一条
+ * `.lg-root[data-pulling="true"] { transition-property: background, … }`，
+ * shorthand 写法 `transition: … !important` 会连这条 `transition-property` 列表一起改掉，
+ * 把按压反馈也覆盖没。只覆盖 `transition-*` 的三个分量，`transition-property` 那条管不着。
+ * 两个规则的特异性都是 (0,4,0)，`index.css` 在库的 `style.css` 之后导入（`main.tsx:15-16`），
+ * 同特异性下后者胜 —— 但那是巧合，`!important` 让它不依赖导入顺序。
+ *
+ * ⚠️ 位置动的是 `inset-inline-start`、填充动的是 `width`，都是**布局属性**：
+ * 每帧重排，不像 transform 那样只合成。滑条只有一根、跑一次 0.52s，代价可以接受；
+ * 但别照着这个写法给进度条之类的东西加动画（那种地方该用 `transform: scaleX()`）。
+ */
+.lg-slider .lg-slider-lens {
+    transition-property: scale, translate, box-shadow, inset-inline-start !important;
+    /* `--lg-spring` 会过冲（linear(…) 里到 1.16），所以滑块到位时会轻轻弹一下 */
+    transition-duration: var(--lg-duration-press), var(--lg-duration-press), var(--lg-duration-spring),
+    var(--lg-duration-spring) !important;
+
+    transition-timing-function: var(--lg-ease-out), var(--lg-ease-out), var(--lg-ease-out),
+    var(--lg-spring) !important;
+}
+
+.lg-slider .lg-slider-fill {
+    transition: width var(--lg-duration-spring) var(--lg-spring); /* 与滑块同一条曲线，一起停 */
+}
+
+.choice-desc {
+    font-size: 12.5px;
+    line-height: 18px;
+    color: var(--lg-label-secondary);
+}
+
+/* ── Toast ──────────────────────────────────────────────────── */
+.toasts {
+    position: fixed;
+    right: var(--lg-space-5);
+    bottom: var(--lg-space-5);
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-2);
+    pointer-events: none;
+}
+
+.toast {
+    padding: var(--lg-space-3) var(--lg-space-4);
+    border-radius: var(--lg-radius-m);
+    background: var(--lg-bg);
+    border: 1px solid var(--lg-separator);
+    border-inline-start: 3px solid var(--lg-accent);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+    font-size: 13.5px;
+    max-width: 340px;
+}
+
+.toast[data-tone='err'] {
+    border-inline-start-color: var(--lg-red);
+}
+
+.toast[data-tone='ok'] {
+    border-inline-start-color: var(--lg-green);
+}
+
+.toast[data-tone='warn'] {
+    border-inline-start-color: var(--lg-orange);
+}
+
+/* ── 苹果式圆角（连续曲率）─────────────────────────────────────
+   普通 `border-radius` 画的是**圆弧**：直线到圆弧的曲率是突变的，放大能看出
+   「直边突然接上一段圆」。苹果用的是 squircle（超椭圆），曲率连续过渡。
+
+   ⚠️ **不要把这个用在玻璃面上。** 库的折射位移贴图是受限的圆角矩形 / 胶囊几何
+   （它自己的 `known-limitations.md` 写着），画成 squircle 就对不上了，边缘会错位。
+   所以只给内容层和控件用 —— 这些没有 SVG 滤镜跟着。
+
+   必须配 `@supports` 兜底：不认这条的环境整条声明被丢掉，退回普通圆弧，是安全降级。 */
+@supports (corner-shape: squircle) {
+    :where(
+      .panel, .quick, .choice, .tool-list, .finding, .toast,
+      .input, .textarea, .chip, .seg, .seg-item,
+      .nav-row, .nav-lens
+    ) {
+        corner-shape: squircle;
+    }
+}
+
+/* ── 窄屏 ───────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+    .app-sidebar {
+        display: none;
+    }
+
+    .app-body {
+        flex-direction: column;
+    }
+}
+
+/* ── 任务进度（长任务一律显示）──────────────────────────────────
+   进度条本身是**库的 `GlassProgress`**，这里只排标题行和日志。 */
+.job {
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-3);
+    margin-block-start: var(--lg-space-3);
+}
+
+.job-head {
+    display: flex;
+    align-items: center;
+    gap: var(--lg-space-3);
+    font-size: 13.5px;
+}
+
+.job-title {
+    font-weight: 600;
+}
+
+.job-message {
+    flex: 1;
+    min-width: 0;
+    color: var(--lg-label-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.job-pct {
+    font-variant-numeric: tabular-nums;
+    color: var(--lg-label-secondary);
+}
+
+.job-note {
+    margin: 0;
+    font-size: 13px;
+    color: var(--lg-label-secondary);
+}
+
+.job-log {
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    padding: var(--lg-space-3);
+    border-radius: var(--lg-radius-s);
+    background: var(--lg-fill-quaternary);
+    font: 12px/1.6 ui-monospace, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* ── 目录选择器的残留样式 ─────────────────────────────────────
+   自己画的那个目录树（原 `components/DirPicker.tsx` 的 `DirPicker`）已经删掉 ——
+   选目录一律走系统对话框（`DirectoryInput`）。只剩 `.dir-actions` 还活着：
+   资源库那页拿它当「一行操作按钮」的容器，名字是历史遗留，别照名字猜用途。 */
+.dir-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--lg-space-2);
+    margin-block-start: var(--lg-space-4);
+}
+
+/* ── 拖入提示条（components/FilePick.tsx）───────────────────────
+   页面根元素才是真正的落点（`dropProps`），这条只是**告诉用户「可以拖」**的
+   一句话。所以它平时低调：一行小字 + 虚线框，文件拖到窗口上时才亮成强调色 ——
+   高亮和「松手有没有用」是同一个状态（`dragging`），不会骗人。 */
+.drop-hint {
+    display: flex;
+    align-items: center;
+    gap: var(--lg-space-2);
+    padding: var(--lg-space-2) var(--lg-space-3);
+    font-size: 12.5px;
+    color: var(--lg-label-secondary);
+    border: 1px dashed var(--lg-separator);
+    border-radius: var(--lg-radius-m);
+    transition: border-color var(--lg-duration-layout) var(--lg-ease-out),
+    background var(--lg-duration-layout) var(--lg-ease-out),
+    color var(--lg-duration-layout) var(--lg-ease-out);
+}
+
+.drop-hint[data-over='true'] {
+    color: var(--lg-label);
+    border-color: var(--lg-accent);
+    background: var(--lg-fill-tertiary);
+}
+
+/* ── 输入框 + 按钮的一行 ─────────────────────────────────────── */
+.input-group {
+    display: flex;
+    align-items: center;
+    gap: var(--lg-space-2);
+}
+
+.input-group > .input {
+    flex: 1;
+    min-width: 0;
+}
+
+.spacer {
+    flex: 1;
+}
+
+/* ── 表单字段（Field.tsx）────────────────────────────────────── */
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-2);
+}
+
+.field-label {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.field-hint {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--lg-label-secondary);
+}
+
+/* ── B 站扫码登录（`components/ScanLogin.tsx`）────────────────────────
+   弹窗本体是库的 `GlassDialog`，这里只管里面那块二维码。
+   ⚠️ 二维码必须「白底黑块」：它是给手机摄像头看的，跟着暗色主题走会扫不出来，
+   所以 `.qr-box` 固定白底、`QRCodeSVG` 的 bgColor/fgColor 也在组件里写死了。 */
+.qr-login {
+    display: flex;
+    flex-direction: column;
+    gap: var(--lg-space-4);
+}
+
+.qr-box {
+    display: grid;
+    place-items: center;
+    align-self: center;
+    padding: var(--lg-space-3);
+    border-radius: var(--lg-radius-m);
+    background: #ffffff;
+    /* 白底在亮色主题里会跟面板糊在一起，加一圈描边把它框住 */
+    border: 1px solid var(--lg-separator);
+}
+
+.qr-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--lg-space-2);
+    width: 168px;
+    height: 168px;
+    color: var(--lg-label-tertiary);
+}
+
+.qr-status {
+    margin: 0;
+    text-align: center;
+    font-size: 13.5px;
+    font-weight: 600;
+}
