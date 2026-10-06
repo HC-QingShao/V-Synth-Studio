@@ -43,7 +43,6 @@ const DICT: Record<string, Record<UiLanguage, string>> = {
   '浅色底、细描边': {'zh-CN':'浅色底、细描边','en-US':'Light background with subtle borders','ja-JP':'明るい背景と細い境界線'},
   '深色底，长时间看不刺眼': {'zh-CN':'深色底，长时间看不刺眼','en-US':'Dark background for comfortable long sessions','ja-JP':'長時間でも見やすいダークテーマ'},
   '等级只影响材质，背景图不变。': {'zh-CN':'等级只影响材质，背景图不变。','en-US':'The level only affects the material; the wallpaper stays unchanged.','ja-JP':'レベルはマテリアルのみ変更し、壁紙は変わりません。'},
-  '系统': {'zh-CN':'系统','en-US':'System','ja-JP':'システム'},
 }
 
 export function getUiLanguage(): UiLanguage {
