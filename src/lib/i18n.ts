@@ -38,6 +38,12 @@ const DICT: Record<string, Record<UiLanguage, string>> = {
   '已选': {'zh-CN':'已选','en-US':'Selected','ja-JP':'選択中'},
   '玻璃等级': {'zh-CN':'玻璃等级','en-US':'Glass level','ja-JP':'ガラスレベル'},
   '级别越高越「玻璃」，开销也越大': {'zh-CN':'级别越高越「玻璃」，开销也越大','en-US':'Higher levels use stronger glass effects and more resources','ja-JP':'レベルが高いほどガラス効果が強くなり、負荷も増えます'},
+  '选择应用界面语言': {'zh-CN':'选择应用界面语言','en-US':'Choose the application interface language','ja-JP':'アプリの表示言語を選択'},
+  '系统切换配色时自动跟着换': {'zh-CN':'系统切换配色时自动跟着换','en-US':'Follow the system color scheme','ja-JP':'システムの配色に合わせる'},
+  '浅色底、细描边': {'zh-CN':'浅色底、细描边','en-US':'Light background with subtle borders','ja-JP':'明るい背景と細い境界線'},
+  '深色底，长时间看不刺眼': {'zh-CN':'深色底，长时间看不刺眼','en-US':'Dark background for comfortable long sessions','ja-JP':'長時間でも見やすいダークテーマ'},
+  '等级只影响材质，背景图不变。': {'zh-CN':'等级只影响材质，背景图不变。','en-US':'The level only affects the material; the wallpaper stays unchanged.','ja-JP':'レベルはマテリアルのみ変更し、壁紙は変わりません。'},
+  '系统': {'zh-CN':'系统','en-US':'System','ja-JP':'システム'},
 }
 
 export function getUiLanguage(): UiLanguage {
