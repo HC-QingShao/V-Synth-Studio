@@ -16,7 +16,6 @@ import {downloadBytes, installLabel, type InstallStep, useInstaller} from '@/lib
 import {useJob} from '@/lib/useJob'
 import type {PageProps} from './types'
 import './Midi.css'
-import {translate} from '@/lib/i18n'
 import {useI18n} from '@/lib/i18n'
 
 /**
