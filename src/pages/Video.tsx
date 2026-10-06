@@ -1,6 +1,7 @@
 import {useEffect, useMemo, useRef, useState} from 'react'
 import {
 import {translate} from '@/lib/i18n'
+import {useI18n} from '@/lib/i18n'
     GlassCheckbox,
     GlassSegmentedControl,
     List,
@@ -144,6 +145,7 @@ interface QueueItem {
 /* ══════════════════════════════════════════════════════════════ 页面 ══ */
 
 export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
+    const {t} = useI18n()
     const [settings, setSettings] = useState<Settings>(loadSettings)
     const [url, setUrl] = useState(() => loadSettings().lastUrl)
 
@@ -683,24 +685,24 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
             {/* ══════════════════════ 解析 ══════════════════════ */}
             <Panel>
                 <PanelHead
-                    title={translate("解析视频")}
+                    title={t("解析视频")}
                     desc="B 站支持分P / 合集 / 番剧 / 大会员画质"
-                    extra={<Chip>{translate("回车即解析")}</Chip>}
+                    extra={<Chip>{t("回车即解析")}</Chip>}
                 />
                 <div className="stack">
                     <div className="input-group">
                         <TextInput
                             value={url}
-                            aria-label={translate("视频链接")}
+                            aria-label={t("视频链接")}
                             spellCheck={false}
                             autoComplete="off"
-                            placeholder={translate("粘贴 B 站链接 / BV 号 / 番剧 ep，或 YouTube 等站点链接")}
+                            placeholder={t("粘贴 B 站链接 / BV 号 / 番剧 ep，或 YouTube 等站点链接")}
                             onChange={(e) => setUrl(e.target.value)}
                             onKeyDown={(e) => {
                                 if (e.key === 'Enter') void doParse()
                             }}
                         />
-                        <Button icon="link" title={translate("从剪贴板读链接")} onClick={() => void pasteAndParse()}>
+                        <Button icon="link" title={t("从剪贴板读链接")} onClick={() => void pasteAndParse()}>
                             粘贴
                         </Button>
                         <Button variant="primary" icon="search" loading={parsing} onClick={() => void doParse()}>
@@ -709,14 +711,14 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                     </div>
 
                     {state && !state.tools?.ffmpeg?.available && (
-                        <Finding level="warn" title={translate("未安装 ffmpeg")}>
+                        <Finding level="warn" title={t("未安装 ffmpeg")}>
                             MV 下载后不会自动合并成 mp4。「仅音频」模式不受影响。
                             <br/>
                             tools 目录缺失，请重新解压程序包。
                         </Finding>
                     )}
                     {state && !state.tools?.ytdlp?.available && (
-                        <Finding level="info" title={translate("未安装 yt-dlp")}>
+                        <Finding level="info" title={t("未安装 yt-dlp")}>
                             B 站不受影响；YouTube 等其它站点需要 yt-dlp 才能解析。
                         </Finding>
                     )}
@@ -726,18 +728,18 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
             {/* ══════════════════════ 解析中 / 失败 / 空态 ══════════════════════ */}
             {parsing && (
                 <Panel>
-                    <p className="muted">{translate("正在解析视频信息…")}</p>
+                    <p className="muted">{t("正在解析视频信息…")}</p>
                 </Panel>
             )}
 
             {!parsing && parseErr && (
                 <Panel>
                     <div className="stack">
-                        <Finding level="warn" title={translate("解析失败")}>
+                        <Finding level="warn" title={t("解析失败")}>
                             {parseErr}
                         </Finding>
                         {/yt-dlp/i.test(parseErr) && !state?.tools?.ytdlp?.available && (
-                            <Finding level="warn" title={translate("这个站点需要 yt-dlp")}>
+                            <Finding level="warn" title={t("这个站点需要 yt-dlp")}>
                                 装好之后不用改任何设置，重新点「解析」即可。
                             </Finding>
                         )}
@@ -752,7 +754,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                 <Panel>
                     <div className="empty">
                         <Icon name="video" size={28}/>
-                        <p className="finding-title">{translate("还没有解析任何视频")}</p>
+                        <p className="finding-title">{t("还没有解析任何视频")}</p>
                         <p className="muted">
                             把链接粘到上面的输入框，按回车即可解析
                         </p>
@@ -764,7 +766,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
             {!parsing && parsed && (
                 <Panel>
                     <PanelHead
-                        title={translate("解析结果")}
+                        title={t("解析结果")}
                         desc={
                             isBili
                                 ? `${isBangumi ? '番剧' : '视频'} · ${info.uploader || 'UP 未知'}`
@@ -825,7 +827,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
 
                             {(isBili ? info.desc : info.description) ? (
                                 <details className="video-desc-block">
-                                    <summary>{translate("视频简介")}</summary>
+                                    <summary>{t("视频简介")}</summary>
                                     <div className="video-desc">{isBili ? info.desc : info.description}</div>
                                 </details>
                             ) : null}
@@ -837,7 +839,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                                 <h2 className="video-title">{info.title || '（没有标题）'}</h2>
                                 <div className="video-meta">
                                     {info.uploader ? <Chip>{`UP：${info.uploader}`}</Chip> : null}
-                                    {isBili && isBangumi ? <Chip tone="accent">{translate("番剧")}</Chip> : null}
+                                    {isBili && isBangumi ? <Chip tone="accent">{t("番剧")}</Chip> : null}
                                     {isBili && info.bvid ? <Chip>{info.bvid}</Chip> : null}
                                     {!isBili && info.extractor ? <Chip tone="accent">{info.extractor}</Chip> : null}
                                     {!isBili && info.id ? <Chip>{info.id}</Chip> : null}
@@ -846,9 +848,9 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                                     ) : null}
                                     {isBili ? (
                                         parsed.hasCookie === false ? (
-                                            <Chip tone="warn">{translate("未登录")}</Chip>
+                                            <Chip tone="warn">{t("未登录")}</Chip>
                                         ) : (
-                                            <Chip tone="ok">{translate("已登录")}</Chip>
+                                            <Chip tone="ok">{t("已登录")}</Chip>
                                         )
                                     ) : null}
                                 </div>
@@ -857,7 +859,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                             {/* 分P / 合集 / 剧集 */}
                             {!multiPages && !hasSeason ? (
                                 pages.length === 1 ? (
-                                    <Finding level="info" title={translate("内容")}>
+                                    <Finding level="info" title={t("内容")}>
                                         {`单 P 视频：${pages[0].title || '（无分P标题）'}${
                                             pages[0].durationSec ? ` · ${formatDuration(pages[0].durationSec)}` : ''
                                         }`}
@@ -875,7 +877,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
 
                                     {multiPages && hasSeason && (
                                         <GlassSegmentedControl
-                                            aria-label={translate("内容分组")}
+                                            aria-label={t("内容分组")}
                                             items={[
                                                 {value: 'pages', label: `分P ${pages.length}`},
                                                 {
@@ -954,17 +956,17 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                             {isBili && (
                                 <div className="video-section">
                                     {!streams ? (
-                                        <Finding level="warn" title={translate("没有取到播放流信息")}>
+                                        <Finding level="warn" title={t("没有取到播放流信息")}>
                                             这个视频可能受版权限制、需要大会员，或者已经失效。
                                         </Finding>
                                     ) : streams.error ? (
-                                        <Finding level="warn" title={translate("无法获取画质列表")}>
+                                        <Finding level="warn" title={t("无法获取画质列表")}>
                                             {`取播放流出错：${streams.error}`}
                                         </Finding>
                                     ) : streams.mode === 'durl' ? (
                                         <>
-                                            <span className="field-label">{translate("播放流（整段）")}</span>
-                                            <Finding level="info" title={translate("整段流模式")}>
+                                            <span className="field-label">{t("播放流（整段）")}</span>
+                                            <Finding level="info" title={t("整段流模式")}>
                                                 这个视频只有整段流，画质由 B 站决定，不能单独挑视频轨 / 音频轨；可以整段下载后用
                                                 「音频工具 → 从视频提取音频」再抽音轨。
                                             </Finding>
@@ -990,7 +992,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                                         <>
                                             {parsed.hasCookie === false && (
                                                 <div className="video-cookie">
-                                                    <Finding level="warn" title={translate("画质受限：未登录")}>
+                                                    <Finding level="warn" title={t("画质受限：未登录")}>
                                                         {locked.length
                                                             ? `这个视频有 ${locked
                                                                 .map((l) => l.name)
@@ -1020,11 +1022,11 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                                             )}
 
                                             <div className="video-section-head">
-                                                <span className="field-label">{translate("视频流")}</span>
+                                                <span className="field-label">{t("视频流")}</span>
                                                 <Chip>{`${videos.length} 条`}</Chip>
                                                 <span className="spacer"/>
                                                 {mode === 'audio' ?
-                                                    <Chip tone="accent">{translate("仅音频：不下载视频流")}</Chip> : null}
+                                                    <Chip tone="accent">{t("仅音频：不下载视频流")}</Chip> : null}
                                             </div>
                                             {videos.length ? (
                                                 <List>
@@ -1054,22 +1056,22 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                                                     </ListSection>
                                                 </List>
                                             ) : (
-                                                <Finding level="warn" title={translate("没有视频流")}>
+                                                <Finding level="warn" title={t("没有视频流")}>
                                                     这个视频没有可用的视频流。
                                                 </Finding>
                                             )}
                                             {selectedVideo && riskyCodec(selectedVideo.codecs) ? (
-                                                <Finding level="warn" title={translate("选中的编码兼容性差")}>
+                                                <Finding level="warn" title={t("选中的编码兼容性差")}>
                                                     {`选中的 ${selectedVideo.qualityName} 是 ${selectedVideo.codecs}：体积更小，但不少老编辑器、老播放器打不开。要拿去剪辑就换一条 H.264 的。`}
                                                 </Finding>
                                             ) : null}
-                                            <p className="video-note">{translate("默认选最高画质并优先 H.264。")}</p>
+                                            <p className="video-note">{t("默认选最高画质并优先 H.264。")}</p>
 
                                             <div className="video-section-head">
-                                                <span className="field-label">{translate("音频流")}</span>
+                                                <span className="field-label">{t("音频流")}</span>
                                                 <Chip>{`${audios.length} 条`}</Chip>
                                                 <span className="spacer"/>
-                                                <span className="video-note">{translate("默认 192K，兼容性最好")}</span>
+                                                <span className="video-note">{t("默认 192K，兼容性最好")}</span>
                                             </div>
                                             {audios.length ? (
                                                 <List>
@@ -1092,13 +1094,13 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                                                     </ListSection>
                                                 </List>
                                             ) : (
-                                                <Finding level="warn" title={translate("没有音频流")}>
+                                                <Finding level="warn" title={t("没有音频流")}>
                                                     没有可用的音频流。
                                                 </Finding>
                                             )}
 
                                             {isBangumi ? (
-                                                <Finding level="info" title={translate("番剧画质")}>
+                                                <Finding level="info" title={t("番剧画质")}>
                                                     番剧高画质需要大会员
                                                 </Finding>
                                             ) : null}
@@ -1111,7 +1113,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                             {!isBili && (
                                 <div className="video-section">
                                     <div className="video-section-head">
-                                        <span className="field-label">{translate("可选格式")}</span>
+                                        <span className="field-label">{t("可选格式")}</span>
                                         <Chip>{`${ytFormats.length} 条`}</Chip>
                                         <span className="spacer"/>
                                     </div>
@@ -1142,16 +1144,16 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                                             </ListSection>
                                         </List>
                                     ) : (
-                                        <Finding level="warn" title={translate("没有可用格式")}>
+                                        <Finding level="warn" title={t("没有可用格式")}>
                                             yt-dlp 没有列出可用格式。
                                         </Finding>
                                     )}
                                     {info.subtitles?.length ? (
-                                        <Finding level="info" title={translate("官方字幕")}>
+                                        <Finding level="info" title={t("官方字幕")}>
                                             {`有官方字幕：${info.subtitles.join('、')}。`}
                                         </Finding>
                                     ) : (
-                                        <Finding level="info" title={translate("官方字幕")}>
+                                        <Finding level="info" title={t("官方字幕")}>
                                             这个站点没有列出官方字幕。
                                         </Finding>
                                     )}
@@ -1165,7 +1167,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
             {/* ══════════════════════ 预览 ══════════════════════ */}
             {!parsing && previewBusy && (
                 <Panel>
-                    <PanelHead title={translate("预览")}/>
+                    <PanelHead title={t("预览")}/>
                     <p className="muted">
                         正在准备预览…（第一次要等几秒）
                     </p>
@@ -1173,13 +1175,13 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
             )}
             {!parsing && !previewBusy && previewErr && (
                 <Panel>
-                    <PanelHead title={translate("预览")}/>
+                    <PanelHead title={t("预览")}/>
                     <p className="muted">这一段预览不了：{previewErr}</p>
                 </Panel>
             )}
             {!parsing && !previewBusy && preview && (
                 <Panel>
-                    <PanelHead title={translate("预览")} desc="不用先下载，直接在这儿看一眼"/>
+                    <PanelHead title={t("预览")} desc="不用先下载，直接在这儿看一眼"/>
                     <VideoPreview
                         videoUrl={preview.videoUrl}
                         audioUrl={preview.audioUrl}
@@ -1198,7 +1200,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
 
             {/* ══════════════════════ 下载选项 ══════════════════════ */}
             <Panel>
-                <PanelHead title={translate("下载选项")} desc="存到哪里、下哪些附带内容（会自动记住）"/>
+                <PanelHead title={t("下载选项")} desc="存到哪里、下哪些附带内容（会自动记住）"/>
                 <div className="stack">
                     <Field
                         label="输出目录"
@@ -1210,8 +1212,8 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                     >
                         <DirectoryInput
                             value={settings.outDir}
-                            placeholder={translate("留空 = 用设置里的默认下载目录…")}
-                            title={translate("选下载到哪个目录")}
+                            placeholder={t("留空 = 用设置里的默认下载目录…")}
+                            title={t("选下载到哪个目录")}
                             onToast={onToast}
                             onChange={(v) => setSetting('outDir', v)}
                         />
@@ -1235,12 +1237,12 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                         }
                     >
                         {durl ? (
-                            <Finding level="info" title={translate("整段流模式")}>
+                            <Finding level="info" title={t("整段流模式")}>
                                 整段流模式下只能整段下载（视频与音频在一起），选不了「仅音频」。
                             </Finding>
                         ) : (
                             <GlassSegmentedControl
-                                aria-label={translate("下载模式")}
+                                aria-label={t("下载模式")}
                                 items={[
                                     {value: 'video', label: '视频（含音频）'},
                                     {value: 'audio', label: '仅音频'},
@@ -1280,7 +1282,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                     >
                         <TextInput
                             value={settings.subDir}
-                            placeholder={translate("留空 = 直接放在输出目录")}
+                            placeholder={t("留空 = 直接放在输出目录")}
                             onChange={(e) => setSetting('subDir', e.target.value)}
                         />
                     </Field>
@@ -1325,7 +1327,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
             {queue.length > 0 && (
                 <Panel>
                     <PanelHead
-                        title={translate("下载队列")}
+                        title={t("下载队列")}
                         desc={`${doneCount}/${queue.length} 已完成${failedCount ? ` · ${failedCount} 个失败` : ''}${
                             runningItem ? ' · 顺序下载中' : ''
                         }`}
@@ -1364,7 +1366,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
                         ))}
                     </div>
 
-                    <p className="video-note">{translate("下载在后台进行：切走视图不会中断。")}</p>
+                    <p className="video-note">{t("下载在后台进行：切走视图不会中断。")}</p>
                 </Panel>
             )}
 
