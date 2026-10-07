@@ -29,10 +29,16 @@
 
 到 **[Releases](https://github.com/QingMu39-Gao/V-Synth-Studio/releases/latest)** 下载：
 
-- `v-synth-studio_x.y.zbeta_x64_zh-CN.msi` —— 双击安装（推荐）
+- `v-synth-studio_x.y.zbeta_x64_zh-CN.msi` —— Windows，双击安装（推荐）
 - `v-synth-studio_x.y.z_x64-setup.exe` —— 同一个程序的 exe 安装程序，按用户安装、不需要管理员
+- `v-synth-studio_x.y.zbeta_aarch64.dmg` —— macOS（Apple Silicon / M 系列），拖进「应用程序」
 
-> 安装包**没有代码签名**，第一次运行会看到一次 SmartScreen 提示：点「更多信息」→「仍要运行」。
+> 安装包**没有代码签名**：Windows 第一次运行会看到一次 SmartScreen 提示，点「更多信息」→「仍要运行」；
+> macOS 是 ad-hoc 签名，第一次要**右键 →「打开」**（或到「系统设置 → 隐私与安全性 →「仍要打开」」）。
+>
+> **macOS 版暂时没有这三样**：背景壁纸（Wallpaper Engine 没有 macOS 版）、离线音轨分离引擎、
+> 以及显卡加速（DirectML 是 Windows 的 API，CUDA 在 macOS 上不存在）。界面上它们会置灰并写明原因；
+> 在线 MVSEP 与其余功能不受影响。
 >
 > 装完只有「外部工具」是齐的。**音轨分离**和**人声转 MIDI** 的引擎与模型不随包分发（合计约
 > 8 GB，其中模型权重是非商业许可、不允许随源码分发）——在对应页面点「安装扩展包」按需下载，
