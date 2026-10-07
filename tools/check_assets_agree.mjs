@@ -59,7 +59,12 @@ function checkScripts(text, name) {
 /** workflow 里提到的仓库内路径要真的在。 */
 function checkRepoPaths(text, name) {
   const bad = []
-  const candidates = new Set([...text.matchAll(/['"]([^'"\n]+)['"]/g)].map((m) => m[1]))
+  /* ⚠️ 先把**整行注释**去掉再找引用：workflow 里解释「某个路径映射到哪」的注释
+     会写出 `../data/xxx` 这种相对路径，那是说明不是引用，照着去 `existsSync`
+     必然误报「引用了不存在的路径」。行内 `#` 不动 —— 分不清后面是路径还是
+     注释的一部分，宁可保守。 */
+  const code = text.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+  const candidates = new Set([...code.matchAll(/['"]([^'"\n]+)['"]/g)].map((m) => m[1]))
 
   // `path: |` 块里是**不带引号**的裸行（actions/cache 的写法），也得查。
   const lines = text.split('\n')

@@ -126,9 +126,10 @@ jobs:
       # 让「装出来是对的」有证据，而不是只看编译退出码。macOS 上这件事比 MSI 那边好办 ——
       # `.app` 就是个目录，直接查里面有什么，不用去读安装包的 File 表。
       #
-      # ⚠️ 路径按 `bundle.resources` 的**映射目标名**写：`"../data/resources.json"`
-      #    映射到 `"data/resources.json"`，落点就是 `Contents/Resources/data/resources.json`
-      #    （`src-tauri/tauri.conf.json`，与 `lib.rs::resolve_paths` 查的路径是同一个）。
+      # ⚠️ 路径按 `bundle.resources` 的**映射目标名**写：`tauri.conf.json` 里把
+      #    ../data/resources.json 映射成 data/resources.json，落点就是
+      #    `Contents/Resources/data/resources.json` —— 与 `lib.rs::resolve_paths`
+      #    查的是同一个路径。
       #
       # ⚠️ 前端与 jizura **不在这里面**：`frontendDist = dist/` 被 tauri-codegen
       # 嵌进可执行文件，磁盘上查不到。所以它靠**体积**兜一道（见下面第四条）。
