@@ -408,11 +408,16 @@ pub async fn svsep_dml_download(st: super::St<'_>) -> Cmd {
 /// 两个地方用它：用户在「安装扩展包」的链条里走到那一步，以及选了 GPU 推理时的
 /// 自动补装（见 `svsep_set_inference`）。回包是「开始了」，不是「下完了」。
 fn start_dml_download(st: &Arc<super::AppState>) -> Result<Value, String> {
-    if DL_ACTIVE.load(Ordering::Relaxed) == 1 {
+    // DML uses the same download slot, so reserve it atomically as well.
+    if DL_ACTIVE
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         let now = DL_KIND.lock().ok().and_then(|k| *k).unwrap_or("包");
         return Err(format!("{now}正在下载中，等它下完再下加速包。"));
     }
-    if DEL_ACTIVE.load(Ordering::Relaxed) {
+    if DEL_ACTIVE.load(Ordering::Acquire) {
+        DL_ACTIVE.store(0, Ordering::Release);
         return Err("正在删除依赖文件，等它删完再下".into());
     }
     let root = st.root.clone();
@@ -428,8 +433,6 @@ fn start_dml_download(st: &Arc<super::AppState>) -> Result<Value, String> {
     DL_STAGE.store(0, Ordering::Relaxed);
     DL_BYTES.store(0, Ordering::Relaxed);
     DL_TOTAL.store(0, Ordering::Relaxed);
-    DL_ACTIVE.store(1, Ordering::Relaxed);
-
     /* 它走的是 `download_dml` 而不是 `fetch_bundle`（24 MB、不支持续传），
     所以 `spawn_download` 那个「返回值必须是 FetchOutcome」的签名套不上，
     这里自己收尾 —— 但**进度仍然写同一组 `DL_*`**，界面不用学第二套。 */
