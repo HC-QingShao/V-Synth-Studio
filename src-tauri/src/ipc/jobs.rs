@@ -50,9 +50,14 @@ pub fn set_job(st: &Arc<super::AppState>, id: &str, patch: Value) {
     let (snapshot, tx) = {
         let mut guard = st.jobs.lock().unwrap();
         let snapshot = guard.items.get_mut(id).map(|job| {
-            if let (Some(dst), Some(src)) = (job.as_object_mut(), patch.as_object()) {
-                for (k, v) in src {
-                    dst.insert(k.clone(), v.clone());
+            // Terminal states are immutable. Otherwise a worker can finish after Cancel
+            // and overwrite the canceled state with done or error.
+            let terminal = is_terminal(job);
+            if !terminal {
+                if let (Some(dst), Some(src)) = (job.as_object_mut(), patch.as_object()) {
+                    for (k, v) in src {
+                        dst.insert(k.clone(), v.clone());
+                    }
                 }
             }
             job.clone()
