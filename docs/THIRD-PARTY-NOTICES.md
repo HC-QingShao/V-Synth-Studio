@@ -15,16 +15,21 @@
 
 | 组件 | 位置 | 版本 | 许可 |
 |---|---|---|---|
-| FFmpeg | `tools/ffmpeg/` | 9.0.2（gyan.dev essentials 构建） | **GPL v3** ⚠️ |
-| yt-dlp | `tools/yt-dlp.exe` | 2026.08.19 | Unlicense（公有领域） |
+| FFmpeg | `tools/ffmpeg/` | Windows / Linux：BtbN 的 LGPL 构建（master）；macOS：jellyfin-ffmpeg 8.1.3 可携包 | Windows/Linux **LGPL**；macOS **GPL v3** ⚠️ |
+| yt-dlp | `tools/yt-dlp`（Windows 上 `yt-dlp.exe`） | 2026.08.19 | Unlicense（公有领域） |
 | LibreSVIP | `tools/libresvip/` | 2.9.0 | Apache License 2.0 |
 | JIZURA | `public/vendor/jizura/` | v0.10.1（单文件构建产物） | MIT |
 | Google Fonts（12 个家族） | `public/vendor/jizura/fonts/` | — | SIL OFL 1.1 |
 | webwallgl | `public/vendor/wallpaper/` | 2.1.0 | MIT |
 
 > ⚠️ 这张表里的 `tools/` 与 `public/vendor/` 都**不入库**（由补齐脚本现场取），所以它们的版本
-> 随「补齐那一刻的上游」变：FFmpeg 一栏是开发机上的实测值，CI 取的是 BtbN 的 LGPL 构建。
-> 换上游版本时记得回来改这一行。
+> 随「补齐那一刻的上游」变。换上游版本时记得回来改这一行。
+>
+> ⚠️ **FFmpeg 三端来源不同**：Windows / Linux 取 BtbN 的 **LGPL** 档（够用，本程序不编码
+> 视频），macOS 上没有同样可用的 LGPL 静态构建 —— 唯一那档 LGPL（acoustid）是纯音频的、
+> **没有 `atempo` / `loudnorm` 这些滤镜**，变调变速与响度归一化会直接失败。所以 macOS
+> 取 jellyfin-ffmpeg 的可携包，是 **GPL** 构建：与本程序（GPL-3.0）同系，随包分发无冲突，
+> 但按下面「FFmpeg 是 GPL 构建」那一节的义务办。
 
 运行时依赖：
 
@@ -83,45 +88,38 @@
 
 ---
 
-## ⚠️ FFmpeg 是 GPL 构建 —— 分发前请确认
+## ⚠️ FFmpeg 的许可按平台不同 —— 分发前请确认
 
-用 `ffmpeg -version` 看配置参数，当前这份是：
+三端各取各的构建（见上表），所以**许可不是一回事**：
 
-```
---enable-gpl --enable-version3 ... --enable-libx264 --enable-libx265 ...
-```
+- **Windows / Linux：LGPL**（BtbN 的 `ffmpeg-master-latest-*-lgpl`，不带 `--enable-gpl`）。
+  LGPL 只要求附许可全文、并允许用户替换该组件，不要求源码要约。
+  代价是失去 H.264/H.265 **编码**能力 —— 本程序不做视频编码（6 处调用都带 `-vn`，
+  合流是 `-c copy`），没有实际损失。
+- **macOS：GPL**（jellyfin-ffmpeg 的可携包，`--enable-gpl` + `--enable-libx264`）。
+  用它是因为 macOS 上没有同样可用的 LGPL 静态构建（见上表那条警告）。分发它要：
 
-`--enable-gpl` 加 `--enable-version3` 意味着这是 **GPL v3** 构建。分发它需要：
+  1. **附上 GPL v3 全文**（从 <https://www.gnu.org/licenses/gpl-3.0.txt> 取一份）；
+  2. **提供对应源码**，或一份**书面要约**（written offer）加上明确的源码获取地址：
+     - FFmpeg 源码：<https://ffmpeg.org/download.html>
+     - jellyfin-ffmpeg 的构建脚本与发布：<https://github.com/jellyfin/jellyfin-ffmpeg>
 
-1. **附上 GPL v3 全文**（`tools/ffmpeg/` 里若自带 `LICENSE` 就带上，否则从
-   <https://www.gnu.org/licenses/gpl-3.0.txt> 取一份）
-2. **提供对应源码**，或一份**书面要约**（written offer）加上明确的源码获取地址。
-   最省事的做法是在说明里写上源码地址：
-   - FFmpeg 源码：<https://ffmpeg.org/download.html>
-   - gyan.dev 的构建脚本：<https://www.gyan.dev/ffmpeg/builds/>
+> 开发机上那份 Windows ffmpeg 若是 gyan.dev 的 essentials（`--enable-gpl --enable-version3`），
+> 也按上面第 2 条办：源码 <https://ffmpeg.org/download.html>，构建脚本
+> <https://www.gyan.dev/ffmpeg/builds/>。CI 打的是 BtbN 的 LGPL 档，不受这一条约束。
 
-### 更省事的选择：换成 LGPL 构建
-
-本程序对 ffmpeg 的用法**只需要音频能力**（格式转换、变调变速、裁剪、响度、音轨提取），
-加上视频下载后的**流拷贝合并**（`-c copy`，不解码视频）。
-
-也就是说 **x264 / x265 这两个 GPL 组件根本用不到**。换成不带 `--enable-gpl` 的
-**LGPL 构建**（例如 BtBN 的 `ffmpeg-master-latest-win64-lgpl`），合规负担小很多：
-LGPL 只要求附许可全文并允许用户替换该组件，不要求源码要约。
-
-代价是失去 H.264/H.265 **编码**能力 —— 但本程序不做视频编码，没有实际损失。
-
-> 换之前先核对编码器：`tools\ffmpeg\bin\ffmpeg.exe -encoders` 里要有
-> `libmp3lame` / `libopus` / `libvorbis`（LGPL 构建通常都带），
-> 再跑一遍音频页的转换 / 变调 / 裁剪与视频页的合流确认没退化。
+> 换 ffmpeg 之前先核对编码器：`ffmpeg -encoders` 里要有 `libmp3lame` / `libopus` /
+> `libvorbis`，滤镜里有 `atempo` / `asetrate` / `loudnorm`（macOS 那条 LGPL 的纯音频构建
+> 就缺这几个滤镜），再跑一遍音频页的转换 / 变调 / 裁剪与视频页的合流确认没退化。
+> CI 的 macOS 冒烟那一步已经把编码器查了一遍。
 
 ---
 
 ## LibreSVIP（Apache License 2.0）
 
 - 项目：<https://github.com/SoulMelody/LibreSVIP>
-- 使用方式：作为**独立可执行程序**调用（`libresvip-cli.exe proj convert …`），
-  不修改、不链接其代码。
+- 使用方式：作为**独立可执行程序**调用（`libresvip-cli proj convert …`，Windows 上是
+  `libresvip-cli.exe`），不修改、不链接其代码。
 - 它自身打包了 Python 运行时和若干依赖（PyInstaller 产物），各自许可见
   `tools/libresvip/libresvip-cli/_internal/*.dist-info/licenses/`。
 

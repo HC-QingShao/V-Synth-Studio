@@ -53,6 +53,11 @@
         "language": "zh-CN"
       }
     },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
+    },
     "shortDescription": "翻调 P 主的本地工作台",
     "longDescription": "工程格式互转、MV 解析下载、人声分离、资源导航。完全离线运行。工具（ffmpeg / yt-dlp / LibreSVIP）随包分发，不需要联网下载。"
   }
