@@ -495,7 +495,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!(
             "vss-output-reservation-{}-{}.vsqx",
             std::process::id(),
-            crate::config_file::now_millis()
+            crate::ipc::config_file::now_millis()
         ));
         let first = reserve_unique_path(base.clone()).expect("first reservation");
         let second = reserve_unique_path(base.clone()).expect("second reservation");

@@ -562,6 +562,7 @@ function CopyDialog({
     value: { url: string; reason: string } | null
     onClose: () => void
 }) {
+    const {t} = useI18n()
     /*
      * ⚠️ 这里**故意不传 `material`**：库的 `GlassDialog` 内部是写死的
      *   `{ ...surface, material: 'regular', size: 'large' }`
@@ -605,6 +606,7 @@ function ResourceCard({
     onOpen: () => void
     onCopy: () => void
 }) {
+    const {t} = useI18n()
     const url = String(item.url ?? '')
     const hasUrl = httpLink(url)
     const host = hostOf(item)

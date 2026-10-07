@@ -217,7 +217,7 @@ function Appearance({
                         >
               <span className="choice-head">
                 <span className="choice-label">{themeOption.label}</span>
-                  {theme === t.id && <Chip tone="accent">已选</Chip>}
+                  {theme === themeOption.id && <Chip tone="accent">{t("已选")}</Chip>}
               </span>
                             <span className="choice-desc">{themeOption.desc}</span>
                         </button>
@@ -554,6 +554,7 @@ function About({
     onToast: ToastFn
 }) {
     const toolsReady = ['ffmpeg', 'ytdlp'].filter((k) => state?.tools?.[k]?.available).length
+    const {t} = useI18n()
 
     /* 「关于作者」那三个按钮：两个外链走系统默认浏览器（和 `Upstream` 同一条路，
        比指望 WebView 处理 `target="_blank"` 稳）；邮箱按钮复制到剪贴板 ——
@@ -587,11 +588,13 @@ function About({
                         value={state?.installed ? '安装版' : '绿色版'}
                         /* 安装版的可写目录三端不一样（`%APPDATA%` / `~/Library/Application Support`），
                            别在界面上写死 Windows 那一套。 */
-                        sub={
+                        sub={t(
                             state?.installed
-                                ? `配置在${state?.platform === 'darwin' ? ' ~/Library/Application Support' : ' %APPDATA%'}`
-                                : '配置在程序目录'
-                        }
+                                ? state?.platform === 'darwin'
+                                    ? '配置在 ~/Library/Application Support'
+                                    : '配置在 %APPDATA%'
+                                : '配置在程序目录',
+                        )}
                     />
                     <Stat
                         label="外部工具"

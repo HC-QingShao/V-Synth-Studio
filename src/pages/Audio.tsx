@@ -864,8 +864,12 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                                                 formatValue={(v) => `×${v}`}
                                             />
                                             <span className="audio-num-note">
-                        {Number(settings.ratio) >{t(" 1 ? '加速' : Number(settings.ratio) ")}< 1 ? '减速' : '原速'}
-                      </span>
+                                                {Number(settings.ratio) > 1
+                                                    ? t("加速")
+                                                    : Number(settings.ratio) < 1
+                                                        ? t("减速")
+                                                        : t("原速")}
+                                            </span>
                                         </div>
                                     </Field>
                                     <div className="audio-presets">

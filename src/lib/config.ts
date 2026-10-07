@@ -69,9 +69,15 @@ export function getConfig(): AppConfig {
  *
  * ⚠️ 回调里只读 `getConfig()` 做派生（`useGlass` 的等级就是这样的），不要在这里
  * 再 `saveConfig` —— 会在 `emit()` 里递归。
+ *
+ * 返回值是**退订函数** —— `useSyncExternalStore` 要求订阅函数回一个清理函数
+ * （见 `lib/i18n.ts`），不回就会每次挂载都往 `listeners` 里叠一个回调。
  */
-export function onConfigChange(cb: () => void): void {
+export function onConfigChange(cb: () => void): () => void {
     listeners.add(cb)
+    return () => {
+        listeners.delete(cb)
+    }
 }
 
 /** 界面上报错的地方（App 挂载时接上 toast）。没接就只进控制台。 */
