@@ -89,6 +89,9 @@ jobs:
       # 仓库与 workflow 自身对不对得上 —— 这类漂移在本地跑不到（YAML 读不到 JS 常量），
       # 只会在 CI 里炸，而那时每轮要等十几分钟。放在前面，早失败。
       # 两个检查只用 Node 内建模块，所以放在 `pnpm install` 之前也行。
+      #
+      # 最后那条是**跑脚本**而不是查表：壁纸宿主页的 `boot` 在重启时常常早于父窗口的
+      # 监听器，所以它必须能被再问一次。坏掉的表现是「重启后背景不动」，编译期看不出来。
       - name: 核对仓库与 workflow 一致
         shell: pwsh
         run: |
@@ -97,6 +100,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "check-artifact-paths.mjs 失败" }
           node tools/check_assets_agree.mjs
           if ($LASTEXITCODE -ne 0) { throw "check_assets_agree.mjs 失败" }
+          node tools/check_wallpaper_handshake.mjs
+          if ($LASTEXITCODE -ne 0) { throw "check_wallpaper_handshake.mjs 失败" }
 
       - name: 装前端依赖
         shell: pwsh
