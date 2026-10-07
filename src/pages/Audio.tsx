@@ -18,6 +18,7 @@ import {useJob} from '@/lib/useJob'
 import type {Job} from '@/lib/types'
 import type {PageProps} from './types'
 import './Audio.css'
+import {useI18n} from '@/lib/i18n'
 
 /**
  * 音频工具。
@@ -197,6 +198,7 @@ function channelsText(n: number | undefined): string {
 /* ══════════════════════════════════════════════════════════════════ 页面 ══ */
 
 export function Audio({state, onNavigate, onToast}: PageProps) {
+    const {t} = useI18n()
     const formats = (state?.audioFormats ?? {}) as Record<string, AudioFormat>
     const cfg = (state?.config ?? {}) as AudioConfig
     const ffmpeg = state?.tools?.ffmpeg
@@ -563,11 +565,11 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                 {state && !ffmpegOk && (
                     <Panel>
                         <PanelHead
-                            title="未检测到 ffmpeg"
-                            extra={<Chip tone="err">未检测到</Chip>}
+                            title={t("未检测到 ffmpeg")}
+                            extra={<Chip tone="err">{t("未检测到")}</Chip>}
                         />
                         <div className="stack">
-                            <p className="hint">tools 目录缺失，请重新解压程序包。</p>
+                            <p className="hint">{t("tools 目录缺失，请重新解压程序包。")}</p>
                             <div className="btn-row">
                                 <Button size="lg" icon="gear" onClick={() => onNavigate('settings')}>
                                     去设置看看
@@ -580,7 +582,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                 {/* ── 素材 ── */}
                 <Panel>
                     <PanelHead
-                        title="素材"
+                        title={t("素材")}
                         desc="选一个音频或视频文件"
                         extra={
                             <Chip tone={ffmpegOk ? 'ok' : 'warn'}>{ffmpegOk ? 'ffmpeg 已就绪' : 'ffmpeg 未就绪'}</Chip>
@@ -596,7 +598,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                                     value={settings.input}
                                     spellCheck={false}
                                     autoComplete="off"
-                                    placeholder="音频 / 视频文件的完整路径，例如 H:\音乐\Never Gonna Give You Up.mp4"
+                                    placeholder={t("音频 / 视频文件的完整路径，例如 H:\\音乐\\Never Gonna Give You Up.mp4")}
                                     onChange={(e) => patch({input: e.target.value})}
                                     onKeyDown={(e) => {
                                         if (e.key !== 'Enter') return
@@ -623,21 +625,21 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
 
                         {/* 探测结果 */}
                         {!input ? (
-                            <Finding level="info" title="还没有选文件">
+                            <Finding level="info" title={t("还没有选文件")}>
                                 选好之后这里会显示时长、编码、采样率、声道。
                             </Finding>
                         ) : probing ? (
-                            <p className="muted">正在读取媒体信息…</p>
+                            <p className="muted">{t("正在读取媒体信息…")}</p>
                         ) : probeErr ? (
-                            <Finding level="warn" title="读不到这个文件">
+                            <Finding level="warn" title={t("读不到这个文件")}>
                                 {probeErr}
                             </Finding>
                         ) : !ffmpegOk || !probe || probe.available === false ? (
-                            <Finding level="warn" title="读不出媒体信息">
+                            <Finding level="warn" title={t("读不出媒体信息")}>
                                 装了 ffmpeg 之后，这里会显示时长、编码、采样率与声道。
                             </Finding>
                         ) : probe.probed === false ? (
-                            <Finding level="info" title="没能读出媒体信息">
+                            <Finding level="info" title={t("没能读出媒体信息")}>
                                 {probe.note ?? '没能读出媒体信息'}
                             </Finding>
                         ) : (
@@ -647,7 +649,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                     {baseName(input)}
                   </span>
                                     <Chip tone={probe.audio ? 'ok' : 'warn'}>{probe.audio ? '含音轨' : '无音轨'}</Chip>
-                                    {probe.video ? <Chip tone="accent">含视频轨</Chip> : null}
+                                    {probe.video ? <Chip tone="accent">{t("含视频轨")}</Chip> : null}
                                     <span className="spacer"/>
                                     <Button size="sm" variant="ghost" icon="refresh"
                                             onClick={() => void probeFile(input, true, true)}>
@@ -656,48 +658,48 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                                 </div>
                                 <div className="chips">
                                     <Chip>
-                                        <span className="audio-dim">时长</span>
+                                        <span className="audio-dim">{t("时长")}</span>
                                         {probe.durationSec ? formatDuration(probe.durationSec) : '未知'}
                                     </Chip>
                                     {probe.formatName ? (
                                         <Chip>
-                                            <span className="audio-dim">容器</span>
+                                            <span className="audio-dim">{t("容器")}</span>
                                             {probe.formatName}
                                         </Chip>
                                     ) : null}
                                     {probe.sizeBytes ? (
                                         <Chip>
-                                            <span className="audio-dim">大小</span>
+                                            <span className="audio-dim">{t("大小")}</span>
                                             {formatBytes(probe.sizeBytes)}
                                         </Chip>
                                     ) : null}
                                     {probe.bitrate ? (
                                         <Chip>
-                                            <span className="audio-dim">总码率</span>
+                                            <span className="audio-dim">{t("总码率")}</span>
                                             {`${Math.round(probe.bitrate / 1000)} kbps`}
                                         </Chip>
                                     ) : null}
                                     {probe.audio?.codec ? (
                                         <Chip>
-                                            <span className="audio-dim">音频编码</span>
+                                            <span className="audio-dim">{t("音频编码")}</span>
                                             {probe.audio.codec}
                                         </Chip>
                                     ) : null}
                                     {probe.audio?.sampleRate ? (
                                         <Chip>
-                                            <span className="audio-dim">采样率</span>
+                                            <span className="audio-dim">{t("采样率")}</span>
                                             {`${probe.audio.sampleRate} Hz`}
                                         </Chip>
                                     ) : null}
                                     {probe.audio?.channels ? (
                                         <Chip>
-                                            <span className="audio-dim">声道</span>
+                                            <span className="audio-dim">{t("声道")}</span>
                                             {channelsText(probe.audio.channels)}
                                         </Chip>
                                     ) : null}
                                     {probe.video ? (
                                         <Chip>
-                                            <span className="audio-dim">视频</span>
+                                            <span className="audio-dim">{t("视频")}</span>
                                             {`${probe.video.codec ?? ''} ${probe.video.width}x${probe.video.height}`.trim()}
                                         </Chip>
                                     ) : null}
@@ -709,9 +711,9 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
 
                 {/* ── 处理操作 ── */}
                 <Panel>
-                    <PanelHead title="处理操作"/>
+                    <PanelHead title={t("处理操作")}/>
                     <div className="stack-lg">
-                        <div className="audio-ops" role="group" aria-label="处理操作">
+                        <div className="audio-ops" role="group" aria-label={t("处理操作")}>
                             {OPS.map((op) => (
                                 <button
                                     key={op.id}
@@ -743,7 +745,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                                         hint="带「无损」标记的是 WAV / FLAC：做后期就用它们；只是想试听、传手机，MP3 320k 足够。"
                                     >
                                         {formatEntries.length === 0 ? (
-                                            <Finding level="warn" title="格式列表为空">
+                                            <Finding level="warn" title={t("格式列表为空")}>
                                                 没有读到可用的音频格式列表，请刷新页面重试。
                                             </Finding>
                                         ) : (
@@ -760,7 +762,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                                                     >
                             <span className="audio-format-name">
                               {f.label ?? id}
-                                {f.lossless ? <Chip tone="ok">无损</Chip> : null}
+                                {f.lossless ? <Chip tone="ok">{t("无损")}</Chip> : null}
                             </span>
                                                         <span className="audio-format-meta">
                               {f.lossless
@@ -798,7 +800,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                                     </div>
 
                                     {settings.action === 'extract' && (
-                                        <Finding level="info" title="从 MV 里抽出音轨">
+                                        <Finding level="info" title={t("从 MV 里抽出音轨")}>
                                             转 WAV 不会二次损失；视频轨会被丢掉
                                         </Finding>
                                     )}
@@ -813,7 +815,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                                     >
                                         <div className="audio-num-row">
                                             <GlassStepper
-                                                aria-label="变调半音数"
+                                                aria-label={t("变调半音数")}
                                                 min={-24}
                                                 max={24}
                                                 step={1}
@@ -850,7 +852,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                                     >
                                         <div className="audio-num-row">
                                             <GlassStepper
-                                                aria-label="速度倍率"
+                                                aria-label={t("速度倍率")}
                                                 min={0.1}
                                                 max={10}
                                                 step={0.05}
@@ -862,7 +864,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                                                 formatValue={(v) => `×${v}`}
                                             />
                                             <span className="audio-num-note">
-                        {Number(settings.ratio) > 1 ? '加速' : Number(settings.ratio) < 1 ? '减速' : '原速'}
+                        {Number(settings.ratio) >{t(" 1 ? '加速' : Number(settings.ratio) ")}< 1 ? '减速' : '原速'}
                       </span>
                                         </div>
                                     </Field>
@@ -903,13 +905,13 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                                 <>
                                     <Field label="目标响度（LUFS）" hint={LUFS_DESC[String(settings.targetLufs)] ?? ''}>
                                         <GlassSegmentedControl
-                                            aria-label="目标响度"
+                                            aria-label={t("目标响度")}
                                             items={LUFS.map((l) => ({value: l.value, label: l.label}))}
                                             value={String(settings.targetLufs)}
                                             onValueChange={(v) => patch({targetLufs: Number(v)})}
                                         />
                                     </Field>
-                                    <Finding level="info" title="响度标准化">
+                                    <Finding level="info" title={t("响度标准化")}>
                                         分离出来的伴奏通常比人声轻，标准化之后对轨会省事很多。
                                     </Finding>
                                 </>
@@ -973,7 +975,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                     />
 
                     {runErr && (
-                        <Finding level="warn" title="处理失败">
+                        <Finding level="warn" title={t("处理失败")}>
                             {runErr}
                         </Finding>
                     )}
@@ -1032,7 +1034,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                 {/* ── 输出（含改输出目录）── */}
                 <Panel>
                     <PanelHead
-                        title="输出"
+                        title={t("输出")}
                         extra={
                             <Button
                                 size="sm"
@@ -1062,8 +1064,8 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                         >
                             <DirectoryInput
                                 value={settings.outDir}
-                                placeholder="留空 = 写到系统下载目录…"
-                                title="选输出目录"
+                                placeholder={t("留空 = 写到系统下载目录…")}
+                                title={t("选输出目录")}
                                 onToast={onToast}
                                 onChange={(v) => patch({outDir: v, outDirTouched: !!v})}
                             />
@@ -1076,18 +1078,18 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                             <TextInput
                                 value={settings.outName}
                                 spellCheck={false}
-                                placeholder="自动按操作推断，例如 xxx_+3半音.wav"
+                                placeholder={t("自动按操作推断，例如 xxx_+3半音.wav")}
                                 onChange={(e) => patch({outName: e.target.value, nameEdited: true})}
                             />
                         </Field>
 
                         <div className="audio-out-path">
-                            <span className="audio-out-path-label">将写入：</span>
+                            <span className="audio-out-path-label">{t("将写入：")}</span>
                             <span className={sameAsInput ? 'audio-out-same' : ''}>{output || '（还没确定）'}</span>
-                            {sameAsInput && <Chip tone="err">不能覆盖输入文件</Chip>}
+                            {sameAsInput && <Chip tone="err">{t("不能覆盖输入文件")}</Chip>}
                         </div>
 
-                        {fieldErr && <Finding level="warn" title="参数还不完整">{fieldErr}</Finding>}
+                        {fieldErr && <Finding level="warn" title={t("参数还不完整")}>{fieldErr}</Finding>}
                     </div>
                 </Panel>
 

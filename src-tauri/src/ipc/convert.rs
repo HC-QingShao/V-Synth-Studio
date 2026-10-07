@@ -5,8 +5,9 @@
 //! `DragDropEvent::Drop`），而 LibreSVIP 要的本来就是路径。走 base64 要多出 +33% 体积、
 //! 还要在 WebView 与 Rust 两边各存一份。**别把它加回来**。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{Value, json};
 
@@ -340,10 +341,25 @@ pub async fn convert_run(st: super::St<'_>, args: Value) -> Cmd {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "output".into());
             let named = name_template.replace("{name}", &stem);
-            let mut out_path = PathBuf::from(&out_dir).join(format!("{named}.{ext}"));
-            if !overwrite {
-                out_path = unique_path(out_path);
-            }
+            let requested_path = PathBuf::from(&out_dir).join(format!("{named}.{ext}"));
+            // Reserve the name before starting the conversion. A plain exists() check is
+            // racy when two conversion jobs run at the same time.
+            let reservation = if overwrite {
+                None
+            } else {
+                match reserve_unique_path(requested_path.clone()) {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        fail_count += 1;
+                        log_job(&st2, &job_id2, &format!("  ✗ {e}"));
+                        continue;
+                    }
+                }
+            };
+            let out_path = reservation
+                .as_ref()
+                .map(|r| r.path().to_path_buf())
+                .unwrap_or(requested_path);
 
             let root = st2.root.clone();
             let inp = PathBuf::from(input);
@@ -415,11 +431,38 @@ pub async fn convert_run(st: super::St<'_>, args: Value) -> Cmd {
     Ok(json!({ "jobId": job_id }))
 }
 
-/// 不覆盖同名文件：`a.vsqx` 已存在就写 `a (2).vsqx`。
-fn unique_path(p: PathBuf) -> PathBuf {
-    if !p.exists() {
-        return p;
+/// Reserve an output name so concurrent conversion jobs cannot choose the same path.
+static RESERVED_OUTPUTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+fn reserved_outputs() -> &'static Mutex<HashSet<PathBuf>> {
+    RESERVED_OUTPUTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+struct OutputReservation(PathBuf);
+
+impl OutputReservation {
+    fn path(&self) -> &Path {
+        &self.0
     }
+}
+
+impl Drop for OutputReservation {
+    fn drop(&mut self) {
+        if let Ok(mut reserved) = reserved_outputs().lock() {
+            reserved.remove(&self.0);
+        }
+    }
+}
+
+fn reserve_unique_path(p: PathBuf) -> Result<OutputReservation, String> {
+    let mut reserved = reserved_outputs()
+        .lock()
+        .map_err(|_| "输出文件名预留锁已损坏".to_string())?;
+
+    if !p.exists() && reserved.insert(p.clone()) {
+        return Ok(OutputReservation(p));
+    }
+
     let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or_default();
     let stem = p
         .file_stem()
@@ -429,11 +472,46 @@ fn unique_path(p: PathBuf) -> PathBuf {
         .extension()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
+
     for n in 2..1000 {
         let cand = dir.join(format!("{stem} ({n}).{ext}"));
-        if !cand.exists() {
-            return cand;
+        if !cand.exists() && reserved.insert(cand.clone()) {
+            return Ok(OutputReservation(cand));
         }
     }
-    p
+
+    Err(format!(
+        "无法为「{}」分配不冲突的输出文件名（已尝试 999 个候选名）",
+        p.display()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_reservations_get_different_paths() {
+        let base = std::env::temp_dir().join(format!(
+            "vss-output-reservation-{}-{}.vsqx",
+            std::process::id(),
+            crate::config_file::now_millis()
+        ));
+        let first = reserve_unique_path(base.clone()).expect("first reservation");
+        let second = reserve_unique_path(base.clone()).expect("second reservation");
+        assert_ne!(first.path(), second.path());
+        assert_eq!(first.path(), base);
+        assert_eq!(
+            second.path(),
+            base.with_file_name(format!(
+                "{} (2).vsqx",
+                base.file_stem().unwrap().to_string_lossy()
+            ))
+        );
+        drop(first);
+        drop(second);
+        let third = reserve_unique_path(base.clone()).expect("reservation after release");
+        assert_eq!(third.path(), base);
+        drop(third);
+    }
 }

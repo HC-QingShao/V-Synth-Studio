@@ -22,6 +22,7 @@ import {Button} from '@/components/Button'
 import {Panel, PanelHead, Finding} from '@/components/Panel'
 import {SwitchRow} from '@/components/SwitchRow'
 import {getConfig, saveConfig} from '@/lib/config'
+import {useI18n} from '@/lib/i18n'
 import {useWeScan, type WeItem} from '@/lib/wallpaper'
 import {capOk, type AppState} from '@/lib/types'
 import type {ToastFn} from '@/pages/types'
@@ -47,6 +48,7 @@ const TYPE_LABEL: Record<string, string> = {
 const TYPE_UNSUPPORTED = new Set(['web', 'application'])
 
 export function Wallpaper({onToast, state}: {onToast: ToastFn; state: AppState | null}) {
+    const {t} = useI18n()
     const {scan, error, busy, reload} = useWeScan()
     const [sel, setSel] = useState(() => String(getConfig()['wallpaper'] ?? ''))
     const [paused, setPaused] = useState(() => Boolean(getConfig()['wallpaperPaused']))
@@ -99,9 +101,10 @@ export function Wallpaper({onToast, state}: {onToast: ToastFn; state: AppState |
                 </div>
 
                 {!weOk && (
-                    <Finding level="warn" title="这个平台用不了 Wallpaper Engine 壁纸">
-                        {we?.why ?? 'Wallpaper Engine 只有 Windows 版'}。
-                        背景只能用自带的静态图；玻璃材质、主题、配色都不受影响。
+                    <Finding level="warn" title={t("这个平台用不了 Wallpaper Engine 壁纸")}>
+                        {/* 原因来自后端（`platform.rs::caps` 的 `why`），键就是它的中文原文 */}
+                        {t(we?.why ?? 'Wallpaper Engine 只有 Windows 版')}。
+                        {t("背景只能用自带的静态图；玻璃材质、主题、配色都不受影响。")}
                     </Finding>
                 )}
 

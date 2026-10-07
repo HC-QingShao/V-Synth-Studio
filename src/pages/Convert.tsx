@@ -16,6 +16,7 @@ import {useJob} from '@/lib/useJob'
 import type {FormatInfo, Job} from '@/lib/types'
 import type {PageProps} from './types'
 import './Convert.css'
+import {useI18n} from '@/lib/i18n'
 
 /**
  * 工程格式互转（40 种）。
@@ -40,6 +41,7 @@ import './Convert.css'
  * 预检结果只是提示。
  */
 export function Convert({state, onToast}: PageProps) {
+    const {t} = useI18n()
     const formats = useMemo(() => state?.formats ?? [], [state])
     const cfg = state?.config as Record<string, unknown> | undefined
     const defaultOutDir = state?.paths?.outputDir ?? ''
@@ -291,7 +293,7 @@ export function Convert({state, onToast}: PageProps) {
             <div className="convert-col">
                 <Panel>
                     <PanelHead
-                        title="来源工程"
+                        title={t("来源工程")}
                         desc="把工程文件拖进来，或点「选择文件」挑"
                         extra={<Chip>{availableCount} 种格式可用</Chip>}
                     />
@@ -301,7 +303,7 @@ export function Convert({state, onToast}: PageProps) {
                 根本不会触发（Tauri 默认把拖放截走了）。`data-over` 跟着拖放状态亮。 */}
                         <div className="convert-drop" data-over={dragging ? 'true' : undefined}>
                             <Icon name="upload" size={22}/>
-                            <span className="convert-drop-title">把工程文件拖到这里</span>
+                            <span className="convert-drop-title">{t("把工程文件拖到这里")}</span>
                         </div>
 
                         <div className="btn-row">
@@ -315,7 +317,7 @@ export function Convert({state, onToast}: PageProps) {
 
                         <div className="convert-sources">
                             {sources.length === 0 ? (
-                                <div className="convert-empty">还没有添加文件</div>
+                                <div className="convert-empty">{t("还没有添加文件")}</div>
                             ) : (
                                 sources.map((s) => (
                                     <div className="convert-source" key={s.key}>
@@ -346,9 +348,9 @@ export function Convert({state, onToast}: PageProps) {
                 </Panel>
 
                 <Panel>
-                    <PanelHead title="目标格式" desc="转换后要拿去哪个编辑器继续做"/>
+                    <PanelHead title={t("目标格式")} desc="转换后要拿去哪个编辑器继续做"/>
                     {groups.length === 0 ? (
-                        <p className="muted">还没有读到可用的格式。</p>
+                        <p className="muted">{t("还没有读到可用的格式。")}</p>
                     ) : (
                         <div className="convert-formats">
                             {groups.map(([group, list]) => (
@@ -387,7 +389,7 @@ export function Convert({state, onToast}: PageProps) {
             {/* ══════════════════════ 右：输出 + 选项 + 预检 + 执行 ══════════════════════ */}
             <div className="convert-col">
                 <Panel>
-                    <PanelHead title="输出设置"/>
+                    <PanelHead title={t("输出设置")}/>
                     <div className="stack">
                         <Field
                             label="输出目录"
@@ -400,7 +402,7 @@ export function Convert({state, onToast}: PageProps) {
                             <DirectoryInput
                                 value={outDir}
                                 onChange={setOutDir}
-                                title="选输出目录"
+                                title={t("选输出目录")}
                                 onToast={onToast}
                             />
                         </Field>
@@ -433,7 +435,7 @@ export function Convert({state, onToast}: PageProps) {
                 </Panel>
 
                 <Panel>
-                    <PanelHead title="转换选项" desc="默认与官方一致"/>
+                    <PanelHead title={t("转换选项")} desc="默认与官方一致"/>
                     <DisclosureGroup
                         className="convert-opts-fold"
                         label="展开转换选项"
@@ -441,7 +443,7 @@ export function Convert({state, onToast}: PageProps) {
                     >
                         <div className="convert-opts">
                             <section className="convert-opt-group">
-                                <p className="group-label">导入（默认全开）</p>
+                                <p className="group-label">{t("导入（默认全开）")}</p>
                                 <div className="convert-opt-grid">
                                     {IMPORT_SWITCHES.map(([key, label, desc]) => (
                                         <SwitchRow
@@ -485,7 +487,7 @@ export function Convert({state, onToast}: PageProps) {
                             </section>
 
                             <section className="convert-opt-group">
-                                <p className="group-label">效果处理（默认全关）</p>
+                                <p className="group-label">{t("效果处理（默认全关）")}</p>
                                 <div className="convert-opt-grid">
                                     {MIDDLEWARE_SWITCHES.map(([key, label, desc]) => (
                                         <SwitchRow
@@ -500,7 +502,7 @@ export function Convert({state, onToast}: PageProps) {
                                 <div className="convert-opt-fields">
                                     <Field label="音高变调（半音）" hint="正数升调、负数降调；要开「音高变调」才会生效">
                                         <GlassStepper
-                                            aria-label="音高变调半音数"
+                                            aria-label={t("音高变调半音数")}
                                             min={-24}
                                             max={24}
                                             step={1}
@@ -521,7 +523,7 @@ export function Convert({state, onToast}: PageProps) {
                             </section>
 
                             <section className="convert-opt-group">
-                                <p className="group-label">导出（只对支持这些开关的目标格式有意义）</p>
+                                <p className="group-label">{t("导出（只对支持这些开关的目标格式有意义）")}</p>
                                 <div className="convert-opt-fields">
                                     <Field label="VSQX 文件版本" hint="写 VSQX 时用哪一版；别的格式忽略">
                                         <Picker
@@ -555,7 +557,7 @@ export function Convert({state, onToast}: PageProps) {
 
                 <Panel>
                     <PanelHead
-                        title="转换预检"
+                        title={t("转换预检")}
                         desc="点了才跑；不预检也能直接转换，结果只是提示"
                         extra={
                             <Button
@@ -580,15 +582,15 @@ export function Convert({state, onToast}: PageProps) {
 
                         {reports.length > 0 ? (
                             okReports === 0 ? (
-                                <Finding level="warn" title="这批文件都读不了">
+                                <Finding level="warn" title={t("这批文件都读不了")}>
                                     工程读不出来通常意味着文件损坏，或不是该扩展名对应的格式。
                                 </Finding>
                             ) : warnCount > 0 ? (
-                                <Finding level="warn" title="目标格式装不下下列数据，转换后会丢失：">
+                                <Finding level="warn" title={t("目标格式装不下下列数据，转换后会丢失：")}>
                                     {`发现 ${warnCount} 项失配`}
                                 </Finding>
                             ) : (
-                                <Finding level="info" title="预检通过">
+                                <Finding level="info" title={t("预检通过")}>
                                     没有发现数据失配，可以放心转换。
                                 </Finding>
                             )
@@ -606,10 +608,10 @@ export function Convert({state, onToast}: PageProps) {
                                     {r.tracks !== undefined ? (
                                         <Chip>{`${r.tracks ?? 0} 轨 / ${r.notes ?? 0} 音符`}</Chip>
                                     ) : null}
-                                    {r.error ? <Chip tone="err">读取失败</Chip> : null}
+                                    {r.error ? <Chip tone="err">{t("读取失败")}</Chip> : null}
                                 </div>
                                 {r.error ? (
-                                    <Finding level="warn" title="预检失败">
+                                    <Finding level="warn" title={t("预检失败")}>
                                         {r.error}
                                     </Finding>
                                 ) : (
