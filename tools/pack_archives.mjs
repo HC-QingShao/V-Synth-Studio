@@ -69,6 +69,14 @@ function parseArgs(argv) {
 export async function main(argv = process.argv.slice(2)) {
   const a = parseArgs(argv)
 
+  /* ⚠️ 只在 Windows 上打：归档的内容（`ffmpeg.exe` / `yt-dlp.exe`…）与**文件名**
+     都是 Windows 的，而两端的归档共用一个名字 —— 在 macOS 上打会产出一份同名的
+     另一个平台的包，传上去之后没有任何地方看得出来。 */
+  if (assets.PLATFORM !== 'windows') {
+    say(`打归档只在 Windows 上做（当前是 ${assets.PLATFORM}）：归档内容与文件名都是 Windows 产物。`)
+    return 1
+  }
+
   // 缺件的包在用户机器上才发现，所以这里先按表核一遍（它同时报出每件实测的东西）。
   say('按表核对源目录')
   const bad = verify(PLAN.map((p) => assets.byId(p.id)), HERE)

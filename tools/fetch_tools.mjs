@@ -12,7 +12,8 @@
  * 约 200MB）不入库，但它由 tauri.conf.json 的 `bundle.resources` 打进安装包，
  * 缺了程序就没有音频转换 / MV 下载 / 工程格式互转 / 人声转 MIDI。
  *
- * 各件产物**互相独立**：各自一个上游、各自判「缺不缺」。URL 见 `UPSTREAM`（按平台分列）。
+ * 各件产物**互相独立**：各自一个上游、各自判「缺不缺」。URL 见 `UPSTREAM`（按平台分列，
+ * 有的件还要按架构分 —— macOS 的 arm64 与 x86_64 是两份不同的发布物）。
  *
  * ── 三条来源，按这个顺序试 ──────────────────────────────────────────
  *
@@ -20,8 +21,14 @@
  *   2. 自建归档（`assets.mjs::SELF_HOST_BASE`，布局与本仓库一致，境内直连可用）；
  *   3. 上游各发布页（`UPSTREAM`，GitHub，境内常不通）。
  *
+ * ⚠️ **第 2 条只有 Windows**：那份 `tools.zip` 里是 `ffmpeg.exe` / `yt-dlp.exe`，
+ * 别的平台上命不中任何一件。非 Windows 直接走上游（`--local` 会明确报错，不偷偷联网）。
+ *
  * ⚠️ 归档里可能缺件（旧归档就没有 onnxruntime），所以解完要**重新判一次**，
  * 剩下的回上游补 —— 不能让「归档解过了」被当成「齐了」。
+ *
+ * ⚠️ 解出来的二进制在 mac/Linux 上要自己补可执行位（`chmodX`）：压缩包里的权限位
+ * 不跟着 `writeFileSync` 走，少了它 `Command::new` 直接 `EACCES`。
  *
  * ⚠️ 「运行期去哪儿找」只在 `src-tauri/src/artifact/mod.rs` 那张表里写一次。
  * 下面 `verify()` 列的是「打包前必须存在」的文件，与 `build.rs` 的 MUST_HAVE 对应 ——
@@ -42,6 +49,9 @@ import {archiveSuffix, extractAny, findOne, obtainArchive} from './archive.mjs'
 // 三端各取各的上游二进制，落点形状一致（`tools/ffmpeg/bin/ffmpeg`…），
 // 只是文件名在 Windows 上带 `.exe`。
 const PLATFORM = {win32: 'windows', darwin: 'macos'}[process.platform] || 'linux'
+
+/** 目标架构（`arm64` / `x64`）。上游有的件按架构分开发布物，取错了到用户机器上才现形。 */
+const ARCH = process.arch
 const MARK_ROOT = assets.ROOT
 const MARK_WRITABLE = assets.WRITABLE
 
@@ -56,29 +66,50 @@ const UPSTREAM = {
   ffmpeg: {
     windows: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip',
     linux: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz',
-    // BtbN 不出 macOS 档；evermeet.cx 是 macOS ffmpeg 的常用发布点。
-    macos: 'https://evermeet.cx/ffmpeg/getrelease/zip',
+    /* BtbN 不出 macOS 档，而 macOS 上的静态构建几乎都是 GPL。挑 jellyfin-ffmpeg 的可携包：
+       GitHub 上钉 tag、全功能（它本来就是给转码用的），本程序要的 `atempo` / `asetrate` /
+       `loudnorm` / mp4 与 matroska 的拆与合都在里面。
+       ⚠️ 别换成为省体积的「纯音频」构建（acoustid 那档 LGPL）：它没有那几个滤镜，
+       变调变速与响度归一化会直接失败。
+       ⚠️ 许可是 GPL —— 与本程序（GPL-3.0）同系，随包分发无冲突（见 docs/THIRD-PARTY-NOTICES.md）。
+       ⚠️ 它是 `.tar.xz`：解它要系统的 `xz`（Node 没有 liblzma）。 */
+    macos: {
+      arm64: 'https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-1/jellyfin-ffmpeg_8.1.3-1_portable_macarm64-gpl.tar.xz',
+      x64: 'https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-1/jellyfin-ffmpeg_8.1.3-1_portable_mac64-gpl.tar.xz',
+    },
   },
   ytdlp: {
     windows: 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe',
     linux: 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux',
     macos: 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_macos',
   },
-  // ⚠️ LibreSVIP 只发 Windows 构建；其余平台这一件补不了（见 sourceOf 的报错）。
+  // LibreSVIP 的 CLI 三端都发（`*-CLI-<版本>.<平台>-<架构>.tar.gz`）。
+  // ⚠️ macOS 的包里有符号链接（`_internal/Python`），解压器要真的建出链接来。
   libresvip: {
     windows: 'https://github.com/SoulMelody/LibreSVIP/releases/download/v2.9.0/LibreSVIP-CLI-2.9.0.win-amd64.zip',
+    macos: {
+      arm64: 'https://github.com/SoulMelody/LibreSVIP/releases/download/v2.9.0/LibreSVIP-CLI-2.9.0.macos-arm64.tar.gz',
+      x64: 'https://github.com/SoulMelody/LibreSVIP/releases/download/v2.9.0/LibreSVIP-CLI-2.9.0.macos-x86_64.tar.gz',
+    },
   },
   // ONNX Runtime 官方 release。整包里只拎出那一个动态库。
   onnxruntime: {
     windows: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip',
     linux: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz',
-    macos: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-arm64-1.23.2.tgz',
+    macos: {
+      arm64: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-arm64-1.23.2.tgz',
+      x64: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz',
+    },
   },
 }
 
+/** 某件产物在本平台的地址。值可以是一串、也可以按架构分列（`{arm64, x64}`）。 */
 function sourceOf(name) {
-  const url = UPSTREAM[name][PLATFORM]
-  if (!url) throw new Error(`${name} 没有 ${PLATFORM} 的上游地址（上游只发了别的平台）`)
+  const per = UPSTREAM[name][PLATFORM]
+  const url = typeof per === 'string' ? per : per?.[ARCH]
+  if (!url) {
+    throw new Error(`${name} 没有 ${PLATFORM}/${ARCH} 的上游地址（上游只发了别的平台或架构）`)
+  }
   return url
 }
 
@@ -124,11 +155,28 @@ function needRel(name) {
   return `onnxruntime/${dll}`
 }
 
+/**
+ * 把落好的二进制标成可执行。
+ *
+ * ⚠️ **必须补这一步**：`archive.mjs` 解出来的文件是 `fs.writeFileSync` 写的，
+ * 压缩包里的权限位（tar 的 mode、zip 的外部属性）**一律不带过来**，于是 mac/Linux 上
+ * 拿到的是 0644 —— `Command::new` 直接 `EACCES`，症状是「工具明明在，却说缺」。
+ */
+function chmodX(file) {
+  if (PLATFORM === 'windows') return
+  fs.chmodSync(file, 0o755)
+}
+
+/** 上游只给一个**裸二进制**（不是压缩包）的件 —— 直接下到落点，不解压。 */
+const BARE_BINARY = new Set(['ytdlp'])
+
 function installFfmpeg(ex, base) {
   // ⚠️ **只要 ffmpeg**，不拷 ffprobe —— 媒体信息由 `ffmpeg -i` 自己读（见 audio.rs）。
   const found = findOne(ex, exe('ffmpeg'))
   if (!found) throw new Error(`包里找不到 ${exe('ffmpeg')}（上游布局变了？看 ${ex}）`)
-  copyFile(found, path.join(base, 'ffmpeg', 'bin', exe('ffmpeg')))
+  const dest = path.join(base, 'ffmpeg', 'bin', exe('ffmpeg'))
+  copyFile(found, dest)
+  chmodX(dest)
 }
 
 function installLibresvip(ex, base) {
@@ -138,13 +186,33 @@ function installLibresvip(ex, base) {
   const dst = path.join(base, 'libresvip', 'libresvip-cli')
   rmrf(dst)
   mkdirp(path.dirname(dst))
-  fs.renameSync(path.dirname(found), dst)
+  // 跨设备 rename 会 EXDEV（`--root` 指到别的盘时），拷过去更稳。
+  // ⚠️ `verbatimSymlinks` 必须开着：macOS 的包里 `_internal/Python` 是**相对**符号链接，
+  //    默认行为会把链接目标按源目录重算，落到新位置就可能指空。
+  fs.cpSync(path.dirname(found), dst, {recursive: true, verbatimSymlinks: true})
+  // 入口那个二进制要可执行；`_internal/` 里的 dylib 不需要（dlopen 不看权限位）
+  chmodX(path.join(dst, path.basename(found)))
+}
+
+/**
+ * 上游包里那个动态库的**真身**。
+ *
+ * ⚠️ macOS / Linux 的包里它带版本号（`libonnxruntime.1.23.2.dylib`），不带版本号的那个
+ * 是**符号链接**；而 `walkFiles` 不跟符号链接（见 lib.mjs），照名字找会找不到。
+ * 落点仍然写成不带版本号的名字 —— `artifact/mod.rs` 的 `NameKind::Dll` 认的就是它。
+ */
+function onnxruntimeSource(ex, name) {
+  const direct = findOne(ex, name)
+  if (direct) return direct
+  const stem = name.replace(/\.(dylib|so)$/, '')
+  const versioned = new RegExp(`^${stem}\\.\\d[^/]*\\.(dylib|so)$`)
+  return walkFiles(ex).find((f) => versioned.test(path.basename(f))) ?? null
 }
 
 function installOnnxruntime(ex, base) {
   // 只拎出那一个动态库（含相邻的 providers_shared），头文件/.lib/PDB 一律不落地。
   const name = {windows: 'onnxruntime.dll', macos: 'libonnxruntime.dylib'}[PLATFORM] || 'libonnxruntime.so'
-  const found = findOne(ex, name)
+  const found = onnxruntimeSource(ex, name)
   if (!found) throw new Error(`包里找不到 ${name}（上游布局变了？看 ${ex}）`)
   const dstDir = path.join(base, 'onnxruntime')
   mkdirp(dstDir)
@@ -168,13 +236,25 @@ export async function fetchTools(tmp, force, root, only = null, local = null) {
   }
 
   /* 先试归档（一次补齐整件，且是境内可达/本地的来源）。解完必须重新判一次：
-     归档可能缺件（旧归档没有 onnxruntime），而「解过了」不等于「齐了」。 */
-  const zip = await obtainArchive({
-    file: assets.SELF_HOST_ARCHIVE.tools,
-    tmp,
-    localDir: local,
-    url: assets.selfHostUrl('tools'),
-  })
+     归档可能缺件（旧归档没有 onnxruntime），而「解过了」不等于「齐了」。
+
+     ⚠️ **自建归档只有 Windows 那一份**（`tools.zip` 里是 `ffmpeg.exe` / `yt-dlp.exe`…），
+     别的平台上它一件都命不中，白下 188 MB。所以非 Windows 直接走上游；
+     `--local` 是明确要求离线，那时归档对不上就没退路，直接报错而不是偷偷联网。 */
+  if (PLATFORM !== 'windows' && local) {
+    throw new Error(
+      `--local / VSS_ASSETS_LOCAL 里的 ${assets.SELF_HOST_ARCHIVE.tools} 是 Windows 的产物，` +
+      `${PLATFORM} 上命不中任何一件 —— 撤掉它，走上游补齐。`
+    )
+  }
+  const zip = PLATFORM === 'windows'
+    ? await obtainArchive({
+        file: assets.SELF_HOST_ARCHIVE.tools,
+        tmp,
+        localDir: local,
+        url: assets.selfHostUrl('tools'),
+      })
+    : null
   if (zip) {
     say(`  从归档解到 ${base}`)
     extractAny(zip, base, tmp)
@@ -199,9 +279,12 @@ export async function fetchTools(tmp, force, root, only = null, local = null) {
     say(`  ── ${PARTS[name].what} ──`)
     try {
       const url = sourceOf(name)
-      // `yt-dlp` 的上游就是一个裸二进制，不是压缩包 —— 直接下到目标位置。
-      if (name === 'ytdlp') {
-        await download(url, path.join(base, needRel(name)))
+      // 裸二进制（`yt-dlp` 的上游就是一个可执行文件）：直接下到目标位置，不用解压。
+      if (BARE_BINARY.has(name)) {
+        const dest = path.join(base, needRel(name))
+        mkdirp(path.dirname(dest))
+        await download(url, dest)
+        chmodX(dest)
         continue
       }
       const z = path.join(tmp, `${name}${archiveSuffix(url)}`)

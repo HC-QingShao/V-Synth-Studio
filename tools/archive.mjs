@@ -11,6 +11,10 @@
  *
  * 安全：条目名一律先规范化再落到 `into` 下，越界的当场报错 —— 不静默改写。
  * 与 Rust 侧（`svsep.rs` 用 `enclosed_name()`）取同一条线。
+ *
+ * tar 里只认四种条目：常规文件、目录、符号链接、硬链接（别的类型跳过）。
+ * ⚠️ **符号链接必须建出来**：LibreSVIP 的 macOS 包靠 `_internal/Python` 那几条链接
+ * 找解释器，漏了不报错、只是那个程序起不来。
  */
 
 import {spawnSync} from 'node:child_process'
@@ -113,6 +117,36 @@ function untar(tarbuf, base) {
       fs.writeFileSync(dest, tarbuf.subarray(dataStart, dataEnd))
     } else if (type === '5') {
       mkdirp(safeJoin(base, name))
+    } else if (type === '2') {
+      /* 符号链接：LibreSVIP 的 macOS 包里有 4 条（`_internal/Python ->
+         Python.framework/Versions/3.14/Python` 等），PyInstaller 的包靠它们找解释器。
+         不建出来的话**不报错**，只是那个程序在 mac 上起不来。 */
+      const dest = safeJoin(base, name)
+      const target = str(157, 100)
+      /* 只查「链接指向解压目录外面」这一条：越界的链接会让**后面**的条目顺着它写到
+         目标之外，而条目名本身是干净的（`safeJoin` 拦不住这种情况）。 */
+      const outside = path.relative(base, path.resolve(path.dirname(dest), target))
+      if (path.isAbsolute(target) || outside.startsWith('..')) {
+        throw new Error(`压缩包里的链接指向解压目录外面：${name} -> ${target}`)
+      }
+      if (process.platform === 'win32') {
+        // Windows 建符号链接要开发者模式或管理员权限；本仓在 Windows 上的产物全是 zip
+        continue
+      }
+      mkdirp(path.dirname(dest))
+      fs.rmSync(dest, {force: true})
+      fs.symlinkSync(target, dest)
+    } else if (type === '1') {
+      // 硬链接：目标是在这份 tar 里**前面**出现过的条目，照它再挂一个名字
+      const dest = safeJoin(base, name)
+      const target = str(157, 100)
+      mkdirp(path.dirname(dest))
+      fs.rmSync(dest, {force: true})
+      try {
+        fs.linkSync(safeJoin(base, target), dest)
+      } catch {
+        fs.copyFileSync(safeJoin(base, target), dest)
+      }
     }
     p = next
   }

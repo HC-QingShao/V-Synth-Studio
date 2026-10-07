@@ -45,6 +45,19 @@ export const HOST_CDN = 'cdn'            // 123 云盘 CDN，用户点按钮时�
 export const HOST_UPSTREAM = 'upstream'  // 上游官网，构建时补齐脚本下
 export const HOST_REPO = 'repo'          // 就在仓库里
 
+// ── 平台 ────────────────────────────────────────────────────────────
+// 随包的几个二进制是**平台专属**的（ffmpeg / yt-dlp / LibreSVIP / onnxruntime）：
+// 补哪一份、落点叫什么名字，跟着编译所在的平台变。名字形状只在这里定义一次 ——
+// `fetch_tools.mjs`（补）与 `build.rs::MUST_HAVE`（查）必须与它一致。
+export const PLATFORM = {win32: 'windows', darwin: 'macos'}[process.platform] || 'linux'
+
+/** 可执行文件的名字：Windows 带 `.exe`，其余平台裸名。 */
+export const exeName = (base) => (PLATFORM === 'windows' ? `${base}.exe` : base)
+
+/** 动态库的名字：win `x.dll` / mac `libx.dylib` / linux `libx.so`。 */
+export const dylibName = (base) =>
+  ({windows: `${base}.dll`, macos: `lib${base}.dylib`})[PLATFORM] || `lib${base}.so`
+
 // ── 上游：JIZURA（文字 PV 的前端）────────────────────────────────────
 // 钉 commit SHA 而非分支名：`index.html` 要按字节打补丁，上游一动补丁就对不上。
 // 查上游新版本：`git ls-remote https://github.com/852wa/JIZURA main`
@@ -108,13 +121,13 @@ export const ARTIFACTS = [
     into: `${ROOT}/tools`,
     strip: '',
     need: [
-      need('ffmpeg/bin/ffmpeg.exe'),
-      need('yt-dlp.exe'),
-      need('libresvip/libresvip-cli/libresvip-cli.exe'),
+      need(`ffmpeg/bin/${exeName('ffmpeg')}`),
+      need(exeName('yt-dlp')),
+      need(`libresvip/libresvip-cli/${exeName('libresvip-cli')}`),
       need('libresvip/libresvip-cli/_internal/libresvip/plugins', null, 'dir', 1),
       // 人声转 MIDI 的 ONNX Runtime（随包，运行期不再下载）。
-      // ⚠️ 文件名必须与 `artifact/mod.rs` 里 `midi.ort` 的 `NameKind::Dll` 一致。
-      need('onnxruntime/onnxruntime.dll'),
+      // ⚠️ 名字必须与 `artifact/mod.rs` 里 `midi.ort` 的 `NameKind::Dll` 一致。
+      need(`onnxruntime/${dylibName('onnxruntime')}`),
     ],
     host: HOST_UPSTREAM,
     bundled: true,
@@ -326,8 +339,18 @@ export function checkTablesAgree(root = HERE) {
   if (!fs.existsSync(buildRs)) return [`找不到 ${buildRs}，无法核对`]
 
   const text = fs.readFileSync(buildRs, 'utf8')
+  /* `MUST_HAVE` 的每一行是 `(路径, 说明, 平台)`。平台那一列取 `ANY` / `WIN` / `MAC`
+     三个常量名（build.rs 那边展开成 `CARGO_CFG_TARGET_OS` 的取值）。
+     ⚠️ 收尾符要同时认 `)` 与 `,`：表里既有写成一行的、也有折成三行的。
+     ⚠️ 只对照**本平台**的行：另一平台的二进制在这台机器上本来就不该存在，
+     参与对照必然红。 */
+  const TAG = {ANY: null, WIN: 'windows', MAC: 'macos'}
   const listed = new Set()
-  for (const m of text.matchAll(/^\s*\(\s*"([^"]+)"\s*,/gm)) listed.add(m[1])
+  for (const m of text.matchAll(/^\s*\(\s*"([^"]+)"\s*,\s*"[^"]*"\s*,\s*(ANY|WIN|MAC)\s*[),]/gm)) {
+    const only = TAG[m[2]]
+    if (only && only !== PLATFORM) continue
+    listed.add(m[1])
+  }
   if (listed.size === 0) return ['build.rs 里没抠出 MUST_HAVE 的路径（正则失效了？）']
 
   const expected = new Set()

@@ -15,18 +15,18 @@
 //!
 //! ## 什么时候检查
 //!
-//! 只在 **Windows 的 release 构建**上查（判据见 [`should_check`]）。
+//! 只在 **Windows / macOS 的 release 构建**上查（判据见 [`should_check`]）。
 //!
 //! ⛔ **别用 `TAURI_ENV_DEBUG` 当判据。** 文档说它「debug 时是 true，否则不设」，
 //! 实际上在 `cargo build` 与 `cargo build --release` 下**从来没被设置过**
 //! —— 它由 tauri-cli 设给 `before*Command` 钩子，不是设给 build script 的。
 //! 拿它当条件会写出一条永不触发的假防线。
 //!
-//! 为什么限定 Windows：Linux 上这三个产物**本来就该缺** —— `artifact` 表的
+//! 为什么不含 Linux：那边这几个产物**本来就该缺** —— `artifact` 表的
 //! `path_names` 允许退回系统 PATH（`pacman -S ffmpeg` 就够了），在那边查是误报。
 //!
 //! 为什么限定 release：开发时没拉大件是常态（`cargo test` 得能跑），而且
-//! 288 MB 每次构建全量拷贝本来就慢。Windows + release 是「要出货」的那个组合。
+//! 288 MB 每次构建全量拷贝本来就慢。要出货的那个组合才查。
 //!
 //! 绕过（比如只想编一个不带工具的 Windows release 二进制）：
 //! 设 `VSS_SKIP_BUNDLE_CHECK=1`。本机验证这条防线真的会响：设 `VSS_CHECK_BUNDLE=1`。
@@ -57,25 +57,49 @@ use std::path::Path;
 ///
 /// `artifact/mod.rs` 那张 Rust 表管**运行期去哪儿找**（含系统 PATH 兜底、
 /// 用户可配置落点）—— 那是另一个关注点，别合并。
-const MUST_HAVE: &[(&str, &str)] = &[
-    ("../data/resources.json", "资源库清单（resolve_paths 的启动哨兵）"),
-    ("../data/pinyin.json", "拼音词典"),
-    ("../tools/ffmpeg/bin/ffmpeg.exe", "ffmpeg（音频转换 / 合并 / 扒谱解码）"),
-    ("../tools/yt-dlp.exe", "yt-dlp（MV 解析下载）"),
+/// 一条产物只属于哪个目标平台。值就是 `CARGO_CFG_TARGET_OS` 的取值（`any` = 都算）。
+///
+/// ⚠️ 平台那一列不是装饰：随包的二进制是**平台专属**的（`ffmpeg.exe` vs `ffmpeg`、
+/// `onnxruntime.dll` vs `libonnxruntime.dylib`），只列 Windows 那套会让别的平台在这里
+/// 静默放行 —— 而放行的后果正是这个文件要拦的那种「装出来缺功能」。
+const ANY: &str = "any";
+const WIN: &str = "windows";
+const MAC: &str = "macos";
+
+const MUST_HAVE: &[(&str, &str, &str)] = &[
+    ("../data/resources.json", "资源库清单（resolve_paths 的启动哨兵）", ANY),
+    ("../data/pinyin.json", "拼音词典", ANY),
+    ("../tools/ffmpeg/bin/ffmpeg.exe", "ffmpeg（音频转换 / 合并 / 扒谱解码）", WIN),
+    ("../tools/ffmpeg/bin/ffmpeg", "ffmpeg（同左，macOS 版）", MAC),
+    ("../tools/yt-dlp.exe", "yt-dlp（MV 解析下载）", WIN),
+    ("../tools/yt-dlp", "yt-dlp（同左，macOS 版）", MAC),
     (
         "../tools/libresvip/libresvip-cli/libresvip-cli.exe",
         "LibreSVIP（工程格式互转）",
+        WIN,
+    ),
+    (
+        "../tools/libresvip/libresvip-cli/libresvip-cli",
+        "LibreSVIP（同左，macOS 版）",
+        MAC,
     ),
     /* ⚠️ 这条必须留着：exe 在、插件目录空 = 工程格式互转认不出任何格式，且不报错。
        只查 exe 是不够的，所以这里连插件目录一起数。 */
     (
         "../tools/libresvip/libresvip-cli/_internal/libresvip/plugins",
         "LibreSVIP 的格式插件（目录空 = 认不出任何格式）",
+        ANY,
     ),
     /* 人声转 MIDI 的 ONNX Runtime。随包，运行期不再下载 —— 缺了「开始扒谱」起不来。 */
     (
         "../tools/onnxruntime/onnxruntime.dll",
         "ONNX Runtime（人声转 MIDI 的推理运行时）",
+        WIN,
+    ),
+    (
+        "../tools/onnxruntime/libonnxruntime.dylib",
+        "ONNX Runtime（同左，macOS 版）",
+        MAC,
     ),
     /* jizura 经 `frontendDist` 进包（Vite 把 `public/` 拷进 `dist/`），机制与
        `bundle.resources` 不同，但缺了的后果一样 —— PV 页静默少字体。这四条都不是
@@ -83,15 +107,18 @@ const MUST_HAVE: &[(&str, &str)] = &[
     (
         "../public/vendor/jizura/index.html",
         "JIZURA 页面（PV 的 iframe 指向它；从上游取并打补丁）",
+        ANY,
     ),
-    ("../public/vendor/jizura/LICENSE", "JIZURA 的 MIT 许可（从上游取）"),
+    ("../public/vendor/jizura/LICENSE", "JIZURA 的 MIT 许可（从上游取）", ANY),
     (
         "../public/vendor/jizura/fonts.css",
         "JIZURA 字体清单（由 tools/fetch_jizura_fonts.mjs 生成）",
+        ANY,
     ),
     (
         "../public/vendor/jizura/fonts",
         "JIZURA 字体（2000+ 个 woff2，由 tools/fetch_jizura_fonts.mjs 抓）",
+        ANY,
     ),
 ];
 
@@ -116,7 +143,7 @@ fn should_check(target_os: &str, profile: &str, forced: bool, skipped: bool) -> 
     if skipped {
         return false; // 跳过优先于强制，否则「绕过」没法用
     }
-    forced || (target_os == "windows" && profile == "release")
+    forced || (matches!(target_os, WIN | MAC) && profile == "release")
 }
 
 fn check_resources() {
@@ -129,10 +156,13 @@ fn check_resources() {
         return;
     }
 
+    /* 只查**这个目标平台**的那些 —— 另一个平台的二进制在交叉编译/本机构建里本来就不该在，
+       查它必然误报（`ffmpeg.exe` 在 mac 上永远不会存在）。 */
     let missing: Vec<String> = MUST_HAVE
         .iter()
-        .filter(|(rel, _)| !Path::new(rel).exists())
-        .map(|(rel, what)| format!("  {rel}  ← {what}"))
+        .filter(|(_, _, only)| *only == ANY || *only == target_os)
+        .filter(|(rel, _, _)| !Path::new(rel).exists())
+        .map(|(rel, what, _)| format!("  {rel}  ← {what}"))
         .collect();
 
     if missing.is_empty() {
@@ -144,7 +174,7 @@ fn check_resources() {
          这些大件不入库，缺的两块来源不同、由两个脚本各自负责：\n  \
          · tools/                      → node tools/fetch_tools.mjs\n  \
          · public/vendor/jizura/       → node tools/fetch_jizura_fonts.mjs\n\
-         只想编个不带这些的 Windows release：设 VSS_SKIP_BUNDLE_CHECK=1。\n\
+         只想编个不带这些的 release：设 VSS_SKIP_BUNDLE_CHECK=1。\n\
          详见 如何编译打包.md 第二节。",
         missing.join("\n")
     );
