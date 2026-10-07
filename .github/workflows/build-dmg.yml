@@ -114,11 +114,24 @@ jobs:
           mv "$old" "$new"
           echo "DMG: $new"
 
+      # ⚠️ 与 MSI 那条一样：产物**先**传成 build artifact，再跑冒烟。这样万一冒烟红了，
+      #    DMG 仍然能在 Actions 页面下载到（少一次「白等十分钟什么都没拿到」）。
+      - name: 传 DMG（build artifact）
+        uses: actions/upload-artifact@v7
+        with:
+          name: v-synth-studio-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error      # 没打出 DMG 却"成功"，比失败更糟
+
       # 让「装出来是对的」有证据，而不是只看编译退出码。macOS 上这件事比 MSI 那边好办 ——
       # `.app` 就是个目录，直接查里面有什么，不用去读安装包的 File 表。
       #
+      # ⚠️ 路径按 `bundle.resources` 的**映射目标名**写：`"../data/resources.json"`
+      #    映射到 `"data/resources.json"`，落点就是 `Contents/Resources/data/resources.json`
+      #    （`src-tauri/tauri.conf.json`，与 `lib.rs::resolve_paths` 查的路径是同一个）。
+      #
       # ⚠️ 前端与 jizura **不在这里面**：`frontendDist = dist/` 被 tauri-codegen
-      # 嵌进可执行文件，磁盘上查不到。所以它靠**体积**兜一道（见下面第三条）。
+      # 嵌进可执行文件，磁盘上查不到。所以它靠**体积**兜一道（见下面第四条）。
       - name: 冒烟（查 .app 里的产物 + 架构 + 体积）
         run: |
           set -euo pipefail
@@ -126,10 +139,13 @@ jobs:
           RES="$APP/Contents/Resources"
           BIN="$APP/Contents/MacOS/v-synth-studio"
           echo "app: $APP"
+          # 出问题时第一眼要看的就是这棵树，所以先打一层（`sed` 读全量，不用 `head`：
+          # 下游提前关管道会给上游 SIGPIPE，配上 `pipefail` 就是假失败）
+          find "$RES" -maxdepth 2 -mindepth 1 | sort | sed -n '1,25p'
 
           # ① `bundle.resources` 真去装的那几项（名字按平台走：mac 上不带 .exe、
           #    动态库是 lib*.dylib）。少打包是**静默**的，所以逐条查。
-          for f in resources.json pinyin.json \
+          for f in data/resources.json data/pinyin.json \
                    tools/ffmpeg/bin/ffmpeg \
                    tools/yt-dlp \
                    tools/libresvip/libresvip-cli/libresvip-cli \
@@ -162,7 +178,8 @@ jobs:
           # ⑤ **真把它们跑一遍**。架构对不对、动没动态库、包解出来完不完整 ——
           #    只有真执行才知道，而这些都是到用户手里才现形的那一类。
           FF="$RES/tools/ffmpeg/bin/ffmpeg"
-          "$FF" -version | head -1
+          ver=$("$FF" -version 2>&1)
+          echo "$ver" | sed -n '1p'
           # 音频页要用的编码器必须都在（LGPL/GPL 构建的差别就在这儿）
           encs=$("$FF" -hide_banner -encoders 2>/dev/null)
           for e in libmp3lame libopus libvorbis aac flac; do
@@ -171,18 +188,10 @@ jobs:
           "$RES/tools/yt-dlp" --version
           # LibreSVIP 的包里有 4 条符号链接（`_internal/Python` 等），解压器没建出来的话
           # 这一句就会失败 —— 这正是工程格式互转在 mac 上能不能用的判据。
-          "$RES/tools/libresvip/libresvip-cli/libresvip-cli" plugin detail svp | head -3
+          svip=$("$RES/tools/libresvip/libresvip-cli/libresvip-cli" plugin detail svp 2>&1)
+          echo "$svip" | sed -n '1,3p'
 
           echo "布局、架构与总量都对 ✓"
-
-      # ⚠️ 与 MSI 那条一样：产物**先**传成 build artifact，再跑发布。这样万一后面某步红了，
-      #    DMG 仍然能在 Actions 页面下载到。
-      - name: 传 DMG（build artifact）
-        uses: actions/upload-artifact@v7
-        with:
-          name: v-synth-studio-dmg
-          path: src-tauri/target/release/bundle/dmg/*.dmg
-          if-no-files-found: error      # 没打出 DMG 却"成功"，比失败更糟
 
       - name: 传 DMG 到 Release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release
