@@ -684,6 +684,9 @@ pub struct Svsep {
     installed: bool,
     child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
+    /// 串行化启动流程。start() 中间会 await 健康检查；普通 Mutex 不能跨 await，
+    /// 所以用 tokio mutex 防止两个调用同时各自拉起一个 Python 后端。
+    start_lock: tokio::sync::Mutex<()>,
     /// 最近一次健康探测的结果与时间 —— 界面每几秒轮询一次，
     /// 没必要每次都真去打 HTTP。
     health: Mutex<Option<(Instant, bool)>>,
@@ -699,6 +702,7 @@ impl Svsep {
             installed,
             child: Mutex::new(None),
             port: Mutex::new(None),
+            start_lock: tokio::sync::Mutex::new(()),
             health: Mutex::new(None),
             last_error: Mutex::new(None),
         }
@@ -751,6 +755,9 @@ impl Svsep {
     ///
     /// 返回 `(端口, 是否新起)`。
     pub async fn start(&self) -> Result<(u16, bool), String> {
+        // Hold this across the probe/wait/spawn sequence: otherwise two concurrent
+        // invocations can both observe "not running" and launch separate backends.
+        let _start_guard = self.start_lock.lock().await;
         if let Some(p) = self.port() {
             if self.probe().await {
                 return Ok((p, false));

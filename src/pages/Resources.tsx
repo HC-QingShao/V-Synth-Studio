@@ -9,6 +9,7 @@ import {Chip, Panel, Stat} from '@/components/Panel'
 import {JobProgress} from '@/components/Job'
 import type {PageProps} from './types'
 import './Resources.css'
+import {useI18n} from '@/lib/i18n'
 
 /**
  * 资源库。
@@ -114,6 +115,7 @@ function verdictOf(c: CheckInfo): 'ok' | 'warn' | 'dead' {
 /* ══════════════════════════════════════════════════════════════════ 页面 ══ */
 
 export function Resources({onToast}: PageProps) {
+    const {t} = useI18n()
     /* 档位派生的材质：给库那些「自带 regular 默认值」的大玻璃用（Banner / Dialog） */
     const {material} = useMaterial()
     const [groups, setGroups] = useState<{
@@ -331,16 +333,16 @@ export function Resources({onToast}: PageProps) {
             {/* ── 工具条：搜索 / 分组筛选 / 两个动作 ── */}
             <div className="res-toolbar">
                 <SearchField
-                    aria-label="搜索资源"
+                    aria-label={t("搜索资源")}
                     clearLabel="清空搜索"
-                    placeholder="搜索名称、描述、标签…"
+                    placeholder={t("搜索名称、描述、标签…")}
                     value={query}
                     onValueChange={setQuery}
                     className="res-search"
                 />
                 <div className="res-chips">
                     <button type="button" className="res-chip" onClick={() => goGroup('')}>
-                        <Chip tone={activeGroup ? 'default' : 'accent'}>全部</Chip>
+                        <Chip tone={activeGroup ? 'default' : 'accent'}>{t("全部")}</Chip>
                     </button>
                     {groups.map((g) => (
                         <button
@@ -380,7 +382,7 @@ export function Resources({onToast}: PageProps) {
       */}
             <Banner
                 tone="warning"
-                title="说明"
+                title={t("说明")}
                 message={notice || DEFAULT_NOTICE}
                 material={material === 'liquid' ? 'clear' : 'regular'}
             />
@@ -421,14 +423,14 @@ export function Resources({onToast}: PageProps) {
             {/* ── 加载中 / 读取失败 / 空库 ── */}
             {loading && !groups.length && (
                 <Panel>
-                    <p className="muted">正在读取资源库…</p>
+                    <p className="muted">{t("正在读取资源库…")}</p>
                 </Panel>
             )}
 
             {!loading && loadErr && (
                 <Panel>
                     <div className="stack">
-                        <p className="finding-title">资源库读取失败</p>
+                        <p className="finding-title">{t("资源库读取失败")}</p>
                         <p className="finding-text">{loadErr}</p>
                         <div className="btn-row">
                             <Button icon="refresh" onClick={() => void load(true)}>
@@ -443,7 +445,7 @@ export function Resources({onToast}: PageProps) {
                 <Panel>
                     <div className="empty">
                         <Icon name="library" size={28}/>
-                        <p className="finding-title">资源库还是空的</p>
+                        <p className="finding-title">{t("资源库还是空的")}</p>
                         <Button icon="refresh" onClick={() => void load(true)}>
                             重新载入
                         </Button>
@@ -455,7 +457,7 @@ export function Resources({onToast}: PageProps) {
                 <Panel>
                     <div className="empty">
                         <Icon name="search" size={28}/>
-                        <p className="finding-title">没有匹配的资源</p>
+                        <p className="finding-title">{t("没有匹配的资源")}</p>
                         <Button
                             onClick={() => {
                                 setQuery('')
@@ -576,7 +578,7 @@ function CopyDialog({
         <GlassDialog
             open={!!value}
             onOpenChange={(o) => !o && onClose()}
-            title="手动复制链接"
+            title={t("手动复制链接")}
             description={value ? `${value.reason}。请手动全选复制：` : ''}
         >
             <input className="input res-copy-input" readOnly ref={inputRef} value={value?.url ?? ''}/>
@@ -629,12 +631,12 @@ function ResourceCard({
           {item.name || '未命名'}
         </span>
                 {item.official === true ? (
-                    <Chip tone="ok" title="来自官方 / 原作者渠道">
+                    <Chip tone="ok" title={t("来自官方 / 原作者渠道")}>
                         <Icon name="shield" size={11}/>
                         官方
                     </Chip>
                 ) : (
-                    <Chip title="社区或第三方渠道，自己判断可靠性">
+                    <Chip title={t("社区或第三方渠道，自己判断可靠性")}>
                         <Icon name="globe" size={11}/>
                         社区/第三方
                     </Chip>

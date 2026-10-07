@@ -16,6 +16,7 @@ import {downloadBytes, installLabel, type InstallStep, useInstaller} from '@/lib
 import {useJob} from '@/lib/useJob'
 import type {PageProps} from './types'
 import './Midi.css'
+import {useI18n} from '@/lib/i18n'
 
 /**
  * 人声转 MIDI —— 把干声扒成音符（GAME 的原生 Rust 移植）。
@@ -160,12 +161,13 @@ function TranscribeResult({result, preview, taskId}: {
     preview: MidiNote[]
     taskId: string | null
 }) {
+    const {t} = useI18n()
     return (
         <Panel>
             <PanelHead
-                title="结果"
+                title={t("结果")}
                 desc={`${result.notes} 个音符 · 预览前 ${preview.length} 个`}
-                extra={<Chip tone="ok">已写出</Chip>}
+                extra={<Chip tone="ok">{t("已写出")}</Chip>}
             />
             <div className="midi-roll-box">
                 <PianoRoll notes={preview}/>
@@ -176,9 +178,9 @@ function TranscribeResult({result, preview, taskId}: {
             </div>
             <div className="midi-notes">
                 <div className="midi-notes-head">
-                    <span>起点</span>
-                    <span>时长</span>
-                    <span>音高</span>
+                    <span>{t("起点")}</span>
+                    <span>{t("时长")}</span>
+                    <span>{t("音高")}</span>
                 </div>
                 {preview.slice(0, 40).map((n, i) => (
                     <div className="midi-note-row" key={i}>
@@ -229,6 +231,7 @@ function TranscribeResult({result, preview, taskId}: {
 /* ══════════════════════════════════════════════════════════ 页面 ══ */
 
 export function Midi({onToast, onNavigate}: PageProps) {
+    const {t} = useI18n()
     const [st, setSt] = useState<MidiStatus | null>(null)
     const [statusErr, setStatusErr] = useState<string | null>(null)
 
@@ -530,16 +533,16 @@ export function Midi({onToast, onNavigate}: PageProps) {
             <div className="midi-col">
                 <Panel>
                     <PanelHead
-                        title="干声素材"
+                        title={t("干声素材")}
                         desc="把「音轨分离」拆出来的人声给这里"
-                        extra={input ? <Chip tone="ok">已选</Chip> : <Chip>未选</Chip>}
+                        extra={input ? <Chip tone="ok">{t("已选")}</Chip> : <Chip>{t("未选")}</Chip>}
                     />
                     <input
                         type="text"
                         className="input"
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
-                        placeholder="D:\歌\干声.wav"
+                        placeholder={t("D:\\歌\\干声.wav")}
                         spellCheck={false}
                     />
                     <div className="btn-row">
@@ -570,7 +573,7 @@ export function Midi({onToast, onNavigate}: PageProps) {
                 </Panel>
 
                 <Panel>
-                    <PanelHead title="参数" desc="只有「去噪步数」值得反复试"/>
+                    <PanelHead title={t("参数")} desc="只有「去噪步数」值得反复试"/>
                     <Field
                         label="去噪步数"
                         hint={`默认 8 步。耗时几乎与它成正比。${
@@ -624,12 +627,12 @@ export function Midi({onToast, onNavigate}: PageProps) {
                         （`status.device.cuda`）—— 别按 `navigator` 或显卡名字猜：
                         真正的判据是「后端建得出一个 CUDA 会话」，只有后端探得到，
                         而猜错的方向恰好是最坏的那个（放出格子 → 跑起来才发现不行）。
-                        ⛔ 这里**不能套 `<Field>`**：它是个 `<label>`，而控件里面是
+                        ⛔ 这里**不能套 `<Field>{t("`**：它是个 `")}<label>`，而控件里面是
                         `<input type="radio">` —— 点标签上任意一处（包括下面那行说明）
                         都会激活第一个单选项，等于悄悄把推理方式改回「自动」。 */}
                     <div className="field">
-                        <span className="field-label">推理方式</span>
-                        {/* 禁用只加在 `<input type="radio">` 上，外层 `<label class="lg-segment">`
+                        <span className="field-label">{t("推理方式")}</span>
+                        {/* 禁用只加在 `<input type="radio">{t("` 上，外层 `")}<label class="lg-segment">`
                             照样收得到点击，所以「点了给提示、但不选中」要在**捕获阶段**做。
                             ⛔ 别给这个容器加 `pointer-events: none` 来表达禁用 —— 那就成了
                             点了毫无反应，而这正是用户会来报的那个问题。 */}
@@ -649,7 +652,7 @@ export function Midi({onToast, onNavigate}: PageProps) {
                             }}
                         >
                             <GlassSegmentedControl
-                                aria-label="推理方式"
+                                aria-label={t("推理方式")}
                                 items={DEVICE_MODES.map((m) => ({
                                     ...m,
                                     /* 锁死那一格：只有 `cuda.ok` 为假时锁 GPU。`disabled` 是给
@@ -675,12 +678,12 @@ export function Midi({onToast, onNavigate}: PageProps) {
                 </Panel>
 
                 <Panel>
-                    <PanelHead title="输出" desc="留空就写到音频同目录下的 midi 文件夹"/>
+                    <PanelHead title={t("输出")} desc="留空就写到音频同目录下的 midi 文件夹"/>
                     <DirectoryInput
                         value={outDir}
                         onChange={rememberOutDir}
-                        placeholder="留空 = 音频同目录\midi"
-                        title="选 MIDI 写到哪个目录"
+                        placeholder={t("留空 = 音频同目录\\midi")}
+                        title={t("选 MIDI 写到哪个目录")}
                         onToast={onToast}
                     />
                     <div className="btn-row">
@@ -703,21 +706,21 @@ export function Midi({onToast, onNavigate}: PageProps) {
             <div className="midi-col">
                 <Panel>
                     <PanelHead
-                        title="扒谱"
+                        title={t("扒谱")}
                         desc="进度看下面；界面照常能用"
                         extra={
                             running ? (
-                                <Chip tone="accent">运行中</Chip>
+                                <Chip tone="accent">{t("运行中")}</Chip>
                             ) : ready ? (
-                                <Chip tone="ok">可以开始</Chip>
+                                <Chip tone="ok">{t("可以开始")}</Chip>
                             ) : (
-                                <Chip tone="warn">缺依赖</Chip>
+                                <Chip tone="warn">{t("缺依赖")}</Chip>
                             )
                         }
                     />
 
                     {statusErr && (
-                        <Finding level="warn" title="读不到状态">
+                        <Finding level="warn" title={t("读不到状态")}>
                             {statusErr}
                         </Finding>
                     )}
@@ -767,7 +770,7 @@ export function Midi({onToast, onNavigate}: PageProps) {
                             pct={dl.total > 0 ? dlPct : null}
                             footer={
                                 <p className="hint">
-                                    这个包<strong>不支持续传</strong>，停下就要重来。
+                                    这个包<strong>{t("不支持续传")}</strong>，停下就要重来。
                                 </p>
                             }
                         >
@@ -783,7 +786,7 @@ export function Midi({onToast, onNavigate}: PageProps) {
                     )}
 
                     {installError && (
-                        <Finding level="warn" title="安装失败">
+                        <Finding level="warn" title={t("安装失败")}>
                             {installError}
                         </Finding>
                     )}
@@ -806,7 +809,7 @@ export function Midi({onToast, onNavigate}: PageProps) {
 
                     {estimate > 0 && !running && (
                         <p className="hint">
-                            ⚠️ 纯 CPU 下大约<strong> 10 秒换 1 秒音频</strong> —— 3 分钟干声就是半小时左右。
+                            ⚠️ 纯 CPU 下大约<strong>{t(" 10 秒换 1 秒音频")}</strong> —— 3 分钟干声就是半小时左右。
                         </p>
                     )}
 
@@ -837,7 +840,7 @@ export function Midi({onToast, onNavigate}: PageProps) {
                                 {st ? `（解压后 ${formatBytes(st.models.extractBytes)}）` : ''}
                                 。删完就扒不了谱了，得重新下
                                 {st ? ` ${formatBytes(st.models.zipBytes)}` : '几百 MB'}
-                                。已经转出来的 MIDI <strong>不会被删</strong>。
+                                。已经转出来的 MIDI <strong>{t("不会被删")}</strong>。
                             </>
                         }
                         idleText={
@@ -853,7 +856,7 @@ export function Midi({onToast, onNavigate}: PageProps) {
                 {(running || job) && (
                     <Panel>
                         <PanelHead
-                            title="进度"
+                            title={t("进度")}
                             desc={job?.title}
                             extra={<JobStatusChip status={job?.status ?? 'running'}/>}
                         />
@@ -865,7 +868,7 @@ export function Midi({onToast, onNavigate}: PageProps) {
                             <ProgressBar pct={Math.min(100, job?.percent ?? 0)}/>
                         </div>
                         {job?.error && (
-                            <Finding level="warn" title="失败">
+                            <Finding level="warn" title={t("失败")}>
                                 {job.error}
                             </Finding>
                         )}
@@ -884,7 +887,7 @@ export function Midi({onToast, onNavigate}: PageProps) {
                 )}
 
                 <Panel>
-                    <PanelHead title="许可与出处" desc="模型与代码是两套许可"/>
+                    <PanelHead title={t("许可与出处")} desc="模型与代码是两套许可"/>
                     <div className="midi-stats">
                         <Stat label="代码" value="MIT" sub="openvpi/GAME"/>
                         <Stat label="权重" value="CC BY-NC-SA 4.0" sub="非商业"/>

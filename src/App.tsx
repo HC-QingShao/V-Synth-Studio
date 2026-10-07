@@ -1,6 +1,7 @@
 import {type ReactNode, Suspense, lazy, useCallback, useEffect, useRef, useState} from 'react'
 import {api} from '@/lib/api'
 import {getConfig, onConfigError, saveConfig} from '@/lib/config'
+import {useI18n} from '@/lib/i18n'
 import type {AppState} from '@/lib/types'
 import {Icon, type IconName} from '@/components/Icon'
 import {GlassPanel, Panel} from '@/components/Panel'
@@ -93,6 +94,7 @@ function readTheme(): ThemeMode {
 }
 
 export default function App() {
+    const {t} = useI18n()
     const [active, setActive] = useState<PageId>(() => {
         const m = location.hash.match(/^#\/(\w+)/)
         return PAGES.find((p) => p.id === m?.[1])?.id ?? 'dashboard'
@@ -244,7 +246,7 @@ export default function App() {
                                 <span className="lg-selection-lens nav-lens" ref={lensRef} aria-hidden="true"/>
                                 {PAGES.map((p, i) => (
                                     <div key={p.id}>
-                                        {p.group !== PAGES[i - 1]?.group && <div className="nav-group">{p.group}</div>}
+                                        {p.group !== PAGES[i - 1]?.group && <div className="nav-group">{t(p.group)}</div>}
                                         <button
                                             type="button"
                                             className="nav-row"
@@ -252,22 +254,22 @@ export default function App() {
                                             onClick={() => navigate(p.id)}
                                         >
                                             <Icon name={p.icon} size={17}/>
-                                            <span className="nav-row-label">{p.title}</span>
+                                            <span className="nav-row-label">{t(p.title)}</span>
                                         </button>
                                     </div>
                                 ))}
                             </nav>
 
                             <div className="sidebar-foot">
-                                <ThemeSwitch value={theme} onChange={changeTheme}/>
+                                <ThemeSwitch value={theme} onChange={changeTheme} t={t}/>
                             </div>
                         </GlassPanel>
 
                         {/* ── 内容区：**不是玻璃**。正文用实色，字才读得清 ──── */}
                         <main className="app-main" id="main" tabIndex={-1}>
                             <header className="page-head">
-                                <h1 className="page-title">{current.title}</h1>
-                                <p className="page-sub">{current.sub}</p>
+                                <h1 className="page-title">{t(current.title)}</h1>
+                                <p className="page-sub">{t(current.sub)}</p>
                             </header>
 
                             <div className="page-body" key={active}>
@@ -359,11 +361,11 @@ function PageSkeleton() {
  * 它在侧栏那块玻璃**里面** —— 库的规矩是「不要玻璃叠玻璃」（放玻璃上的元素用填充和
  * 透明度，不再叠一层）。
  */
-function ThemeSwitch({value, onChange}: { value: ThemeMode; onChange: (m: ThemeMode) => void }) {
-    const labels: Record<ThemeMode, string> = {system: '跟随系统', light: '明亮', dark: '黑暗'}
+function ThemeSwitch({value, onChange, t}: { value: ThemeMode; onChange: (m: ThemeMode) => void; t: (text: string) => string }) {
+    const labels: Record<ThemeMode, string> = {system: t('跟随系统'), light: t('明亮'), dark: t('黑暗')}
     const order: ThemeMode[] = ['system', 'light', 'dark']
     return (
-        <div className="seg seg-block" role="group" aria-label="主题">
+        <div className="seg seg-block" role="group" aria-label={t('主题')}>
             {order.map((m) => (
                 <button
                     key={m}

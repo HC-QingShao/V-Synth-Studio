@@ -1,4 +1,5 @@
 import {useEffect, useState} from 'react'
+import {useI18n} from '@/lib/i18n'
 
 import {api} from '@/lib/api'
 import type {AppState, ToolInfo} from '@/lib/types'
@@ -100,6 +101,7 @@ export function Dashboard({
     /** 后端快照正在重拉 */
     refreshing: boolean
 }) {
+    const {t} = useI18n()
     const checks = computeChecks(state)
     const [packs, setPacks] = useState<Packs>({svsep: null, midi: null})
     const [checking, setChecking] = useState(false)
@@ -160,8 +162,8 @@ export function Dashboard({
                         <Button variant="primary" icon="play" onClick={() => onNavigate('convert')}>
                             开始转换工程
                         </Button>
-                        <Button onClick={() => onNavigate('video')}>解析 MV 链接</Button>
-                        <Button onClick={() => onNavigate('resources')}>打开资源库</Button>
+                        <Button onClick={() => onNavigate('video')}>{t('解析 MV 链接')}</Button>
+                        <Button onClick={() => onNavigate('resources')}>{t('打开资源库')}</Button>
                     </div>
                 </div>
             </Panel>
