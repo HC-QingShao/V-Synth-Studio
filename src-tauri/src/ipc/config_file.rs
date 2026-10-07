@@ -53,6 +53,10 @@ pub fn now_millis() -> u64 {
 pub fn default_config() -> Value {
     json!({
         "theme": "system",
+        /* 界面语言（`lib/i18n.ts` 的 `setUiLanguage` 存这一项）。
+           ⚠️ 它必须列在这里：没列出来的键 `load_config` 会当成不认识的过滤掉，
+           表现就是「切成英文、重启又回中文」，而且不报错。 */
+        "language": "zh-CN",
         "glassLevel": 2,
         "outputDir": "",
         "downloadDir": "",
