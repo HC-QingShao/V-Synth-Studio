@@ -19,10 +19,11 @@ import {useState} from 'react'
 import {GlassSegmentedControl} from '@ttqtt/liquid-glass-react'
 
 import {Button} from '@/components/Button'
-import {Panel, PanelHead} from '@/components/Panel'
+import {Panel, PanelHead, Finding} from '@/components/Panel'
 import {SwitchRow} from '@/components/SwitchRow'
 import {getConfig, saveConfig} from '@/lib/config'
 import {useWeScan, type WeItem} from '@/lib/wallpaper'
+import {capOk, type AppState} from '@/lib/types'
 import type {ToastFn} from '@/pages/types'
 
 import './WallpaperSettings.css'
@@ -45,10 +46,14 @@ const TYPE_LABEL: Record<string, string> = {
 /** 这几类现在画不出来（会退到预览图），界面上标一下。 */
 const TYPE_UNSUPPORTED = new Set(['web', 'application'])
 
-export function Wallpaper({onToast}: {onToast: ToastFn}) {
+export function Wallpaper({onToast, state}: {onToast: ToastFn; state: AppState | null}) {
     const {scan, error, busy, reload} = useWeScan()
     const [sel, setSel] = useState(() => String(getConfig()['wallpaper'] ?? ''))
     const [paused, setPaused] = useState(() => Boolean(getConfig()['wallpaperPaused']))
+    /* Wallpaper Engine 只有 Windows 版 —— 别的平台上这一整块没有素材来源
+       （判据在后端 `platform.rs::caps`），所以只留静态图，不给「跟随 / 库里挑」。 */
+    const we = state?.caps?.wallpaper
+    const weOk = capOk(we)
 
     const mode = sel === '' ? 'static' : sel === 'we:current' ? 'current' : 'pick'
     const items = scan?.items ?? []
@@ -78,25 +83,36 @@ export function Wallpaper({onToast}: {onToast: ToastFn}) {
                     desc="只读你自己 Steam 库里的壁纸；不下载、不改动、也不会上传任何东西"
                 />
                 <div className="wp-mode">
-                    <GlassSegmentedControl
-                        aria-label="背景来源"
-                        items={MODES}
-                        value={mode}
-                        onValueChange={onMode}
-                    />
-                    <Button variant="ghost" icon="refresh" onClick={() => void reload()} disabled={busy}>
-                        {busy ? '扫描中…' : '重新扫描'}
-                    </Button>
+                    {weOk && (
+                        <GlassSegmentedControl
+                            aria-label="背景来源"
+                            items={MODES}
+                            value={mode}
+                            onValueChange={onMode}
+                        />
+                    )}
+                    {weOk && (
+                        <Button variant="ghost" icon="refresh" onClick={() => void reload()} disabled={busy}>
+                            {busy ? '扫描中…' : '重新扫描'}
+                        </Button>
+                    )}
                 </div>
 
-                {error && <p className="wp-warn">扫描失败：{error}</p>}
-                {scan && !scan.found && (
+                {!weOk && (
+                    <Finding level="warn" title="这个平台用不了 Wallpaper Engine 壁纸">
+                        {we?.why ?? 'Wallpaper Engine 只有 Windows 版'}。
+                        背景只能用自带的静态图；玻璃材质、主题、配色都不受影响。
+                    </Finding>
+                )}
+
+                {weOk && error && <p className="wp-warn">扫描失败：{error}</p>}
+                {weOk && scan && !scan.found && (
                     <p className="wp-warn">
                         没找到 Wallpaper Engine（默认安装位置和 Steam 的 libraryfolders.vdf 里都没有）。
                         装在别处的话，到这里手动改一次 <code>config.json</code> 的 <code>weDir</code> 即可。
                     </p>
                 )}
-                {scan?.found && (
+                {weOk && scan?.found && (
                     <p className="wp-dim">
                         Wallpaper Engine：{scan.weDir}
                         {scan.current ? ` ／ 当前：${scan.current.title}` : ''}
@@ -104,7 +120,7 @@ export function Wallpaper({onToast}: {onToast: ToastFn}) {
                 )}
             </Panel>
 
-            {mode === 'pick' && (
+            {weOk && mode === 'pick' && (
                 <Panel>
                     <PanelHead title="挑一张" desc={`扫到 ${items.length} 张`}/>
                     <ul className="wp-list">

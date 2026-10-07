@@ -11,6 +11,7 @@ import {DropHint, useFilePick} from '@/components/FilePick'
 import {baseName, errText, formatBytes} from '@/lib/format'
 import {POLL_STATUS, useStatusPoll} from '@/lib/polling'
 import {downloadBytes, extractedBytes, installLabel, type InstallStep, useInstaller,} from '@/lib/useInstaller'
+import {capOk} from '@/lib/types'
 import type {PageProps} from './types'
 import './Svsep.css'
 
@@ -183,7 +184,11 @@ function ResultTracks({
 
 /* ════════════════════════════════════════════════════════ 主组件 ══ */
 
-export function Svsep({onNavigate, onToast}: PageProps) {
+export function Svsep({onNavigate, onToast, state}: PageProps) {
+    /* 离线引擎整条链（运行时包 + 模型 + 推理方式 + 一键删依赖）只有 Windows 有 ——
+       判据在后端 `platform.rs::caps`，这里不自己看 `state.platform`。 */
+    const localEngine = state?.caps?.svsepLocal
+    const localOk = capOk(localEngine)
     const [st, setSt] = useState<SvsepStatus | null>(null)
     const [backend, setBackend] = useState<Record<string, unknown> | null>(null)
     /**
@@ -688,45 +693,57 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                     </p>
                 </Panel>
 
-                <Panel>
-                    <PanelHead title="分离模式" desc="两种引擎产出不同"/>
-                    <div className="choice-grid">
-                        {ENGINES.map((e) => (
-                            <button
-                                key={e.id}
-                                type="button"
-                                className="choice"
-                                aria-pressed={engine === e.id}
-                                onClick={() => setEngine(e.id)}
-                            >
-                <span className="choice-head">
-                  <span className="choice-label">{e.name}</span>
-                    {engine === e.id && <Chip tone="accent">已选</Chip>}
-                </span>
-                                <span className="choice-desc">{e.desc}</span>
-                                <span className="svsep-cost">{e.cost}</span>
-                            </button>
-                        ))}
-                    </div>
-                    <p className="hint">{ESTIMATE_NOTE}。</p>
+                {localOk ? (
+                    <Panel>
+                        <PanelHead title="分离模式" desc="两种引擎产出不同"/>
+                        <div className="choice-grid">
+                            {ENGINES.map((e) => (
+                                <button
+                                    key={e.id}
+                                    type="button"
+                                    className="choice"
+                                    aria-pressed={engine === e.id}
+                                    onClick={() => setEngine(e.id)}
+                                >
+                                    <span className="choice-head">
+                                        <span className="choice-label">{e.name}</span>
+                                        {engine === e.id && <Chip tone="accent">已选</Chip>}
+                                    </span>
+                                    <span className="choice-desc">{e.desc}</span>
+                                    <span className="svsep-cost">{e.cost}</span>
+                                </button>
+                            ))}
+                        </div>
+                        <p className="hint">{ESTIMATE_NOTE}。</p>
 
-                    <div className="btn-row">
-                        <Button
-                            variant="primary"
-                            icon="play"
-                            loading={busy}
-                            disabled={!file || !modelsOk || !runtimeReady}
-                            onClick={() => void doSeparate()}
-                        >
-                            开始分离
-                        </Button>
-                        {task && !settled && (
-                            <Button variant="ghost" icon="x" onClick={() => void doCancel()}>
-                                取消
+                        <div className="btn-row">
+                            <Button
+                                variant="primary"
+                                icon="play"
+                                loading={busy}
+                                disabled={!file || !modelsOk || !runtimeReady}
+                                onClick={() => void doSeparate()}
+                            >
+                                开始分离
                             </Button>
-                        )}
-                    </div>
-                </Panel>
+                            {task && !settled && (
+                                <Button variant="ghost" icon="x" onClick={() => void doCancel()}>
+                                    取消
+                                </Button>
+                            )}
+                        </div>
+                    </Panel>
+                ) : (
+                    /* 这一栏原本是「选哪套模型 + 开始分离」。引擎在这个平台不存在，
+                    留着两颗按钮只会让用户以为「下了就能用」—— 说清并指向在线那条路。 */
+                    <Panel>
+                        <PanelHead title="离线引擎" desc="这个平台没有它的运行时包"/>
+                        <Finding level="warn" title="本平台用不了离线分离">
+                            {localEngine?.why ?? '这个平台没有离线分离的运行时包'}。
+                            分离请用右栏的「在线分离：MVSEP」—— 那条路与本平台无关。
+                        </Finding>
+                    </Panel>
+                )}
 
                 <Panel>
                     <PanelHead title="分离完做什么"/>
@@ -762,6 +779,15 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                         title="离线引擎"
                         extra={running ? <Chip tone="ok">运行中</Chip> : <Chip>空闲</Chip>}
                     />
+                    {/* 没有引擎的平台上「运行时：缺失 / 模型：缺失」是会误导人的 ——
+                        那两格看着像「下完就能用」，而这里根本没有可下的包。 */}
+                    {!localOk && (
+                        <Finding level="warn" title="这个平台没有离线引擎">
+                            {localEngine?.why ?? '这个平台没有离线分离的运行时包'}。
+                            下面的「在线分离：MVSEP」照常用。
+                        </Finding>
+                    )}
+                    {localOk && (
                     <div className="svsep-stats">
                         <Stat
                             label="服务"
@@ -790,6 +816,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                         />
                         {badge && <Stat label="设备" value={badge}/>}
                     </div>
+                    )}
 
                     {dl && (installer.installing || dl.active) && (
                         /* 下载与解压共用这一条进度条，标签必须说清是哪一段：解压的分母跟
@@ -835,7 +862,9 @@ export function Svsep({onNavigate, onToast}: PageProps) {
               顺序是「运行时 → 模型 →（没有 N 卡时）显卡加速包」，中间不需要再点
               任何东西（状态机在 `lib/useInstaller.ts`）。
               全装好之后这颗按钮**不出现** —— 上面那排 Stat 就是状态摘要。 */}
-                    {installText && (
+                    {/* 只在有引擎的平台上给安装入口 —— 别的平台这颗按钮会去下 4.9 GB
+                        的 Windows 运行时包（后端也拒，但不该让用户点到）。 */}
+                    {localOk && installText && (
                         <div className="btn-row">
                             <Button
                                 variant="primary"
@@ -856,6 +885,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                推出来**（后端 `svsep::apply_infer_mode`）—— 分成两处，用户就得在两处
                做同一个决定，还可能出现「选了 GPU 但加速没开」这种自相矛盾的状态。
                选 GPU 时后端会顺手把没下的加速包下上（A 卡 / 核显）。 */}
+                    {localOk && (
                     <div className="btn-row">
                         <div className="svsep-infer">
                             <span className="dim">推理方式</span>
@@ -874,6 +904,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                             输出目录
                         </Button>
                     </div>
+                    )}
                     {st?.dml?.nvidia && (
                         <p className="hint">检测到 NVIDIA 显卡：选 GPU（或自动）就走 CUDA，不需要加速包。</p>
                     )}
@@ -888,6 +919,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                     {/* 一键删依赖：几万个文件，后端在后台删，进度看 st.download.delete。
                         不做条件渲染 —— 引擎还没下全的时候也该留着这个入口，用户可能想
                         把之前下了一半的东西清掉。 */}
+                    {localOk && (
                     <DangerZone
                         label="删除全部依赖"
                         armed={armDelete}
@@ -910,6 +942,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                             </>
                         }
                     />
+                    )}
                     {st?.lastError && (
                         <Finding level="warn" title="上次启动失败">
                             {st.lastError}
@@ -1004,7 +1037,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
                     </p>
                 </Panel>
 
-                {queues && (queues.uvr || queues.roformer) && (
+                {localOk && queues && (queues.uvr || queues.roformer) && (
                     <Panel>
                         <PanelHead title="引擎队列" desc="本地任务是串行的，一次只跑一个"/>
                         <div className="svsep-stats">
@@ -1050,7 +1083,7 @@ export function Svsep({onNavigate, onToast}: PageProps) {
             ⚠️ 只在**运行时还没装好**时弹（`askDirOnce` 判的），装好之后同一个会话
             里不再出现。 */}
                 <GlassDialog
-                    open={!!dirAsk}
+                    open={!!dirAsk && localOk}
                     onOpenChange={(o) => {
                         if (!o) closeDirAsk(false)
                     }}

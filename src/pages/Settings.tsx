@@ -117,7 +117,7 @@ export function Settings({
                     <Appearance theme={theme} onThemeChange={onThemeChange}/>
                 )}
                 {section === 'wallpaper' && (
-                    <Wallpaper onToast={onToast}/>
+                    <Wallpaper onToast={onToast} state={state}/>
                 )}
                 {section === 'paths' && (
                     <Paths cfg={cfg} state={state} onSave={save} onToast={onToast}/>
@@ -568,7 +568,13 @@ function About({
                     <Stat
                         label="配置形态"
                         value={state?.installed ? '安装版' : '绿色版'}
-                        sub={state?.installed ? '配置在 %APPDATA%' : '配置在程序目录'}
+                        /* 安装版的可写目录三端不一样（`%APPDATA%` / `~/Library/Application Support`），
+                           别在界面上写死 Windows 那一套。 */
+                        sub={
+                            state?.installed
+                                ? `配置在${state?.platform === 'darwin' ? ' ~/Library/Application Support' : ' %APPDATA%'}`
+                                : '配置在程序目录'
+                        }
                     />
                     <Stat
                         label="外部工具"

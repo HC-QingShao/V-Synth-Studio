@@ -196,6 +196,8 @@ pub async fn get_state(st: super::St<'_>) -> Cmd {
         },
         "platform": crate::platform::node_platform_name(),
         "platformDesc": super::config_file::platform_desc(),
+        // 这个平台上哪些功能做不到 —— 界面据此置灰入口（判据只在 platform.rs 一份）
+        "caps": crate::platform::caps(),
         // 安装版（Program Files）还是绿色版（解压即用）—— 界面给恢复提示时用得上
         "installed": st.installed,
     }))

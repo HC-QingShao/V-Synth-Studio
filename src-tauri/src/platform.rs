@@ -199,3 +199,83 @@ pub fn find_binary(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
     }
     None
 }
+
+/* ══════════════════════════════════ 平台能力 ══════════════════════════════════ */
+
+/// 离线分离引擎的运行时包是 Windows 专属：`python.exe`（embeddable 发行版）
+/// 加 `onnxruntime-directml` 的 win_amd64 wheel，见 `svsep.rs` 的 `RUNTIME_URL`。
+const SVSEP_LOCAL_WHY: &str = "离线分离的运行时包是 Windows 专属（python.exe + DirectML）";
+
+/// 这个平台上「没有本地分离引擎」的原因；`None` = 有。
+///
+/// 界面置灰用它，命令层拒绝也用它 —— 同一句话只写一份，别在两边各编一句。
+pub fn local_engine_why() -> Option<&'static str> {
+    if cfg!(windows) { None } else { Some(SVSEP_LOCAL_WHY) }
+}
+
+/// 哪些功能在这个平台上**根本做不到**。
+///
+/// 形状是 `{"<功能>": {"ok": bool, "why": "不可用时给用户看的一句话"}}`：
+/// 界面按 `ok` 置灰入口、按 `why` 说明原因，两件事都只在这里定义一份 ——
+/// 前端不再自己判平台（那份判断会和这里漂开）。
+///
+/// ⚠️ 判据只写**平台事实**，不写探测结果。「装没装 / 探没探到」由各自的接口回答
+/// （例如显卡能不能用问 `midi_status.device.cuda`）。
+pub fn caps() -> serde_json::Value {
+    let win = cfg!(windows);
+    let mac = cfg!(target_os = "macos");
+    let cap = |ok: bool, why: &str| {
+        if ok {
+            serde_json::json!({ "ok": true })
+        } else {
+            serde_json::json!({ "ok": false, "why": why })
+        }
+    };
+    serde_json::json!({
+        /* 背景壁纸读的是 Wallpaper Engine 的 Steam 库，而 WE 只有 Windows 版 ——
+        别的平台上「扫不到」不是没装，是这东西在那个系统上不存在。 */
+        "wallpaper": cap(win, "Wallpaper Engine 只有 Windows 版，Steam 库里读不到它"),
+        "svsepLocal": cap(win, SVSEP_LOCAL_WHY),
+        "svsepDirectml": cap(win, "DirectML 是 Windows 的显卡 API"),
+        /* 显卡推理走 CUDA：Apple 从 macOS 10.14 起就不再支持，机器上不可能有。 */
+        "midiGpu": cap(!mac, "显卡推理走 CUDA，而 macOS 上没有 CUDA"),
+        /* 送回收站靠 Shell.Application 的「删除」动词；别的平台没有统一 API，
+        `move_to_trash` 那边退回硬删。 */
+        "trash": cap(win, "非 Windows 没有统一的回收站 API，删除即彻底删除"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 能力表只在**做不到**的那些项上给原因 —— 给了 `ok: true` 又带 `why` 会让人以为有坑。
+    #[test]
+    fn caps_explain_only_the_unsupported() {
+        let v = caps();
+        let obj = v.as_object().expect("caps 是个对象");
+        assert!(!obj.is_empty());
+        for (name, c) in obj {
+            let ok = c.get("ok").and_then(|b| b.as_bool());
+            assert!(ok.is_some(), "{name} 缺 ok");
+            if ok == Some(true) {
+                assert!(c.get("why").is_none(), "{name} 可用就不该带原因");
+            } else {
+                assert!(
+                    c.get("why").and_then(|w| w.as_str()).is_some_and(|w| !w.is_empty()),
+                    "{name} 不可用却没有原因 —— 界面只能显示一句空话"
+                );
+            }
+        }
+        // Windows 是唯一出货平台，这几项在它上面必须都是可用的
+        if cfg!(windows) {
+            for name in ["wallpaper", "svsepLocal", "svsepDirectml", "midiGpu", "trash"] {
+                assert_eq!(
+                    obj[name].get("ok").and_then(|b| b.as_bool()),
+                    Some(true),
+                    "{name} 在 Windows 上应当可用"
+                );
+            }
+        }
+    }
+}

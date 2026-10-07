@@ -221,6 +221,15 @@ const FAILED_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 /// - **失败** ⇒ 只留 [`FAILED_TTL`]：用户可能正开着这个界面去装音轨分离或加速包，
 ///   装完不重启就该能解锁；30 秒够短，也够挡住轮询。
 pub fn cuda_info(dll: Option<&Path>) -> CudaInfo {
+    /* macOS 上不必去问 ONNX Runtime：CUDA 在那上面不存在（Apple 从 10.14 起就不再支持），
+    问了只会得到「这份 ORT 里没有 CUDA provider（CPU 构建）」——那句话把用户引向
+    「换一份 ONNX Runtime」，而换哪一份都没用。 */
+    if cfg!(target_os = "macos") {
+        return CudaInfo {
+            available: false,
+            detail: "macOS 上没有 CUDA，显卡推理用不了；CPU 推理正常".into(),
+        };
+    }
     if let Ok(cache) = CUDA_PROBE.lock() {
         if let Some((at, info)) = cache.as_ref() {
             let fresh = info.available || at.elapsed() < FAILED_TTL;

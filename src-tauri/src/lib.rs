@@ -299,6 +299,8 @@ pub struct AppPaths {
 ///
 /// 判据是 `data/resources.json` 存在（随包分发的只读数据，两种形态都在）。
 ///
+/// macOS 的 `.app` 一律按安装版处理 —— 理由见下面 `in_macos_bundle` 那段。
+///
 /// ⚠️ **不能用前端入口当哨兵**：前端是 `frontendDist` 的纯构建产物，被 Tauri
 /// 嵌进二进制，磁盘上不再留一个可寻址的目录。而 `data/` 与 `tools/` 是
 /// **运行时**要找的东西，必须留在磁盘上。
@@ -322,7 +324,15 @@ fn resolve_paths(
      * 所以真正的判据是「程序目录能不能写」：
      *   - 能写（绿色版、解压在用户目录）→ 配置放旁边，整个目录可以拷着走
      *   - 不能写（装在 Program Files）→ 配置放 %APPDATA%
+     *
+     * ⚠️ **macOS 上不看可写位**：`.app` 拖进「应用程序」后归当前用户所有、目录
+     * 也能写，照可写位判就会把配置写进 `Contents/Resources/data/` —— 那会改到
+     * 应用包自己的内容（签名随之失效，升级一覆盖就没了）。bundle 里的东西一律
+     * 当只读，可写目录走 `app_data_dir`（`~/Library/Application Support/<id>`）。
      */
+    let in_macos_bundle = resource_dir
+        .as_deref()
+        .is_some_and(|rd| rd.to_string_lossy().contains(".app/Contents/"));
     let mut root_from_resource: Option<PathBuf> = None;
     if let Some(rd) = resource_dir {
         if has_data(&rd) {
@@ -331,7 +341,7 @@ fn resolve_paths(
     }
     if let Some(rd) = root_from_resource {
         let local_data = rd.join("data");
-        if is_writable(&local_data) {
+        if is_writable(&local_data) && !in_macos_bundle {
             return Some(AppPaths {
                 writable: local_data,
                 root: rd,
@@ -403,11 +413,18 @@ fn is_writable(dir: &Path) -> bool {
 /// ⚠️ 目录名与 `tauri.conf.json` 的 `identifier` 无关是有意为之 —— 它是最后一道
 /// 兜底，不该假装知道 bundle 标识。
 fn fallback_data_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(std::env::temp_dir);
+    /* macOS 上 `APPDATA` / `XDG_CONFIG_HOME` 都不存在，别落到 `~/.config` ——
+       那就与 Tauri 的 `app_data_dir()`（`~/Library/Application Support/<id>`）
+       分成两处了，同一个程序的数据会散在两个目录里。 */
+    let base = if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
+    } else {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    }
+    .unwrap_or_else(std::env::temp_dir);
     base.join("com.qingmu.vocalworkstation")
 }
 

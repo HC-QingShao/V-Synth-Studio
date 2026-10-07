@@ -62,7 +62,36 @@ export interface AppState {
     author?: string
     /** 安装版（Program Files）还是绿色版（解压即用） */
     installed?: boolean
+    /** 这个平台上哪些功能做不到（判据在后端 `platform.rs::caps`） */
+    caps?: Caps
 }
+
+/**
+ * 一项平台能力。`ok: false` 时必带 `why` —— 界面要能说清「为什么这里用不了」。
+ *
+ * ⚠️ **判断一律走 {@link capOk}**，别自己写 `caps?.x?.ok`：字段缺失（老后端、回包被裁）
+ * 时那种写法会把功能判成不可用，而默认应当是「照旧可用」。
+ */
+export interface CapInfo {
+    ok: boolean
+    why?: string
+}
+
+export interface Caps {
+    /** 背景壁纸：读 Wallpaper Engine 的 Steam 库 */
+    wallpaper?: CapInfo
+    /** 本地音轨分离引擎（运行时可下载包） */
+    svsepLocal?: CapInfo
+    /** 显卡加速包（DirectML） */
+    svsepDirectml?: CapInfo
+    /** 人声转 MIDI 的 GPU 档（CUDA） */
+    midiGpu?: CapInfo
+    /** 删除进回收站 */
+    trash?: CapInfo
+}
+
+/** 这项能力在这个平台上可用吗。字段缺失按可用算（见 {@link CapInfo} 上的警告）。 */
+export const capOk = (c?: CapInfo): boolean => c?.ok !== false
 
 /**
  * 后端任务（`ipc/jobs.rs`）。

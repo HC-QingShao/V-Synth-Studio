@@ -16,6 +16,20 @@ use serde_json::{Value, json};
 
 use super::Cmd;
 
+/* ══════════════════════════════ 平台闸门 ══════════════════════════════ */
+
+/// 本地分离引擎在这个平台上有没有可下的运行时。
+///
+/// 没有就**在下第一块字节之前**拒绝：运行时是 4.9 GB 的 Windows 专属包，让用户
+/// 等它下完（甚至解完）再失败是最糟的收场。原因那句话与界面置灰用的是同一份
+/// （`platform::local_engine_why`）。
+fn require_local_engine() -> Result<(), String> {
+    match crate::platform::local_engine_why() {
+        None => Ok(()),
+        Some(why) => Err(format!("{why}。想分离请用「在线分离：MVSEP」。")),
+    }
+}
+
 /* ══════════════════════════════ 全局状态（下载 / 删除） ══════════════════════════════ */
 
 /// 大包下载进度。前端每 2 秒轮询一次 `svsep_status` 就能看到它动。
@@ -225,6 +239,7 @@ pub async fn svsep_status(st: super::St<'_>) -> Cmd {
 /// 起分离服务。已经起着就原样回（`started: false`）。
 #[tauri::command]
 pub async fn svsep_start(st: super::St<'_>) -> Cmd {
+    require_local_engine()?;
     let (port, started) = st.inner().svsep.start().await.map_err(|e| e.to_string())?;
     let status = st
         .inner()
@@ -284,6 +299,7 @@ pub async fn svsep_models_download(st: super::St<'_>) -> Cmd {
 /// `python.exe` 与 `backend/` 必须待在一起，所以它俩跟着一起走。
 #[tauri::command]
 pub async fn svsep_runtime_download(st: super::St<'_>) -> Cmd {
+    require_local_engine()?;
     let root = st.inner().root.clone();
     let writable = st.inner().svsep.writable().to_path_buf();
     let url = crate::svsep::runtime_url();
@@ -394,6 +410,7 @@ pub async fn svsep_set_runtime_dir(st: super::St<'_>, dir: String) -> Cmd {
 /// 自己的五轮重试就够。所以它**不抢** `DL_ACTIVE`，界面也不该拿它当大包显示。
 #[tauri::command]
 pub async fn svsep_dml_download(st: super::St<'_>) -> Cmd {
+    require_local_engine()?;
     start_dml_download(st.inner())
 }
 
@@ -402,6 +419,7 @@ pub async fn svsep_dml_download(st: super::St<'_>) -> Cmd {
 /// 两个地方用它：用户在「安装扩展包」的链条里走到那一步，以及选了 GPU 推理时的
 /// 自动补装（见 `svsep_set_inference`）。回包是「开始了」，不是「下完了」。
 fn start_dml_download(st: &Arc<super::AppState>) -> Result<Value, String> {
+    require_local_engine()?;
     if DL_ACTIVE.load(Ordering::Relaxed) == 1 {
         let now = DL_KIND.lock().ok().and_then(|k| *k).unwrap_or("包");
         return Err(format!("{now}正在下载中，等它下完再下加速包。"));
@@ -592,6 +610,7 @@ fn multipart_body(boundary: &str, filename: &str, content_type: &str, bytes: &[u
 /// 内部：服务没起就先起（用户点「开始分离」时它通常还没起来）。
 #[tauri::command]
 pub async fn svsep_separate(st: super::St<'_>, path: String, engine: Option<String>) -> Cmd {
+    require_local_engine()?;
     let engine = engine.unwrap_or_else(|| "roformer".into());
     let p = std::path::Path::new(&path);
     if !p.is_file() {
