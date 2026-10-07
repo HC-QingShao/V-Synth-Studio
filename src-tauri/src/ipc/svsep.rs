@@ -143,7 +143,12 @@ fn spawn_download<F>(kind: &'static str, job: F) -> Result<Value, String>
 where
     F: Future<Output = Result<crate::svsep::FetchOutcome, String>> + Send + 'static,
 {
-    if DL_ACTIVE.load(Ordering::Relaxed) == 1 {
+    // Atomic CAS closes the check-then-set race: two simultaneous button clicks
+    // must not both enter the download section.
+    if DL_ACTIVE
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         let now = DL_KIND.lock().ok().and_then(|k| *k).unwrap_or("包");
         let now = match now {
             "runtime" => "运行时",
@@ -153,7 +158,8 @@ where
         };
         return Err(format!("{now}正在下载中。想换一个就先暂停或停止它。"));
     }
-    if DEL_ACTIVE.load(Ordering::Relaxed) {
+    if DEL_ACTIVE.load(Ordering::Acquire) {
+        DL_ACTIVE.store(0, Ordering::Release);
         return Err("正在删除依赖文件，等它删完再下（删到一半开始下会互相拆台）。".into());
     }
     if let Ok(mut e) = DL_ERROR.lock() {
